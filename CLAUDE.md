@@ -172,15 +172,16 @@ breaking change.
     `test/acceptance/go.mod` requires through
     `replace github.com/divbast/ci => ../../.ci`: the suite is a Go module of
     its own, so the root module imports nothing from ci;
-  - `go/golangci.yml`, the one golangci-lint configuration, and
-    `.github/actionlint.yaml`.
+  - `.github/actionlint.yaml`. golangci-lint runs under this repository's
+    own `.golangci.yml`, never ci's `go/golangci.yml`.
 
   A change to ci reaches this repository only through the Renovate PR that
   moves every pin of it at once. `just setup`, and the pin check
   (`divbast-pin`) in each ci workflow that runs this repository's code,
   refuse workflows that call ci at more than one commit
 - **divbast/renovate-config** holds the presets `renovate.json` extends.
-  `renovate.json` adds nothing of its own yet
+  `renovate.json` adds one rule of its own: templ's runtime and its
+  generator move in one PR
 - **divbast/infra** holds the org's settings, this repository's rulesets,
   the `divbast-renovate` App, the `renovate`
   environment and `PISATI_AUTOMERGE`
@@ -203,11 +204,14 @@ breaking change.
   -C test/acceptance test -run TestServes ./...` runs one test
 - `just test` — build, then the acceptance suite
 - `just lint` — pinact, zizmor, actionlint, ShellCheck and shfmt, the Go
-  gates (the compiler, `go vet`, `go fix -diff`, `go mod tidy -diff`,
-  `golangci-lint fmt --diff` and `golangci-lint run`), `go-test`, `reuse
-  lint`, hadolint and `docker build --check`.
-  `go-test` runs every Go test of the root module under the race detector;
-  the acceptance module is not part of it
+  gates (`go-gates`, `go-unit`, `vuln` and `secrets`), `reuse lint`,
+  hadolint and `docker build --check`. `go-gates` runs the compiler,
+  `go fix -diff`, `go mod tidy -diff`, `go mod verify` and `golangci-lint
+  run`, which reports formatting too, in the root module and the
+  acceptance module, and tidies and verifies `tools/`. `go-unit` runs the
+  root module's tests under the race detector, in random order; the
+  acceptance module is not part of it. `vuln` runs govulncheck over both
+  modules, and `secrets` runs betterleaks over the history of every ref
 - `just archive`, `just scan` — write the image as an OCI archive, then run
   `divbast-scan` over it and the published `:latest`. Needs network access
   to ghcr.io
@@ -217,7 +221,7 @@ breaking change.
 ## Where the toolchain comes from
 
 - **`mise.toml` is where tool versions are written.** Go, golangci-lint,
-  hadolint, ShellCheck, shfmt, actionlint, reuse, just, pinact, trivy,
+  betterleaks, hadolint, ShellCheck, shfmt, actionlint, reuse, just, pinact, trivy,
   grype, zizmor and cosign are all listed there. Every justfile recipe but `setup`, which
   installs them, runs through `mise exec`, so a recipe resolves those
   binaries and not a same-named one on PATH. The recipes that call GitHub,
@@ -280,8 +284,8 @@ breaking change.
   host, ask for the same one. The assertions (`StatusIs`, `Answers`,
   `Refuses` and the rest) are the harness's too, shared with every divbast
   image. An app gives each thing it serves a test, one topic per file
-- **Go is modern and idiomatic, and linted strictly**, under ci's
-  `go/golangci.yml`. Bash is for what is short and will stay so: the
+- **Go is modern and idiomatic, and linted strictly**, under
+  `.golangci.yml`, which sets the Go Development Principles below. Bash is for what is short and will stay so: the
   justfile's recipes. A check that runs inside a Containerfile build stage
   is the exception, since a build stage has bash and no Go: it stays bash,
   under ShellCheck `enable=all`, shfmt and `set -euo pipefail`, with a Go

@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
-// Package acceptance runs the acceptance suite against the image IMAGE
+// Package acceptance_test runs the acceptance suite against the image IMAGE
 // names, under the engine ENGINE names, docker unless it says podman.
 // Every container it starts runs under exactly the confinement the image's
 // contract claims, through divbast's harness, so no check can pass under a
 // looser one. With IMAGE unset there is nothing to test, and every test
 // skips.
-package acceptance
+package acceptance_test
 
 import (
 	"context"
@@ -17,29 +17,33 @@ import (
 	"time"
 
 	"github.com/divbast/ci/harness"
+	"go.uber.org/goleak"
 )
 
 // sweepWithin bounds the sweep of what an earlier run left behind.
 const sweepWithin = 2 * time.Minute
 
 // TestMain removes every container, network and volume a run that died
-// left behind, before any test starts its own, and the probe volumes this
-// run made once the tests are done. Without an image there is nothing to
-// sweep for, and no engine is asked.
+// left behind, before any test starts its own. Once the tests are done, it
+// fails the run if they left a goroutine running, then removes the probe
+// volumes this run made. Without an image there is nothing to sweep for,
+// and no engine is asked.
 func TestMain(m *testing.M) {
 	if os.Getenv("IMAGE") == "" {
-		os.Exit(m.Run())
+		goleak.VerifyTestMain(m)
+		return
 	}
 	if err := sweep(); err != nil {
 		fmt.Fprintln(os.Stderr, "acceptance:", err)
 		os.Exit(1)
 	}
-	code := m.Run()
-	if err := removeProbeVolumes(); err != nil {
-		fmt.Fprintln(os.Stderr, "acceptance:", err)
-		code = max(code, 1)
-	}
-	os.Exit(code)
+	goleak.VerifyTestMain(m, goleak.Cleanup(func(code int) {
+		if err := removeProbeVolumes(); err != nil {
+			fmt.Fprintln(os.Stderr, "acceptance:", err)
+			code = max(code, 1)
+		}
+		os.Exit(code)
+	}))
 }
 
 // removeProbeVolumes is [harness.Engine.RemoveProbeVolumes] under the

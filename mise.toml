@@ -4,6 +4,8 @@
 [tools]
 "core:go" = "1.27.4"
 "aqua:golangci/golangci-lint" = "2.15.0"
+# For the secrets recipe, which scans the whole history
+"aqua:betterleaks/betterleaks" = "1.10.1"
 
 "aqua:hadolint/hadolint" = "2.15.1"
 "aqua:koalaman/shellcheck" = "0.11.0"

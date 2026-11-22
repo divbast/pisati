@@ -56,8 +56,10 @@ func TestLogged(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/nothing", http.NoBody))
 
 	var entry struct {
-		Msg, Method, Path string
-		Status            int
+		Msg    string `json:"msg"`
+		Method string `json:"method"`
+		Path   string `json:"path"`
+		Status int    `json:"status"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &entry); err != nil {
 		t.Fatalf("the log line %q is not JSON: %v", out.String(), err)

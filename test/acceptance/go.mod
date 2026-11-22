@@ -5,7 +5,10 @@ module github.com/divbast/pisati/test/acceptance
 
 go 1.27.4
 
-require github.com/divbast/ci v0.0.0-00010101000000-000000000000
+require (
+	github.com/divbast/ci v0.0.0-00010101000000-000000000000
+	go.uber.org/goleak v1.3.0
+)
 
 // The harness and the contract suite, from the checkout of divbast/ci that
 // just setup makes at the commit the workflows pin

@@ -59,7 +59,10 @@ func main() {
 			os.Exit(1)
 		}
 	case "health":
-		os.Exit(server.Probe(context.Background(), "http://127.0.0.1:8080/", "http://127.0.0.1:8081/healthz", os.Stderr))
+		if err := server.Probe(context.Background(), "http://127.0.0.1:8080/", "http://127.0.0.1:8081/healthz"); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	case "version":
 		fmt.Println(version)
 	default:
@@ -89,7 +92,7 @@ func serve() error {
 			}
 		}()
 	}
-	log.Info("serving", slog.String("app", appAddr), slog.String("health", healthAddr), slog.String("version", version))
+	log.InfoContext(ctx, "serving", "app", appAddr, "health", healthAddr, "version", version)
 
 	var err error
 	select {

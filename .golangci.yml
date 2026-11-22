@@ -1,0 +1,179 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
+
+# This configuration implements the Go Development Principles in CLAUDE.md,
+# set exactly as the maintainer specified them. It is never weakened to get
+# a gate green: fix the finding. The one way to suppress a finding is a
+# //nolint naming the linter, with the reason beside it.
+
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - containedctx
+    - contextcheck
+    - depguard
+    - errcheck
+    - errorlint
+    - exhaustive
+    - forbidigo
+    - gochecknoglobals
+    - gochecknoinits
+    - gochecksumtype
+    - gomoddirectives
+    - gosec
+    - govet
+    - iface
+    - ireturn
+    - musttag
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - reassign
+    - revive
+    - rowserrcheck
+    - sloglint
+    - staticcheck
+    - testpackage
+    - usetesting
+  settings:
+    govet:
+      enable:
+        - nilness
+      disable:
+        - hostport # go fix owns it
+        - inline # go fix owns it
+    gomoddirectives:
+      go-version-pattern: '^1\.\d+\.0$'
+      toolchain-pattern: '^go1\.\d+\.\d+$'
+    gochecksumtype:
+      default-signifies-exhaustive: false
+    revive:
+      rules:
+        - name: flag-parameter
+        - name: context-as-argument
+        - name: exported
+    ireturn:
+      allow:
+        - error
+        - stdlib
+        - generic
+    iface:
+      enable:
+        - identical
+        - unused
+    reassign:
+      patterns:
+        - ".*"
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^time\.(Now|Since|Until)$'
+          pkg: '^time$'
+          msg: read the clock in main and pass it down
+        - pattern: '^os\.(Getenv|LookupEnv|Environ|ExpandEnv|Setenv|Unsetenv|Clearenv)$'
+          pkg: '^os$'
+          msg: read the environment in main and pass values down
+        - pattern: '^(fmt\.Print(|f|ln)|print|println)$'
+          msg: write to an injected io.Writer or logger
+    sloglint:
+      no-global: all
+      context: scope
+      static-msg: true
+      kv-only: true
+      forbidden-keys:
+        - time
+        - level
+        - msg
+        - source
+    errcheck:
+      check-blank: true
+      check-type-assertions: true
+    depguard:
+      rules:
+        core:
+          list-mode: strict
+          files:
+            - "**/internal/core/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/divbast/pisati/internal/core
+          deny:
+            - pkg: context
+              desc: the core takes no context
+            - pkg: crypto/rand
+              desc: randomness comes from the shell
+            - pkg: database/sql
+              desc: the core does no I/O
+            - pkg: log
+              desc: the core does not log
+            - pkg: net
+              desc: the core does no I/O
+            - pkg: os
+              desc: the core does no I/O
+        shell:
+          list-mode: strict
+          files:
+            - $all
+            - "!$test"
+            - "!**/internal/core/**"
+          allow:
+            - $gostd
+            - github.com/divbast/pisati
+          deny:
+            - pkg: log$
+              desc: use log/slog
+        tests:
+          list-mode: strict
+          files:
+            - $test
+          allow:
+            - $gostd
+            - github.com/divbast/pisati
+            - go.uber.org/goleak
+            - github.com/divbast/ci # the acceptance suite's harness and contract
+    gosec:
+      excludes:
+        - G101 # secrets: betterleaks
+        - G104 # unchecked errors: errcheck
+        - G107 # http.Get with a variable URL: noctx bans the call
+        - G109 # Atoi narrowing: G115
+        - G118 # lost cancel, detached goroutine context: govet, contextcheck
+        - G501 # import blocklists: G401, G405 and G406 report the use
+        - G502
+        - G503
+        - G505
+        - G506
+        - G507
+      config:
+        global:
+          nosec: true
+    usetesting:
+      context-background: true
+      context-todo: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    rules:
+      - path: '(^|/)cmd/|_test\.go$'
+        linters:
+          - forbidigo
+          - gochecknoglobals
+          - gochecknoinits
+          - reassign
+      # The acceptance suite is a module of its own, built against the
+      # checkout of divbast/ci that just setup makes: its replace of
+      # github.com/divbast/ci, and the go line ci's module forces on it, are
+      # not this repository's to choose. Every other linter runs on it.
+      - path: '^test/acceptance/go\.mod$'
+        linters:
+          - gomoddirectives
+
+formatters:
+  enable:
+    - gofumpt

@@ -4,7 +4,6 @@
 package server_test
 
 import (
-	"bytes"
 	"io"
 	"net"
 	"net/http"
@@ -46,7 +45,9 @@ func answering(t *testing.T, status int, body string) string {
 	t.Helper()
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(status)
-		_, _ = io.WriteString(w, body)
+		if _, err := io.WriteString(w, body); err != nil {
+			t.Errorf("answering %d %q: %v", status, body, err)
+		}
 	}))
 	t.Cleanup(s.Close)
 	return s.URL
@@ -75,45 +76,45 @@ func TestProbe(t *testing.T) {
 	t.Cleanup(health.Close)
 
 	tests := []struct {
-		name            string
-		appURL, health  string
-		wantCode        int
-		wantStderrLines []string
+		name           string
+		appURL, health string
+		// wantLines is the error's text, a line for each half that failed,
+		// each starting with the given prefix. None means no error.
+		wantLines []string
 	}{
 		{name: "healthy", appURL: app.URL + "/", health: health.URL + "/healthz"},
 		{
 			name: "page-wrong", appURL: answering(t, http.StatusOK, "Hello from somewhere else"), health: health.URL + "/healthz",
-			wantCode: 1, wantStderrLines: []string{`page: GET / answered 200 "Hello from somewhere else", want 200 "Hello from pisati"`},
+			wantLines: []string{`page: GET / answered 200 "Hello from somewhere else", want 200 "Hello from pisati"`},
 		},
 		{
 			name: "healthz-503", appURL: app.URL + "/", health: answering(t, http.StatusServiceUnavailable, "down"),
-			wantCode: 1, wantStderrLines: []string{"healthz: GET /healthz answered 503, want 200"},
+			wantLines: []string{"healthz: GET /healthz answered 503, want 200"},
 		},
 		{
 			name: "both-unreachable", appURL: closedURL(t), health: closedURL(t),
-			wantCode: 1, wantStderrLines: []string{"healthz: ", "page: "},
+			wantLines: []string{"healthz: ", "page: "},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			var stderr bytes.Buffer
-			code := server.Probe(t.Context(), tt.appURL, tt.health, &stderr)
-			if code != tt.wantCode {
-				t.Errorf("Probe() = %d, want %d; stderr %q", code, tt.wantCode, stderr.String())
-			}
-			lines := strings.Split(strings.TrimSuffix(stderr.String(), "\n"), "\n")
-			if tt.wantCode == 0 {
-				if stderr.Len() != 0 {
-					t.Errorf("Probe() printed %q, want nothing when healthy", stderr.String())
+			err := server.Probe(t.Context(), tt.appURL, tt.health)
+			if len(tt.wantLines) == 0 {
+				if err != nil {
+					t.Errorf("Probe() = %q, want nil when healthy", err)
 				}
 				return
 			}
-			if len(lines) != len(tt.wantStderrLines) {
-				t.Fatalf("Probe() printed %q, want one line for each half that failed: %q", lines, tt.wantStderrLines)
+			if err == nil {
+				t.Fatalf("Probe() = nil, want an error starting %q", tt.wantLines)
 			}
-			for i, want := range tt.wantStderrLines {
+			lines := strings.Split(err.Error(), "\n")
+			if len(lines) != len(tt.wantLines) {
+				t.Fatalf("Probe() = %q, want one line for each half that failed: %q", lines, tt.wantLines)
+			}
+			for i, want := range tt.wantLines {
 				if !strings.HasPrefix(lines[i], want) {
 					t.Errorf("line %d = %q, want it to start %q", i+1, lines[i], want)
 				}

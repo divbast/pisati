@@ -19,9 +19,9 @@ ARCHIVE := env_var_or_default("ARCHIVE", "/tmp/" + APP + "-image.tar")
 PUBLISHED := env_var_or_default("PUBLISHED", "ghcr.io/divbast/" + APP + ":latest")
 
 # build, acceptance, test, archive, scan and app-lint come from divbast/ci's
-# app.just, and the other lint recipes from its common.just. Each is run
-# from a recipe's body, never named as a dependency, so `just setup` still
-# runs before .ci exists.
+# app.just, and the other lint recipes but the Go ones below from its
+# common.just. Each is run from a recipe's body, never named as a
+# dependency, so `just setup` still runs before .ci exists.
 import? '.ci/just/common.just'
 import? '.ci/just/app.just'
 
@@ -68,9 +68,52 @@ ci-checkout:
 acceptance: ci-tools
     set -o pipefail; ENGINE={{ ENGINE }} IMAGE={{ IMAGE }} go -C test/acceptance test -json -count=1 -timeout 90m ./... | {{ ci_dir }}/bin/divbast-testcount
 
+# The Go gates run under .golangci.yml, in place of ci's go-lint and
+# go-test. Each runs in the root module and the acceptance module, which is
+# a module of its own; tools/ holds only tool directives, so it has nothing
+# to build or lint. golangci-lint run reports formatting too, so there is
+# no separate format gate.
+
+# Every Go gate but the tests: nothing to change, and nothing reported
+go-gates:
+    go build ./...
+    go fix -diff -testingcontext=false ./...
+    go mod tidy -diff
+    go mod verify
+    golangci-lint run ./...
+    go -C tools mod tidy -diff
+    go -C tools mod verify
+    go -C test/acceptance build ./...
+    go -C test/acceptance fix -diff -testingcontext=false ./...
+    go -C test/acceptance mod tidy -diff
+    go -C test/acceptance mod verify
+    cd test/acceptance && golangci-lint run ./...
+
+# Vet is off because golangci-lint's govet runs every check it would.
+# ./... never reaches the acceptance suite, a module of its own, which
+# needs an image.
+
+# The unit tests, under the race detector and in random order
+go-unit:
+    go test -race -shuffle=on -vet=off -count=1 ./...
+
+# The acceptance module is all tests, so govulncheck sees its code only
+# with -test.
+
+# Fail when the code reaches a known Go advisory
+vuln:
+    go tool -modfile=tools/go.mod govulncheck ./...
+    go -C test/acceptance tool -modfile=../../tools/go.mod govulncheck -test ./...
+
+# A shallow clone has only its last commit to scan, so CI needs a full one.
+
+# Fail on a secret anywhere in the history of every ref
+secrets:
+    betterleaks git --redact .
+
 # Every lint gate. Needs a running Docker daemon, for docker build --check
 lint:
-    {{ just_executable() }} ci-fresh actions-check workflow-audit actionlint shell-lint go-lint go-test reuse-lint app-lint
+    {{ just_executable() }} ci-fresh actions-check workflow-audit actionlint shell-lint go-gates go-unit vuln secrets reuse-lint app-lint
 
 # Every gate. Run before committing
 ci:

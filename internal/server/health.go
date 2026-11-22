@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,31 +24,30 @@ const halfWithin = 4 * time.Second
 
 // Probe checks the app is healthy, in two halves, neither of which implies
 // the other: healthURL, the health port's /healthz, answers 200, and
-// appURL, the app port's /, answers 200 with exactly Page. It prints
-// nothing and returns 0 when both hold. Otherwise it prints one
-// "<check>: <reason>" line for each half that failed, healthz or page, to
-// stderr, which is the only record of why, and returns 1.
-func Probe(ctx context.Context, appURL, healthURL string, stderr io.Writer) int {
-	code := 0
-	if err := half(ctx, healthURL, func(status int, _ []byte) error {
+// appURL, the app port's /, answers 200 with exactly Page. It returns nil
+// when both hold. Otherwise its error has one "<check>: <reason>" line for
+// each half that failed, healthz or page, since a health log is the only
+// record of why.
+func Probe(ctx context.Context, appURL, healthURL string) error {
+	healthz := half(ctx, healthURL, func(status int, _ []byte) error {
 		if status != http.StatusOK {
 			return fmt.Errorf("GET /healthz answered %d, want 200", status)
 		}
 		return nil
-	}); err != nil {
-		_, _ = fmt.Fprintln(stderr, "healthz:", err)
-		code = 1
+	})
+	if healthz != nil {
+		healthz = fmt.Errorf("healthz: %w", healthz)
 	}
-	if err := half(ctx, appURL, func(status int, body []byte) error {
+	page := half(ctx, appURL, func(status int, body []byte) error {
 		if status != http.StatusOK || string(body) != Page {
 			return fmt.Errorf("GET / answered %d %q, want 200 %q", status, body, Page)
 		}
 		return nil
-	}); err != nil {
-		_, _ = fmt.Fprintln(stderr, "page:", err)
-		code = 1
+	})
+	if page != nil {
+		page = fmt.Errorf("page: %w", page)
 	}
-	return code
+	return errors.Join(healthz, page)
 }
 
 // half sends GET url within halfWithin, and returns what check makes of
@@ -63,9 +63,8 @@ func half(ctx context.Context, url string, check func(status int, body []byte) e
 	if err != nil {
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	if err != nil {
+	if err = errors.Join(err, resp.Body.Close()); err != nil {
 		return err
 	}
 	return check(resp.StatusCode, body)

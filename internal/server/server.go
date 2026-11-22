@@ -33,7 +33,7 @@ func only(path, body string) http.Handler {
 		if r.Method == http.MethodHead {
 			return
 		}
-		_, _ = io.WriteString(w, body)
+		io.WriteString(w, body) //nolint:errcheck // the status is sent, and a failed write means the client has gone: no one is left to answer
 	})
 }
 
@@ -43,8 +43,7 @@ func Logged(h http.Handler, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		h.ServeHTTP(rec, r)
-		log.LogAttrs(r.Context(), slog.LevelInfo, "request",
-			slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Int("status", rec.status))
+		log.InfoContext(r.Context(), "request", "method", r.Method, "path", r.URL.Path, "status", rec.status)
 	})
 }
 

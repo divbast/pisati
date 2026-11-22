@@ -1,4 +1,13 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>divbast/renovate-config", "github>divbast/renovate-config:app"]
+  "extends": ["github>divbast/renovate-config", "github>divbast/renovate-config:app"],
+  "packageRules": [
+    {
+      "description": "templ's runtime, which go.mod requires, and its generator, which tools/go.mod runs, move in one PR: the generated code is written for the runtime of the same version, so a bump of either alone leaves the two apart.",
+      "matchManagers": ["gomod"],
+      "matchFileNames": ["go.mod", "tools/go.mod"],
+      "matchDepNames": ["github.com/a-h/templ"],
+      "groupName": "templ"
+    }
+  ]
 }
