@@ -168,8 +168,10 @@ breaking change.
     this repository's root: `divbast-pin`, `divbast-verify-images`,
     `divbast-scan`, `divbast-testcount`, `divbast-published-revision`,
     `divbast-stall` and the rest;
-  - the acceptance `harness` and the `contract` suite, which `go.mod`
-    requires through `replace github.com/divbast/ci => ./.ci`;
+  - the acceptance `harness` and the `contract` suite, which
+    `test/acceptance/go.mod` requires through
+    `replace github.com/divbast/ci => ../../.ci`: the suite is a Go module of
+    its own, so the root module imports nothing from ci;
   - `go/golangci.yml`, the one golangci-lint configuration, and
     `.github/actionlint.yaml`.
 
@@ -192,19 +194,20 @@ breaking change.
 - `just build` — build the image locally. It does not verify the images it
   builds from; `just ci-tools && .ci/bin/divbast-verify-images` does, with
   cosign from `mise.toml`
-- `just acceptance` — `go test ./test/acceptance/...` against the image
+- `just acceptance` — `go test` inside `test/acceptance`, its own module,
+  against the image
   `just build` wrote, under `ENGINE` (docker unless it says podman),
   through `divbast-testcount`, which fails the run unless a test passed and
   none failed or skipped. `just IMAGE=… acceptance` tests another image.
-  `ENGINE=docker IMAGE=localhost/pisati:dev mise exec -- go test
-  -run TestServes ./test/acceptance/` runs one test
+  `ENGINE=docker IMAGE=localhost/pisati:dev mise exec -- go
+  -C test/acceptance test -run TestServes ./...` runs one test
 - `just test` — build, then the acceptance suite
 - `just lint` — pinact, zizmor, actionlint, ShellCheck and shfmt, the Go
   gates (the compiler, `go vet`, `go fix -diff`, `go mod tidy -diff`,
   `golangci-lint fmt --diff` and `golangci-lint run`), `go-test`, `reuse
   lint`, hadolint and `docker build --check`.
-  `go-test` runs every Go test under the race detector; the acceptance
-  suite skips there, since `IMAGE` is unset
+  `go-test` runs every Go test of the root module under the race detector;
+  the acceptance module is not part of it
 - `just archive`, `just scan` — write the image as an OCI archive, then run
   `divbast-scan` over it and the published `:latest`. Needs network access
   to ghcr.io

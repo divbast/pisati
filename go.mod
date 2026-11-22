@@ -3,10 +3,6 @@
 
 module github.com/divbast/pisati
 
-go 1.27.4
+go 1.27.0
 
-require github.com/divbast/ci v0.0.0-00010101000000-000000000000
-
-// The harness and the contract suite, from the checkout of divbast/ci that
-// just setup makes at the commit the workflows pin
-replace github.com/divbast/ci => ./.ci
+toolchain go1.27.4

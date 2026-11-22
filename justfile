@@ -3,6 +3,9 @@
 
 set shell := ["mise", "exec", "--", "bash", "-euo", "pipefail", "-c"]
 
+# The acceptance recipe below replaces the one divbast/ci's app.just defines
+set allow-duplicate-recipes := true
+
 # The image's name, without its registry: everything below is named from it
 APP := "pisati"
 
@@ -57,6 +60,13 @@ ci-checkout:
     git init -q .ci
     git -C .ci fetch -q --depth 1 https://github.com/divbast/ci "${sha}"
     git -C .ci checkout -q FETCH_HEAD && rm -rf .ci/bin
+
+# Run the acceptance suite against the image. As divbast/ci's recipe of the
+# same name, but from inside test/acceptance, which is a module of its own.
+# ci-tools runs first every time, so the tool is the one this checkout of ci
+# builds. pipefail keeps go test's exit status through divbast-testcount.
+acceptance: ci-tools
+    set -o pipefail; ENGINE={{ ENGINE }} IMAGE={{ IMAGE }} go -C test/acceptance test -json -count=1 -timeout 90m ./... | {{ ci_dir }}/bin/divbast-testcount
 
 # Every lint gate. Needs a running Docker daemon, for docker build --check
 lint:

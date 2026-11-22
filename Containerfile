@@ -22,8 +22,6 @@ FROM ${GO_IMAGE} AS build
 ARG PISATI_VERSION
 ENV GOTOOLCHAIN=local GOFLAGS=-mod=readonly
 WORKDIR /src
-# go.mod's replace names ./.ci, which the build context leaves out: the app
-# imports nothing from divbast/ci, so Go never looks for it
 COPY go.mod ./
 COPY cmd/ cmd/
 COPY internal/ internal/
