@@ -106,10 +106,13 @@ vuln:
     go -C test/acceptance tool -modfile=../../tools/go.mod govulncheck -test ./...
 
 # A shallow clone has only its last commit to scan, so CI needs a full one.
+# Without --verbose, betterleaks reports only how many it found; with it,
+# each finding's rule, file, line and commit, and --redact keeps the value
+# itself out of the log.
 
 # Fail on a secret anywhere in the history of every ref
 secrets:
-    betterleaks git --redact .
+    betterleaks git --redact --verbose .
 
 # Every lint gate. Needs a running Docker daemon, for docker build --check
 lint:
