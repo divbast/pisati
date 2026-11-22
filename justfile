@@ -75,7 +75,7 @@ acceptance: ci-tools
 # no separate format gate.
 
 # Every Go gate but the tests: nothing to change, and nothing reported
-go-gates:
+go-gates: _goleak-in-step _one-suppression
     go build ./...
     go fix -diff -testingcontext=false ./...
     go mod tidy -diff
@@ -88,6 +88,48 @@ go-gates:
     go -C test/acceptance mod tidy -diff
     go -C test/acceptance mod verify
     cd test/acceptance && golangci-lint run ./...
+
+# Renovate never reads test/acceptance, so a goleak bump it makes moves
+# the root module's alone, and the two would drift apart unseen.
+
+# Fail unless both modules require the same goleak
+[script("mise", "exec", "--", "bash", "-euo", "pipefail")]
+_goleak-in-step:
+    root=$(go list -m -f '{{{{.Version}}' go.uber.org/goleak)
+    acceptance=$(go -C test/acceptance list -m -f '{{{{.Version}}' go.uber.org/goleak)
+    if [[ "${root}" != "${acceptance}" ]]; then
+        echo "goleak: the root module requires go.uber.org/goleak ${root} and test/acceptance ${acceptance}; to match them: go -C test/acceptance get go.uber.org/goleak@${root} && go -C test/acceptance mod tidy" >&2
+        exit 1
+    fi
+
+# //nolint is the one way to suppress a finding, and nolintlint holds it to
+# a named linter and a reason. This refuses, in any tracked file, every
+# other suppression comment the linters and betterleaks would honour, and
+# a betterleaks ignore file tracked anywhere or present at the root, where
+# betterleaks reads one. Each pattern brackets one character, so that this
+# recipe never matches itself.
+
+# Fail on any suppression but //nolint
+[script("mise", "exec", "--", "bash", "-euo", "pipefail")]
+_one-suppression:
+    rule="suppress only with //nolint, with a specific linter and a reason"
+    hits=$(git grep -n -o -i -I -E -e 'exhaustive[:]ignore' -e 'revive[:](disable|enable)' \
+        -e '#[n]osec' -e 'gitleaks[:]allow' -e 'betterleaks[:]allow' || [[ $? -eq 1 ]])
+    ignores=$({ git ls-files; ls -A; } | grep -E '(^|/)[.](git|better)leaksignore$' | sort -u || true)
+    status=0
+    if [[ -n "${hits}" ]]; then
+        while IFS=: read -r file line what; do
+            echo "${file}:${line}: ${what}: ${rule}" >&2
+        done <<<"${hits}"
+        status=1
+    fi
+    if [[ -n "${ignores}" ]]; then
+        while read -r file; do
+            echo "${file}: a betterleaks ignore file: ${rule}" >&2
+        done <<<"${ignores}"
+        status=1
+    fi
+    exit "${status}"
 
 # Vet is off because golangci-lint's govet runs every check it would.
 # ./... never reaches the acceptance suite, a module of its own, which
@@ -108,11 +150,12 @@ vuln:
 # A shallow clone has only its last commit to scan, so CI needs a full one.
 # Without --verbose, betterleaks reports only how many it found; with it,
 # each finding's rule, file, line and commit, and --redact keeps the value
-# itself out of the log.
+# itself out of the log. --ignore-gitleaks-allow reports a secret whatever
+# comment sits beside it, so no comment can wave one through.
 
 # Fail on a secret anywhere in the history of every ref
 secrets:
-    betterleaks git --redact --verbose .
+    betterleaks git --ignore-gitleaks-allow --redact --verbose --no-color --no-banner .
 
 # Every lint gate. Needs a running Docker daemon, for docker build --check
 lint:

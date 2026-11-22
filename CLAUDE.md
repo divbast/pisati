@@ -208,10 +208,15 @@ breaking change.
   hadolint and `docker build --check`. `go-gates` runs the compiler,
   `go fix -diff`, `go mod tidy -diff`, `go mod verify` and `golangci-lint
   run`, which reports formatting too, in the root module and the
-  acceptance module, and tidies and verifies `tools/`. `go-unit` runs the
-  root module's tests under the race detector, in random order; the
+  acceptance module, and tidies and verifies `tools/`. It also fails
+  unless both modules require the same goleak, and on any suppression
+  but `//nolint`: another linter's own suppression comment, betterleaks'
+  allow comment, or a betterleaks ignore file. `go-unit` runs the root
+  module's tests under the race detector, in random order; the
   acceptance module is not part of it. `vuln` runs govulncheck over both
-  modules, and `secrets` runs betterleaks over the history of every ref
+  modules. `secrets` runs betterleaks over the history of every ref the
+  clone holds: all of it locally, and in CI once the lint job checks out
+  the full history
 - `just archive`, `just scan` — write the image as an OCI archive, then run
   `divbast-scan` over it and the published `:latest`. Needs network access
   to ghcr.io
@@ -221,10 +226,11 @@ breaking change.
 ## Where the toolchain comes from
 
 - **`mise.toml` is where tool versions are written.** Go, golangci-lint,
-  betterleaks, hadolint, ShellCheck, shfmt, actionlint, reuse, just, pinact, trivy,
-  grype, zizmor and cosign are all listed there. Every justfile recipe but `setup`, which
-  installs them, runs through `mise exec`, so a recipe resolves those
-  binaries and not a same-named one on PATH. The recipes that call GitHub,
+  betterleaks, hadolint, ShellCheck, shfmt, actionlint, reuse, just,
+  pinact, trivy, grype, zizmor and cosign are all listed there. Every
+  justfile recipe but `setup`, which installs them, runs through `mise
+  exec`, so a recipe resolves those binaries and not a same-named one on
+  PATH. The recipes that call GitHub,
   pinact's and zizmor's, take a fine-grained token from `GITHUB_TOKEN` and
   nothing else, as divbast/ci's README says; CI passes its own
 - **Go builds with the toolchain mise installs and nothing else.**
@@ -285,11 +291,12 @@ breaking change.
   `Refuses` and the rest) are the harness's too, shared with every divbast
   image. An app gives each thing it serves a test, one topic per file
 - **Go is modern and idiomatic, and linted strictly**, under
-  `.golangci.yml`, which sets the Go Development Principles below. Bash is for what is short and will stay so: the
-  justfile's recipes. A check that runs inside a Containerfile build stage
-  is the exception, since a build stage has bash and no Go: it stays bash,
-  under ShellCheck `enable=all`, shfmt and `set -euo pipefail`, with a Go
-  test that runs it against fixtures and sees each way it can fail fail
+  `.golangci.yml`, which sets the Go Development Principles below. Bash
+  is for what is short and will stay so: the justfile's recipes. A check
+  that runs inside a Containerfile build stage is the exception, since a
+  build stage has bash and no Go: it stays bash, under ShellCheck
+  `enable=all`, shfmt and `set -euo pipefail`, with a Go test that runs
+  it against fixtures and sees each way it can fail fail
 - A test suite that has never failed proves nothing. When adding a check, prove
   it can fail before trusting it
 

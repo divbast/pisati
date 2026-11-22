@@ -169,11 +169,26 @@ linters:
       # The acceptance suite is a module of its own, built against the
       # checkout of divbast/ci that just setup makes: its replace of
       # github.com/divbast/ci, and the go line ci's module forces on it, are
-      # not this repository's to choose. Every other linter runs on it.
+      # not this repository's to choose. Only those two findings are
+      # excluded: every other directive there, and every other linter, is
+      # still checked.
       - path: '^test/acceptance/go\.mod$'
+        text: '^go directive \(1\.\d+\.\d+\) doesn''t match the pattern '
+        linters:
+          - gomoddirectives
+      - path: '^test/acceptance/go\.mod$'
+        text: '^local replacement are not allowed: github\.com/divbast/ci$'
         linters:
           - gomoddirectives
 
 formatters:
   enable:
     - gofumpt
+
+# Show every finding. By default golangci-lint shows at most three with the
+# same text, 50 from one linter and one on each line, so fixing what it
+# shows can reveal more.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: false
