@@ -181,8 +181,8 @@ breaking change.
   refuse workflows that call ci at more than one commit
 - **divbast/renovate-config** holds the presets `renovate.json` extends.
   `renovate.json` adds nothing of its own yet
-- **divbast/infra** holds the org's settings, this repository's rulesets
-  and its template flag, the `divbast-renovate` App, the `renovate`
+- **divbast/infra** holds the org's settings, this repository's rulesets,
+  the `divbast-renovate` App, the `renovate`
   environment and `PISATI_AUTOMERGE`
 
 ## Key commands

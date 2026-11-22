@@ -19,7 +19,8 @@
 "aqua:anchore/grype" = "0.122.1"
 "aqua:zizmorcore/zizmor" = "1.32.0"
 # For divbast-verify-images, which app-check.yml's build job runs: it
-# verifies the distroless runtime's signature
+# verifies Docker's signature on each Docker Hardened Image the
+# Containerfile builds from, and divbast-scan verifies Docker's VEX document
 "aqua:sigstore/cosign" = "3.1.4"
 
 [env]

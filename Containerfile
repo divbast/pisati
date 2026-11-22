@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
-# The app's own version, which tags the image: app-publish.yml reads it from
-# this line, by the name build.yml gives as version-arg
+# The app's own version, stamped into the binary and the image's version label
 ARG PISATI_VERSION=0.1.0
 # Every image below is a Docker Hardened Image on Debian 13, pinned by
 # digest, and CI verifies Docker's signature on each before anything is
