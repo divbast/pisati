@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
 package acceptance
@@ -24,7 +24,7 @@ const (
 
 // binary is the app, which the image's ENTRYPOINT, HEALTHCHECK and the
 // contract's Exec all run.
-const binary = "/usr/local/bin/template"
+const binary = "/usr/local/bin/pisati"
 
 // serverArgv is PID 1's argv: the image's ENTRYPOINT, since nothing runs
 // before the server.
@@ -57,8 +57,8 @@ func TestContract(t *testing.T) {
 			StartPeriod: 60 * time.Second,
 			Retries:     3,
 		},
-		// The health port's root, and a path an app made from the template
-		// with PHP would serve: neither may answer there
+		// The health port's root, and a path a PHP app would serve: neither
+		// may answer there
 		HealthOnly404: []string{"/", "/index.php"},
 	})
 }

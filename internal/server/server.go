@@ -1,7 +1,7 @@
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
-// Package server is the template's app: the page on the app port, and
+// Package server serves the page on the app port, and
 // /healthz on the health port, each an allowlist that answers everything
 // it does not serve with a 404 and an empty body.
 package server
@@ -13,7 +13,7 @@ import (
 )
 
 // Page is exactly what GET / answers.
-const Page = "Hello from oci-image-template"
+const Page = "Hello from pisati"
 
 // App serves the page: GET or HEAD on / answers 200 with Page, and
 // anything else 404 with nothing.

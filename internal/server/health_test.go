@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
 package server_test
@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/divbast/oci-image-template/internal/server"
+	"github.com/divbast/pisati/internal/server"
 )
 
 func TestHealth(t *testing.T) {
@@ -83,7 +83,7 @@ func TestProbe(t *testing.T) {
 		{name: "healthy", appURL: app.URL + "/", health: health.URL + "/healthz"},
 		{
 			name: "page-wrong", appURL: answering(t, http.StatusOK, "Hello from somewhere else"), health: health.URL + "/healthz",
-			wantCode: 1, wantStderrLines: []string{`page: GET / answered 200 "Hello from somewhere else", want 200 "Hello from oci-image-template"`},
+			wantCode: 1, wantStderrLines: []string{`page: GET / answered 200 "Hello from somewhere else", want 200 "Hello from pisati"`},
 		},
 		{
 			name: "healthz-503", appURL: app.URL + "/", health: answering(t, http.StatusServiceUnavailable, "down"),

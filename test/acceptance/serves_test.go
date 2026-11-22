@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
 package acceptance
@@ -11,7 +11,7 @@ import (
 )
 
 // page is exactly what GET / answers.
-const page = "Hello from oci-image-template"
+const page = "Hello from pisati"
 
 // refused are paths the app port must answer with a 404 and an empty
 // body: a PHP app's script by its own name, /healthz, which only the

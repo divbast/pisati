@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
 package server_test
@@ -11,7 +11,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/divbast/oci-image-template/internal/server"
+	"github.com/divbast/pisati/internal/server"
 )
 
 func TestApp(t *testing.T) {
@@ -22,7 +22,7 @@ func TestApp(t *testing.T) {
 		want         int
 		body         string
 	}{
-		{method: http.MethodGet, path: "/", want: http.StatusOK, body: "Hello from oci-image-template"},
+		{method: http.MethodGet, path: "/", want: http.StatusOK, body: "Hello from pisati"},
 		{method: http.MethodHead, path: "/", want: http.StatusOK},
 		{method: http.MethodPost, path: "/", want: http.StatusNotFound},
 		{method: http.MethodGet, path: "/index.php", want: http.StatusNotFound},

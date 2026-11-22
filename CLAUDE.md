@@ -1,26 +1,24 @@
-<!-- SPDX-License-Identifier: BSD-2-Clause -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <!-- SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee> -->
 
-# oci-image-template
+# Pisati
 
-A minimal working divbast app: one page served by a stdlib Go server, in a
-container image that runs at zero Linux capabilities, with no new
-privileges, on a read-only root filesystem as a non-root user. Every new
-divbast image repository is made from it, by its entry in `divbast/infra`,
-and then changed as the README's "Making a new app" says, in that order:
-a Go app keeps the Go core, a PHP app moves the PHP layer, `layers/php`,
-into place, and a .NET app the .NET layer, `layers/dotnet`.
+Pisati is a secure, minimalist, federated blogging platform written in Go,
+derived from WriteFreely by Musing Studio. It ships as a container image
+that runs at zero Linux capabilities, with no new privileges, on a
+read-only root filesystem as a non-root user. Nothing is published to
+ghcr.io yet. The divbast organisation's settings, rulesets and Renovate
+wiring live in `divbast/infra`.
 
-It publishes nothing to ghcr.io: its publish job rehearses. The divbast
-organisation's settings, rulesets and Renovate wiring live in
-`divbast/infra`.
+- Run `just ci` before every commit.
+- Slow suites (browser, VoiceOver, fuzz) run in dispatch-only workflows,
+  and matching `just` recipes run them locally.
+- Generated files are committed, and a check fails when they drift from
+  their source.
 
 What makes the image this app's lives here: the Containerfile, the app
-(`cmd/template`, `internal/server`), and the acceptance tests, beside the
-PHP layer: its Containerfile fragment, Caddy and PHP configuration, page,
-and health probe and endpoint; and beside the .NET layer: its whole
-Containerfile, demo app, health probe and build-stage checks. The pipeline
-around it is shared, and reaches this repository at a pinned commit:
+(`cmd/`, `internal/`), and the acceptance tests. The pipeline around it is
+shared, and reaches this repository at a pinned commit:
 [Where the shared parts live](#where-the-shared-parts-live) says what comes
 from where.
 
@@ -71,15 +69,15 @@ breaking change.
 | Volume | **none** |
 | Outbound network | **none** |
 | Shell, package manager | **none** |
-| Processes | **one**, the app as PID 1: `template serve` |
-| Healthy | the shipped probe, `template health`: `/healthz` **200** and loopback `GET /` **exactly** `Hello from oci-image-template` |
+| Processes | **one**, the app as PID 1: `pisati serve` |
+| Healthy | the shipped probe, `pisati health`: `/healthz` **200** and loopback `GET /` **exactly** `Hello from pisati` |
 | Engine healthcheck | Docker runs it automatically. **Podman does not** — pass `--health-cmd` yourself |
 
 - **Podman never sees this image's `HEALTHCHECK`.** Its `libimage` reads a
   healthcheck only from a Docker-media-type manifest; divbast images publish
   as an OCI index, so Podman's OCI inspection branch never reaches the
   config's healthcheck field — no version of Podman does. Give Podman users
-  `--health-cmd '["/usr/local/bin/template","health"]'`
+  `--health-cmd '["/usr/local/bin/pisati","health"]'`
   (a Quadlet's `HealthCmd=` takes the same value) — no leading `"CMD"`,
   because Podman before 5.8.0 re-splits such an array into one token instead
   of running it. Tracked upstream as podman/podman#25454 and #18904. The
@@ -114,12 +112,10 @@ breaking change.
   proves the image serves and is healthy on a genuinely `--internal`
   network, and cannot connect out
 - **Nothing may add a shell or a package manager to the final image.** The
-  base is distroless; that is the point, and the contract's `no-shell` and
-  `no-package-manager` checks hold it there. What it removes is us running
-  apt, not the patching itself: `static-debian13` ships CA certificates and
-  time zones, and the PHP layer's `cc-debian13` libc6, libssl3t64,
-  libstdc++6, libgcc-s1, libgomp1, libzstd1 and zlib1g, all executable code
-  that takes CVEs. That obligation moves to the base image's own rebuilds —
+  base is Docker Hardened Images' `static`; that is the point, and the
+  contract's `no-shell` and `no-package-manager` checks hold it there. What
+  it removes is us running apt, not the patching itself: it ships CA
+  certificates and time zones. That obligation moves to the base image's own rebuilds —
   and **nothing in this repository collects them on its own.** Rebuilding
   an unchanged Containerfile does not pick them up. **Renovate is the
   update path**: it runs every morning, after every merge to main and
@@ -130,155 +126,28 @@ breaking change.
   main, since GitHub re-runs no checks when a base moves and a green check
   on a stale base proves nothing. **It merges its own PRs** once every
   check passes, with a squash, while the repository variable
-  `OCI_IMAGE_TEMPLATE_AUTOMERGE` is `enabled`; any other value stops
+  `PISATI_AUTOMERGE` is `enabled`; any other value stops
   merging from the next run. A new major of divbast/ci, a raise of
-  `go.mod`'s `go` line, and a .NET major wait for approval on the
-  Dependency Dashboard first. **A merge never publishes.** `build.yml`'s
-  daily run is the publishing slot, through divbast/ci's
-  `app-publish.yml`, and a manual run of `build` publishes at once.
+  `go.mod`'s `go` line wait for approval on the Dependency Dashboard
+  first. **Nothing is published:** `build.yml` has no publish job.
   `.github/workflows/stall.yml`, through divbast/ci's `stall.yml`, fails
   each day that updates have stopped flowing: a Renovate PR stuck, or
   Renovate silent
-- **The publish job rehearses.** `build.yml` calls `app-publish.yml` with
-  `image: ghcr.io/divbast/oci-image-template` and `rehearse: true`. It
-  decides against that image on ghcr.io, which is never published, so
-  every slot and button run publishes, into a registry the job starts for
-  itself: push, a staging tag, a real attestation, its verification, the
-  version and `latest` tags, and the anonymous check. Nothing reaches
-  ghcr.io. `stall.yml` leaves out `slots`, which count the slots that
-  should have published. An app made from the template turns both around
-  in the README's step 8, and in its order: `slots` go on only once the
-  app's first image is public
 - **Every image the Containerfile builds from is verified first.** Before
   `app-check.yml` builds anything, `divbast-verify-images` refuses any image
-  not pinned as `<name>:<tag>@sha256:<digest>`, and verifies the distroless
-  runtime's cosign signature by the distroless project; the `golang`
-  builder is held by its digest alone. A local `just build` does not
+  not pinned as `<name>:<tag>@sha256:<digest>`, and verifies Docker's
+  signature on each Docker Hardened Image: the Go builder, the Node stage
+  and the `static` runtime. A local `just build` does not
   verify; `just ci-tools && .ci/bin/divbast-verify-images` does, with
   cosign from `mise.toml`
 - **The binary must never carry a file capability.** A binary with a file
   capability cannot be exec'd at all under `--cap-drop ALL` — it dies with
   `Operation not permitted` and exit 126 — and the contract suite's
-  `file-capability` check, which runs `template version`, fails on one, as
+  `file-capability` check, which runs `pisati version`, fails on one, as
   `no-file-capability-xattr` fails on one anywhere in the image
 - **The application is one root-owned file, never written.** The binary
   is `COPY`'d from the build stage, and the app writes nothing, not even to
   `/tmp`
-
-### The PHP layer
-
-`layers/php` is the template's PHP app, kept for a PHP app to move into
-place: it is linted (PHPStan from `layers/php/composer.lock`, REUSE,
-ShellCheck) but never built. `Containerfile.fragment` holds the lines that
-build it, which Renovate's dockerfile manager reads by its name. That
-manager reads an `ARG` only where a `FROM` uses it, so every image a
-fragment pins sits where a `FROM` or a `COPY --from=` uses it: hence the
-fragment's `FROM ${RUNTIME_IMAGE}`, which the Containerfile has already.
-A layer added for another stack keeps to the same rule, and
-`renovate.json` stays out of it. Once in place, these hold of it, as they
-do of Baikal and LibreSpeed:
-
-- **The FrankenPHP binary is divbast/frankenphp's, by digest.** The
-  fragment copies it from `ghcr.io/divbast/frankenphp:baikal@sha256:…`, the
-  binary built for the Baikal image: the page needs only core PHP, so any
-  of divbast/frankenphp's binaries would do. `divbast-verify-images` has
-  gh verify that frankenphp's own `build.yml`, on its main, attested that
-  digest, and refuses the image named anywhere but that `COPY`'s
-  `--from=`: never in an `ARG`, a `LABEL` or a `RUN`. Upstream's own build
-  carries `cap_net_bind_service=ep`, which divbast/frankenphp refuses to
-  publish
-- **8080 is an allowlist in the Caddyfile.** **No `php_server`**: it hands
-  every path it finds no file for to `index.php`, so `/healthz` on 8080
-  would answer 200. Every route is a `handle` block, because Caddy sorts a
-  bare directive after the catch-all 404, and Caddy's admin API is off
-  (`admin off`)
-- **`/healthz` checks `ini`** from inside the server, and the page's
-  `PHP_SAPI` reads `frankenphp` only when FrankenPHP's server ran it.
-  `allow_url_fopen` is off
-- **The application tree stays root-owned and unwritten.** Caddy's own
-  state lives in `/tmp/caddy`, through `XDG_DATA_HOME` and
-  `XDG_CONFIG_HOME`. The fragment copies each file with no `--chmod`,
-  because `COPY --chmod` gives a directory it creates the file's mode, and
-  a directory of mode 0644 cannot be entered
-
-### The .NET layer
-
-`layers/dotnet` is the template's .NET app, kept for a .NET app to move
-into place, and like the PHP layer it is linted but never built. Its
-`Containerfile` is a whole one, which replaces the root one at step 0 and
-is written for the layout that leaves. It keeps the layer rule with no
-stand-in: each of its three pins sits where a `FROM` uses it. `just lint`
-runs `dotnet-lint`, which checks the demo is formatted as `dotnet format`
-leaves it and builds with every warning an error, in the SDK image the
-backend stage pins, then hadolint and `docker build --check` over the
-Containerfile. In CI, the lint job first verifies the layer's images,
-through `build.yml`'s `verify-containerfiles`, so none runs unverified.
-The Go gates, ShellCheck, shfmt and REUSE reach the rest through their own
-globs.
-
-- **Two build-stage checks guard a .NET major**, which would otherwise
-  show only as dotnet's own error, or as an app that will not start.
-  `test/global-json.sh` holds the SDK an upstream's `global.json` names to
-  the image's major and minor, then lets it roll forward to any later
-  feature band; `test/runtime-major.sh` holds the published app's
-  runtimeconfig to the runtime image's tag. Each fails a mismatch with the
-  steps to take, naming "A .NET major" below. Each is a build-stage check
-  under "Code quality"'s rules, and its Go test, `test/globaljson` or
-  `test/runtimemajor`, also checks the Containerfile runs it where it
-  must. The two scripts and their tests are prowlarr-oci-image's too,
-  byte for byte but for the SPDX line, so a change to one goes to both
-- **The demo has no `global.json`**, and its target framework is whichever
-  its SDK bundles. Renovate's NuGet manager would move a `global.json` on
-  its own, apart from the SDK image: a second SDK pin, free to disagree
-  with the first. An upstream's arrives with its source at build time,
-  where Renovate never sees it
-
-Once in place, these hold of it, and of Prowlarr too, except where a
-bullet says otherwise:
-
-- **Every stage is a Docker Hardened Image, by digest**, its signature by
-  Docker verified before anything is built: the SDK, the probe's Go, and
-  the runtime, `dhi.io/aspnetcore`, which has no shell or package manager.
-  Renovate moves the SDK and runtime in one pull request, since an app
-  needs the runtime patch its SDK knows
-- **The app is framework-dependent**, so a rebuild of the runtime image
-  patches the .NET it runs on. It is published offline, after a restore,
-  to `/app/bin`, with no target framework in any path; `/app/bin` is
-  root-owned and never written. Here it is also the runtime stage's
-  `WORKDIR`, and so ASP.NET Core's content root; Prowlarr's runtime stage
-  sets no `WORKDIR`
-- **One port, 8080, with health beside the page.** The apphost is PID 1
-  and the one listener, with .NET's diagnostics socket off. An upstream
-  .NET app cannot host a probe subcommand, so the probe, `divbast-template`,
-  is a static Go binary of its own, on the standard library, which the
-  `HEALTHCHECK` runs. The contract has no health port: `HealthPort` 0, and
-  `HealthPath` the app's own health endpoint, here `/healthz`, and
-  Prowlarr's `/ping`
-
-### A .NET major
-
-A .NET major moves by hand, about once per LTS, because neither of its two
-pull requests can go green alone: upstream's retargeted release needs the
-new SDK, and the SDK and runtime the Dashboard holds back cannot build or
-run the app upstream had before. The build-stage checks above fail each
-with a message naming this section; only an upstream with no
-`global.json` that retargets first fails on dotnet's own error instead.
-Each step needs the user's go-ahead:
-
-1. The app's Renovate PR is red with one of the checks' messages, where
-   `W` is the new .NET:
-   `ERROR: global.json asks for the .NET W SDK; … Approve the .NET W major …`
-   or `ERROR: the app targets .NET W; … Approve …`.
-2. Approve the major, the "dhi .NET SDK and runtime" group, on the
-   Dependency Dashboard. Renovate opens its PR, red on its own: a check
-   fails it with `ERROR: … A .NET major waits until … retargets …`, which
-   here is expected, and no reason to stop.
-3. On a branch from main, take both Renovate commits with
-   `git cherry-pick -S`, open a PR, and merge it when green.
-4. Close the two Renovate PRs.
-
-For the template alone, approving the major is the whole step: the demo's
-target framework follows its SDK, and no upstream waits on it.
 
 ## Where the shared parts live
 
@@ -289,9 +158,6 @@ target framework follows its SDK, and no upstream waits on it.
   - the reusable workflows: `app-check.yml` (lint; the image built for
     amd64 and arm64 once every image it builds from verifies; the acceptance
     suite on each under Docker and rootless Podman; the scan),
-    `app-publish.yml` (the daily slot and the button only: push, index,
-    attest, verify, then tag and check as an anonymous client pulls it;
-    its `rehearse` input sends all of that to a registry inside the job),
     `renovate.yml` and `stall.yml`. `build.yml`, `renovate.yml` and
     `stall.yml` here call them, and keep their own triggers and the
     `required` job;
@@ -301,7 +167,7 @@ target framework follows its SDK, and no upstream waits on it.
   - the Go tools, which `just ci-tools` builds into `.ci/bin/`, run from
     this repository's root: `divbast-pin`, `divbast-verify-images`,
     `divbast-scan`, `divbast-testcount`, `divbast-published-revision`,
-    `divbast-publish-decision`, `divbast-stall` and the rest;
+    `divbast-stall` and the rest;
   - the acceptance `harness` and the `contract` suite, which `go.mod`
     requires through `replace github.com/divbast/ci => ./.ci`;
   - `go/golangci.yml`, the one golangci-lint configuration, and
@@ -311,20 +177,16 @@ target framework follows its SDK, and no upstream waits on it.
   moves every pin of it at once. `just setup`, and the pin check
   (`divbast-pin`) in each ci workflow that runs this repository's code,
   refuse workflows that call ci at more than one commit
-- **divbast/frankenphp** builds and attests the PHP layer's binary,
-  `ghcr.io/divbast/frankenphp:baikal`, with its pins and the in-build
-  checks on them
 - **divbast/renovate-config** holds the presets `renovate.json` extends.
-  `renovate.json` adds nothing of its own: an app adds its upstream's
-  manager and rule there
+  `renovate.json` adds nothing of its own yet
 - **divbast/infra** holds the org's settings, this repository's rulesets
   and its template flag, the `divbast-renovate` App, the `renovate`
-  environment and `OCI_IMAGE_TEMPLATE_AUTOMERGE`
+  environment and `PISATI_AUTOMERGE`
 
 ## Key commands
 
 - `just setup` — fetch divbast/ci into `.ci/` at the commit the workflows
-  pin, then install the pinned toolchain, and PHPStan for the PHP layer. One command on a
+  pin, then install the pinned toolchain. One command on a
   fresh clone, and again whenever the pin moves; `just lint` fails, naming
   it, when `.ci` is not at the pinned commit (`ci-fresh`)
 - `just build` — build the image locally. It does not verify the images it
@@ -334,14 +196,13 @@ target framework follows its SDK, and no upstream waits on it.
   `just build` wrote, under `ENGINE` (docker unless it says podman),
   through `divbast-testcount`, which fails the run unless a test passed and
   none failed or skipped. `just IMAGE=… acceptance` tests another image.
-  `ENGINE=docker IMAGE=localhost/oci-image-template:dev mise exec -- go test
+  `ENGINE=docker IMAGE=localhost/pisati:dev mise exec -- go test
   -run TestServes ./test/acceptance/` runs one test
 - `just test` — build, then the acceptance suite
 - `just lint` — pinact, zizmor, actionlint, ShellCheck and shfmt, the Go
   gates (the compiler, `go vet`, `go fix -diff`, `go mod tidy -diff`,
   `golangci-lint fmt --diff` and `golangci-lint run`), `go-test`, `reuse
-  lint`, hadolint, `docker build --check`, PHPStan over the PHP layer, and
-  `dotnet-lint`, hadolint and `docker build --check` over the .NET layer.
+  lint`, hadolint and `docker build --check`.
   `go-test` runs every Go test under the race detector; the acceptance
   suite skips there, since `IMAGE` is unset
 - `just archive`, `just scan` — write the image as an OCI archive, then run
@@ -361,39 +222,19 @@ target framework follows its SDK, and no upstream waits on it.
   nothing else, as divbast/ci's README says; CI passes its own
 - **Go builds with the toolchain mise installs and nothing else.**
   `GOTOOLCHAIN=local` keeps `go.mod`'s line from downloading another. And
-  `GOFLAGS=-mod=readonly`, because a PHP app made from the template keeps
-  Composer's `vendor/` at the module root, where Go would take it for a Go
-  vendor directory once `go.mod` has a `require`, and refuse to build;
-  readonly is the default outside vendor mode, and still refuses to edit
-  `go.mod`
+  `GOFLAGS=-mod=readonly`, which is the default outside vendor mode, and
+  still refuses to edit `go.mod`. Go tools live in their own module,
+  `tools/go.mod`, and run as `go tool -modfile=tools/go.mod <tool>`
 - **`just lint` needs a running Docker daemon**, for `docker build --check`,
-  logged in to dhi.io for the .NET layer's images, which `dotnet-lint` runs
-  and `--check` reads. `--check` is a buildx flag with no podman
+  logged in to dhi.io for the Containerfile's images, which `--check`
+  reads. `--check` is a buildx flag with no podman
   equivalent, so that gate does not honour `ENGINE` and does not run
   without dockerd
-- **The .NET SDK is not in mise.** The demo is linted in the SDK image the
-  .NET layer's backend stage pins, which CI verifies first: one SDK pin,
-  and no second one in `mise.toml` to disagree with it. `dotnet-lint` runs
-  it under Docker whatever `ENGINE` says, since the dhi.io login is Docker's
 - **`just scan` needs `skopeo` on `PATH`.** It reads the published image with
   [skopeo](https://github.com/containers/skopeo), which no `mise.toml` entry
   provides, so `just ci` needs it too. CI runners already have it
-- **PHP is a deliberate exception.** `php` and
-  `composer` come from the host, not from mise: mise's only PHP backend
-  compiles PHP from source, which is minutes added to every CI run in order to
-  analyse a handful of files. PHPStan is therefore pinned by the PHP layer's
-  `composer.lock`, and its `phpstan.neon` sets `phpVersion` so the
-  *analysis target* is fixed no matter which PHP runs the analyser
-- **So the PHP layer carries `composer.json`, `composer.lock` and a
-  `vendor/`, and that deserves an explanation**, because a PHP image's whole
-  claim is that no PHP toolchain reaches it. None of it does. The Containerfile
-  copies named paths and never the build context, `vendor/` is gitignored, and
-  `.dockerignore` excludes it, and the whole of `layers/`, so that a `COPY`
-  written broadly at some later date cannot quietly change the answer. `composer.json` has no `require`
-  section, no `autoload` and no package name on purpose: Composer is asked to
-  install a linter here, not to make this a PHP project
-- Licensing for `composer.json`, `composer.lock` and `renovate.json` lives in
-  `.license` sidecars. JSON has no comment syntax, and an SPDX tag written as
+- Licensing for `renovate.json` lives in a
+  `.license` sidecar. JSON has no comment syntax, and an SPDX tag written as
   a string value carries the closing quote into the expression, which `reuse`
   rejects
 
@@ -419,18 +260,17 @@ target framework follows its SDK, and no upstream waits on it.
   GitHub not answering fails the scan rather than waving it through. A
   local `just scan` never asks GitHub, so a refusal there is advisory,
   with a warning that only CI can tell what it means
-- REUSE-compliant SPDX headers on every file; licence is **BSD-2-Clause**.
-  The image's licences label names only that, because the image ships
-  nothing else of its own; an app that ships an upstream's files adds the
-  upstream's licence to the label, and leaves which file carries which
-  licence to REUSE and the files' SPDX headers
+- REUSE-compliant SPDX headers on every file; licence is **AGPL-3.0-only**.
+  The image's licences label names only that; bundled third-party files
+  keep their own licence, and REUSE and the files' SPDX headers say which
+  file carries which
 - **The acceptance suite is Go, on divbast/ci's harness.** Every
   container it starts runs under `harness.Contract("16m")`, the *exact*
   confinement the contract claims, `--security-opt no-new-privileges` and
   `--tmpfs /tmp:size=16m,noexec,nosuid,nodev` included, so a
   check can never pass under looser settings than we ship. What CI proves
   is what ships. `TestContract` runs ci's contract suite against the image;
-  `TestServes` and `TestStopsPromptly` are the template's own. Each serves through
+  `TestServes` and `TestStopsPromptly` are the app's own. Each serves through
   the harness's `Serve` (or `StartServing`, for a container that must be
   started apart from its first request), which publishes on the host's
   loopback at ports the engine picks, so no two tests, or two suites on one
@@ -445,3 +285,77 @@ target framework follows its SDK, and no upstream waits on it.
   test that runs it against fixtures and sees each way it can fail fail
 - A test suite that has never failed proves nothing. When adding a check, prove
   it can fail before trusting it
+
+# Go Development Principles
+
+## Scope
+
+Prefer modern APIs to older substitutes. 
+
+Prefer guarantees from the compiler, then from package boundaries, then from tooling, then from runtime checks. Where a rule would cost more readability than the mistake it prevents, ask the operator for direction on how to proceed.
+
+## Types
+
+**Start from the types.** Design domain types and function signatures before behaviour.
+
+**Model alternatives as sealed interfaces.** Use an interface with an unexported marker method and one type per variant, each holding only the fields valid for it. Consume it with a type switch that lists every variant and treats an unknown one as a bug.
+
+**Give domain concepts their own types.** Use defined types to keep confusable values apart, and constants of a defined type for a closed set of plain values, instead of bare primitives and boolean parameters.
+
+**Guard invariants behind constructors.** A type with a rule is a struct with unexported fields, built only by a constructor that returns `(X, error)`, with no method that can break the rule.
+
+**Design the zero value.** It is either valid and useful or detectably invalid. In a closed set it means unspecified unless there is a natural default.
+
+**Make absence explicit.** In domain code, return `(T, bool)` rather than a pointer. A pointer signals sharing or mutation.
+
+## Functions
+
+**Narrow inputs, precise outputs.** Accept the narrowest type that works, using standard interfaces where they fit. Declare a new behavioural interface only when a second implementation or a test needs it, in the package that consumes it. Return the most specific type that is useful, never `any`; errors are always returned as `error`.
+
+**Show effects in the signature.** A function that may block or do I/O takes a leading `ctx context.Context`. Every other dependency arrives as a parameter, built once in `main` from configuration read once. Outside `main`, nothing uses package-level state that changes after initialisation, `init` side effects, the environment, the wall clock or a random source other than `crypto/rand`.
+
+**Fail with an error.** Every input gets a result or an error, never a panic and never a nil result with a nil error. Panic only for bugs, and recover only at the top of a request or goroutine.
+
+**Make errors part of the API.** Provide sentinel values or error types for the conditions callers branch on. Inspect them with `errors.Is` and `errors.AsType`, and report independent failures together with `errors.Join`.
+
+**Handle each error exactly once.** Return it or log it, never both. Discard one only explicitly and never the error from `Close` on anything written.
+
+**Copy at ownership boundaries.** Clone slices and maps when storing a caller's data or returning internal state.
+
+**Generalise late.** Add type parameters on the second or third real use. Never type-switch or reflect on a value of type-parameter type. A method may declare its own type parameters, but such a method cannot satisfy an interface.
+
+## Structure
+
+**Pure core, thin shell.** Core packages hold domain types and pure functions that return decisions as data. They take no context, start no goroutines and import nothing that performs I/O. The shell does I/O, concurrency and wiring, and imports the core (never the reverse).
+
+**Parse at the edge, once.** Decode each external input strictly into a boundary type, then convert it to domain types through their constructors. Inner code never sees `any`, `map[string]any` or an unvalidated string that stands for a domain concept.
+
+**Shape packages by capability.** Name each package for what it provides, export the minimum and enforce boundaries with `internal/`.
+
+**Change loudly inside, quietly outside.** Within the module, prefer changes the compiler flags at every call site. Across a published API after v1.0, add rather than change, deprecate with a `//go:fix inline` migration, and reserve breaking changes for a new major version.
+
+**Prefer the standard library.** Add a third-party module only when the standard library cannot reasonably do the job.
+
+## Runtime
+
+**Own every goroutine.** Each has an owner, a cancellation path and a way to be waited for.
+
+**Bound everything.** Limit goroutines, queue and buffer sizes, input size and the duration of every external call.
+
+**Shut down gracefully.** Long-running programs stop accepting work on a signal and drain what is in flight within a deadline.
+
+**Log structured events.** Use `log/slog` with key-value attributes and stable messages, and never log secrets or personal data.
+
+## Readability
+
+**Comment the contract and the reason.** Doc comments on exported identifiers state what they guarantee. Other comments explain why, never what the code already shows.
+
+**Measure before optimising.** Change clear code only where measurement shows it is warranted.
+
+## Testing
+
+**Test behaviour through the exported API.** Use external `_test` packages, so a refactor that preserves behaviour breaks no test.
+
+**Test by layer, hermetically.** Core: table-driven tests without mocks. Shell: fakes, with `testing/synctest` for time and concurrency. Tests that need a real external system form a separate tier that never runs by default.
+
+**Fuzz the invariants.** Fuzz constructor rules, round trips and idempotence.
