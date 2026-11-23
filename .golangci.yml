@@ -146,6 +146,17 @@ linters:
             - github.com/pelletier/go-toml/v2
             - github.com/pressly/goose/v3
             - golang.org/x/crypto/chacha20poly1305 # XChaCha20-Poly1305, which seals fields and wraps the data keys
+            # The OpenTelemetry SDK and its exporters, for metrics and traces
+            - go.opentelemetry.io/otel/attribute
+            - go.opentelemetry.io/otel/codes
+            - go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp
+            - go.opentelemetry.io/otel/exporters/prometheus
+            - go.opentelemetry.io/otel/sdk/metric # and its exemplar package
+            - go.opentelemetry.io/otel/sdk/resource
+            - go.opentelemetry.io/otel/sdk/trace
+            - go.opentelemetry.io/otel/semconv/v1.43.0 # and its httpconv package
+            - go.opentelemetry.io/otel/trace # and its noop package
+            - github.com/prometheus/client_golang/prometheus # the registry OTel's exporter fills, and promhttp, which serves it
           deny:
             - pkg: log$
               desc: use log/slog
@@ -159,6 +170,8 @@ linters:
             - go.uber.org/goleak
             - github.com/divbast/ci # the acceptance suite's harness and contract
             - golang.org/x/crypto/chacha20poly1305 # checks the sealed format against the cipher itself
+            - go.opentelemetry.io/proto/otlp # decodes what the OTLP exporter sends, to check it
+            - google.golang.org/protobuf/proto # the same
     gosec:
       excludes:
         - G101 # secrets: betterleaks
