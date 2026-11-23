@@ -1,0 +1,1052 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
+
+package config_test
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"maps"
+	"net/url"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+	"testing/fstest"
+
+	"github.com/divbast/pisati/internal/config"
+)
+
+const baseURL = "https://blog.example.org"
+
+// everyKey sets every setting a file can hold, each away from its default.
+const everyKey = `
+[server]
+base_url = "https://file.example.org"
+listen = "127.0.0.1:7000"
+internal_listen = "127.0.0.1:7001"
+trusted_proxies = ["10.0.0.0/8"]
+hsts = "include-subdomains"
+
+[storage]
+state_dir = "/srv/file"
+
+[log]
+level = "warn"
+format = "text"
+
+[telemetry]
+otlp_endpoint = "http://collector.file:4318"
+pprof = "on"
+
+[keys]
+master_key_file = "/run/file/key"
+
+[dev]
+vite_url = ""
+`
+
+// env is a fake environment: the variables a test sets, and no others.
+type env map[string]string
+
+// sources gives Load e as its environment, and nothing else.
+func (e env) sources() config.Sources {
+	return config.Sources{
+		Env: func(name string) (string, bool) {
+			v, ok := e[name]
+			return v, ok
+		},
+		EnvNames: slices.Sorted(maps.Keys(e)),
+	}
+}
+
+// setup is what one Load call is given.
+type setup struct {
+	files fstest.MapFS
+	env   env
+	creds fs.FS
+	state string
+}
+
+func (s setup) load() (config.Config, error) {
+	src := s.env.sources()
+	if s.files != nil {
+		src.Files = s.files
+	}
+	src.Credentials = s.creds
+	return config.Load(src, s.state)
+}
+
+func tomlFile(s string) *fstest.MapFile {
+	return &fstest.MapFile{Data: []byte(s)}
+}
+
+// describe spells out every setting in c, keyed by its TOML key.
+func describe(c config.Config) map[string]string {
+	return map[string]string{
+		"server.base_url":         c.Server.BaseURL.String(),
+		"server.listen":           c.Server.Listen.String(),
+		"server.internal_listen":  c.Server.InternalListen.String(),
+		"server.trusted_proxies":  fmt.Sprint(c.Server.TrustedProxies),
+		"server.hsts":             c.Server.HSTS.String(),
+		"storage.state_dir":       c.Storage.StateDir,
+		"log.level":               c.Log.Level.String(),
+		"log.format":              c.Log.Format.String(),
+		"telemetry.otlp_endpoint": optional(c.Telemetry.OTLPEndpoint),
+		"telemetry.pprof":         c.Telemetry.Pprof.String(),
+		"keys.master_key":         source(c.Keys.MasterKey),
+		"dev.vite_url":            optional(c.Dev.ViteURL),
+	}
+}
+
+func optional(o config.OptionalURL) string {
+	u, ok := o.Get()
+	if !ok {
+		return "unset"
+	}
+	return u.String()
+}
+
+func source(s config.SecretSource) string {
+	switch s := s.(type) {
+	case config.FromFile:
+		return "file " + s.Path
+	case config.FromCredential:
+		return "credential " + s.Name
+	case config.Generated:
+		return "generated"
+	case nil:
+		return "nil"
+	}
+	return fmt.Sprintf("unknown %T", s)
+}
+
+// sameConfig fails t for every setting of got that is not as want says.
+func sameConfig(t *testing.T, got config.Config, want map[string]string) {
+	t.Helper()
+	have := describe(got)
+	for _, key := range slices.Sorted(maps.Keys(have)) {
+		if have[key] != want[key] {
+			t.Errorf("%s = %q, want %q", key, have[key], want[key])
+		}
+	}
+}
+
+// refused fails t unless err is an error whose text names every one of
+// names, and which wraps want.
+func refused(t *testing.T, err, want error, names ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("Load succeeded, want an error naming %q", names)
+	}
+	if !errors.Is(err, want) {
+		t.Errorf("error %q does not wrap %q", err, want)
+	}
+	for _, name := range names {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error %q does not name %q", err, name)
+		}
+	}
+}
+
+func TestLoadDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": baseURL}}.load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	sameConfig(t, cfg, map[string]string{
+		"server.base_url":         baseURL,
+		"server.listen":           ":8080",
+		"server.internal_listen":  ":8081",
+		"server.trusted_proxies":  "[]",
+		"server.hsts":             "host-only",
+		"storage.state_dir":       "/var/lib/pisati",
+		"log.level":               "INFO",
+		"log.format":              "json",
+		"telemetry.otlp_endpoint": "unset",
+		"telemetry.pprof":         "off",
+		"keys.master_key":         "generated",
+		"dev.vite_url":            "unset",
+	})
+	if !cfg.Server.BaseURL.IsHTTPS() {
+		t.Errorf("%s: IsHTTPS = false", cfg.Server.BaseURL)
+	}
+	if cfg.Server.Listen.Port() != 8080 || cfg.Server.InternalListen.Port() != 8081 {
+		t.Errorf("ports %d and %d, want 8080 and 8081", cfg.Server.Listen.Port(), cfg.Server.InternalListen.Port())
+	}
+
+	// Each closed set's default is its zero value.
+	var zero config.Config
+	if zero.Server.HSTS != config.HSTSHostOnly || zero.Log.Format != config.LogJSON || zero.Telemetry.Pprof != config.Off {
+		t.Errorf("zero values %v, %v, %v, want host-only, json, off", zero.Server.HSTS, zero.Log.Format, zero.Telemetry.Pprof)
+	}
+	if cfg.Server.HSTS != config.HSTSHostOnly || cfg.Log.Format != config.LogJSON || cfg.Telemetry.Pprof != config.Off {
+		t.Errorf("defaults %v, %v, %v, want host-only, json, off", cfg.Server.HSTS, cfg.Log.Format, cfg.Telemetry.Pprof)
+	}
+	if _, ok := zero.Telemetry.OTLPEndpoint.Get(); ok {
+		t.Error("the zero OptionalURL is set")
+	}
+}
+
+func TestLoadRequiresBaseURL(t *testing.T) {
+	t.Parallel()
+
+	for name, src := range map[string]config.Sources{
+		"nothing given": {},
+		"empty":         env{"PISATI_SERVER_BASE_URL": ""}.sources(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := config.Load(src, "")
+			refused(t, err, config.ErrMissing, "server.base_url", "PISATI_SERVER_BASE_URL", "https")
+		})
+	}
+}
+
+func TestDropInsMergeInNameOrder(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"pisati.toml": tomlFile(`
+[server]
+base_url = "https://blog.example.org"
+listen = ":9000"
+trusted_proxies = ["10.0.0.0/8", "192.168.0.0/16"]
+hsts = "include-subdomains"
+
+[log]
+level = "debug"
+`),
+		// Written out of order: Load sorts them by name.
+		"pisati.toml.d/20-late.toml":    tomlFile("[server]\nlisten = \":9002\"\n\n[log]\nformat = \"text\"\n"),
+		"pisati.toml.d/10-early.toml":   tomlFile("[server]\nlisten = \":9001\"\ntrusted_proxies = [\"172.16.0.0/12\"]\n"),
+		"pisati.toml.d/30-old.toml.bak": tomlFile("not TOML ["),
+		"pisati.toml.d/README":          tomlFile("not TOML either ["),
+	}
+	cfg, err := setup{files: files}.load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	sameConfig(t, cfg, map[string]string{
+		"server.base_url":         baseURL,
+		"server.listen":           ":9002",           // the last drop-in wins
+		"server.internal_listen":  ":8081",           // nothing set it
+		"server.trusted_proxies":  "[172.16.0.0/12]", // replaced, not appended
+		"server.hsts":             "include-subdomains",
+		"storage.state_dir":       "/var/lib/pisati",
+		"log.level":               "DEBUG", // [log] merged with the drop-in's
+		"log.format":              "text",
+		"telemetry.otlp_endpoint": "unset",
+		"telemetry.pprof":         "off",
+		"keys.master_key":         "generated",
+		"dev.vite_url":            "unset",
+	})
+
+	// Name order is byte order, so 9 sorts after 10, and drop-ins need no
+	// pisati.toml.
+	cfg, err = setup{files: fstest.MapFS{
+		"pisati.toml.d/9-last.toml":   tomlFile("[server]\nbase_url = \"https://nine.example.org\"\n"),
+		"pisati.toml.d/10-first.toml": tomlFile("[server]\nbase_url = \"https://ten.example.org\"\n"),
+	}}.load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Server.BaseURL.String(); got != "https://nine.example.org" {
+		t.Errorf("base URL %q, want the one from 9-last.toml", got)
+	}
+}
+
+func TestEnvWinsOverFiles(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{"pisati.toml": tomlFile(everyKey)}
+	cfg, err := setup{files: files}.load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	sameConfig(t, cfg, map[string]string{
+		"server.base_url":         "https://file.example.org",
+		"server.listen":           "127.0.0.1:7000",
+		"server.internal_listen":  "127.0.0.1:7001",
+		"server.trusted_proxies":  "[10.0.0.0/8]",
+		"server.hsts":             "include-subdomains",
+		"storage.state_dir":       "/srv/file",
+		"log.level":               "WARN",
+		"log.format":              "text",
+		"telemetry.otlp_endpoint": "http://collector.file:4318",
+		"telemetry.pprof":         "on",
+		"keys.master_key":         "file /run/file/key",
+		"dev.vite_url":            "unset",
+	})
+
+	cfg, err = setup{files: files, env: env{
+		"PISATI_SERVER_BASE_URL":         "http://localhost:8080",
+		"PISATI_SERVER_LISTEN":           "[::1]:9000",
+		"PISATI_SERVER_INTERNAL_LISTEN":  "[::1]:9001",
+		"PISATI_SERVER_TRUSTED_PROXIES":  "192.0.2.0/24, 2001:db8::/32",
+		"PISATI_SERVER_HSTS":             "preload",
+		"PISATI_STORAGE_STATE_DIR":       "/srv/env",
+		"PISATI_LOG_LEVEL":               "error",
+		"PISATI_LOG_FORMAT":              "json",
+		"PISATI_TELEMETRY_OTLP_ENDPOINT": "https://collector.env/v1/traces",
+		"PISATI_TELEMETRY_PPROF":         "off",
+		"PISATI_KEYS_MASTER_KEY_FILE":    "/run/env/key",
+		"PISATI_DEV_VITE_URL":            "http://localhost:5173",
+	}}.load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	sameConfig(t, cfg, map[string]string{
+		"server.base_url":         "http://localhost:8080",
+		"server.listen":           "[::1]:9000",
+		"server.internal_listen":  "[::1]:9001",
+		"server.trusted_proxies":  "[192.0.2.0/24 2001:db8::/32]",
+		"server.hsts":             "preload",
+		"storage.state_dir":       "/srv/env",
+		"log.level":               "ERROR",
+		"log.format":              "json",
+		"telemetry.otlp_endpoint": "https://collector.env/v1/traces",
+		"telemetry.pprof":         "off",
+		"keys.master_key":         "file /run/env/key",
+		"dev.vite_url":            "http://localhost:5173",
+	})
+}
+
+func TestFileVariable(t *testing.T) {
+	t.Parallel()
+
+	const secret = "correct-horse-battery-staple"
+
+	cfg, err := setup{env: env{
+		"PISATI_SERVER_BASE_URL":      baseURL,
+		"PISATI_KEYS_MASTER_KEY_FILE": "/run/secrets/pisati-master-key",
+	}}.load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := source(cfg.Keys.MasterKey); got != "file /run/secrets/pisati-master-key" {
+		t.Errorf("master key from %s, want the file", got)
+	}
+
+	tests := map[string]setup{
+		"both forms": {env: env{
+			"PISATI_SERVER_BASE_URL":      baseURL,
+			"PISATI_KEYS_MASTER_KEY":      secret,
+			"PISATI_KEYS_MASTER_KEY_FILE": "/run/secrets/pisati-master-key",
+		}},
+		"the value alone": {env: env{
+			"PISATI_SERVER_BASE_URL": baseURL,
+			"PISATI_KEYS_MASTER_KEY": secret,
+		}},
+		"an empty value": {env: env{
+			"PISATI_SERVER_BASE_URL": baseURL,
+			"PISATI_KEYS_MASTER_KEY": "",
+		}},
+	}
+	for name, s := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := s.load()
+			refused(t, err, config.ErrInvalid, "(PISATI_KEYS_MASTER_KEY)", "(PISATI_KEYS_MASTER_KEY_FILE)")
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("error %q holds the secret", err)
+			}
+		})
+	}
+
+	t.Run("in a file", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := setup{
+			files: fstest.MapFS{"pisati.toml": tomlFile("[keys]\nmaster_key = \"" + secret + "\"\n")},
+			env:   env{"PISATI_SERVER_BASE_URL": baseURL},
+		}.load()
+		refused(t, err, config.ErrInvalid, "keys.master_key ", "keys.master_key_file", "PISATI_KEYS_MASTER_KEY_FILE")
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error %q holds the secret", err)
+		}
+	})
+
+	t.Run("a relative path", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := setup{env: env{
+			"PISATI_SERVER_BASE_URL":      baseURL,
+			"PISATI_KEYS_MASTER_KEY_FILE": "secrets/key",
+		}}.load()
+		refused(t, err, config.ErrInvalid, "PISATI_KEYS_MASTER_KEY_FILE", "absolute")
+	})
+}
+
+func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
+	t.Parallel()
+
+	_, err := setup{
+		files: fstest.MapFS{
+			"pisati.toml":                 tomlFile("[server]\nbase_url = \"https://blog.example.org\"\nbsae_url = \"x\"\n\n[nope]\nkey = 1\n"),
+			"pisati.toml.d/10-extra.toml": tomlFile("toplevel = true\n"),
+		},
+		env: env{
+			"PISATI_SERVER_BSAE_URL": "x",
+			"PISATI_SERVER_LISTEN":   ":9000",
+			"HOME":                   "/home/someone",
+		},
+	}.load()
+	refused(t, err, config.ErrUnknown,
+		"pisati.toml:3:1: server.bsae_url",
+		"nope",
+		"pisati.toml.d/10-extra.toml:1:1: toplevel",
+		"PISATI_SERVER_BSAE_URL",
+	)
+	for _, known := range []string{"HOME", "PISATI_SERVER_LISTEN"} {
+		if strings.Contains(err.Error(), known) {
+			t.Errorf("error %q names %s, which is not unknown", err, known)
+		}
+	}
+
+	t.Run("values after an unknown key", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := setup{
+			files: fstest.MapFS{"pisati.toml": tomlFile("[server]\nbsae_url = 1\nbase_url = \"https://blog.example.org\"\nlisten = \"nope\"\n")},
+		}.load()
+		refused(t, err, config.ErrUnknown, "server.bsae_url")
+		refused(t, err, config.ErrInvalid, "server.listen (PISATI_SERVER_LISTEN)", `"nope"`)
+		if errors.Is(err, config.ErrMissing) {
+			t.Errorf("error %q reports the base URL missing, though the file gives it after the unknown key", err)
+		}
+	})
+
+	t.Run("a value of the wrong type", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := setup{
+			files: fstest.MapFS{"pisati.toml": tomlFile("[server]\nbase_url = \"https://blog.example.org\"\nlisten = 8080\n")},
+		}.load()
+		refused(t, err, config.ErrInvalid, "pisati.toml:3:", "server.listen")
+		// The file gives no values once it fails to decode, so nothing
+		// else is reported about the one that failed.
+		if strings.Contains(err.Error(), "(PISATI_SERVER_LISTEN)") {
+			t.Errorf("error %q reports server.listen twice", err)
+		}
+	})
+
+	t.Run("not TOML", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := setup{
+			files: fstest.MapFS{"pisati.toml.d/10-broken.toml": tomlFile("[server\n")},
+			env:   env{"PISATI_SERVER_BASE_URL": baseURL},
+		}.load()
+		refused(t, err, config.ErrInvalid, "pisati.toml.d/10-broken.toml:1:")
+	})
+}
+
+func TestUnknownEnv(t *testing.T) {
+	t.Parallel()
+
+	names := []string{
+		"HOME", "PISATI", "PISATI_NOPE", "PISATI_SERVER_BASE_URL",
+		"pisati_server_base_url", "PISATI_NOPE", "PISATI_",
+		"PISATI_KEYS_MASTER_KEY", "PISATI_KEYS_MASTER_KEY_FILE",
+	}
+	before := slices.Clone(names)
+	got := config.UnknownEnv(names)
+	if want := []string{"PISATI_", "PISATI_NOPE", "pisati_server_base_url"}; !slices.Equal(got, want) {
+		t.Errorf("UnknownEnv = %q, want %q", got, want)
+	}
+	if !slices.Equal(names, before) {
+		t.Errorf("UnknownEnv changed its argument to %q", names)
+	}
+
+	known := []string{
+		"PISATI_SERVER_BASE_URL", "PISATI_SERVER_LISTEN", "PISATI_SERVER_INTERNAL_LISTEN",
+		"PISATI_SERVER_TRUSTED_PROXIES", "PISATI_SERVER_HSTS", "PISATI_STORAGE_STATE_DIR",
+		"PISATI_LOG_LEVEL", "PISATI_LOG_FORMAT", "PISATI_TELEMETRY_OTLP_ENDPOINT",
+		"PISATI_TELEMETRY_PPROF", "PISATI_KEYS_MASTER_KEY", "PISATI_KEYS_MASTER_KEY_FILE",
+		"PISATI_DEV_VITE_URL",
+	}
+	if got := config.UnknownEnv(known); len(got) != 0 {
+		t.Errorf("UnknownEnv(every known name) = %q, want none", got)
+	}
+}
+
+func TestLoadListsEveryError(t *testing.T) {
+	t.Parallel()
+
+	_, err := setup{
+		files: fstest.MapFS{"pisati.toml": tomlFile("[server]\nbase_url = \"https://blog.example.org\"\nlisten = \"nope\"\n")},
+		env:   env{"PISATI_LOG_LEVEL": "loud", "PISATI_SERVER_HSTS": "always"},
+	}.load()
+	refused(t, err, config.ErrInvalid,
+		"server.listen (PISATI_SERVER_LISTEN)", `"nope"`,
+		"log.level (PISATI_LOG_LEVEL)", `"loud"`, "debug, info, warn or error",
+		"server.hsts (PISATI_SERVER_HSTS)", `"always"`, "host-only, include-subdomains or preload",
+	)
+	joined, ok := errors.AsType[interface {
+		error
+		Unwrap() []error
+	}](err)
+	if !ok {
+		t.Fatalf("error %q joins nothing", err)
+	}
+	if got := joined.Unwrap(); len(got) != 3 {
+		t.Errorf("Load joined %d errors, want 3: %q", len(got), got)
+	}
+}
+
+func TestLoadRefusesPlainHTTPBaseURL(t *testing.T) {
+	t.Parallel()
+
+	accepted := []struct {
+		in, want string
+		https    bool
+	}{
+		{in: "https://blog.example.org", want: "https://blog.example.org", https: true},
+		{in: "https://blog.example.org/", want: "https://blog.example.org", https: true},
+		{in: "https://Blog.Example.ORG:443", want: "https://blog.example.org", https: true},
+		{in: "HTTPS://blog.example.org:8443", want: "https://blog.example.org:8443", https: true},
+		{in: "https://192.0.2.10", want: "https://192.0.2.10", https: true},
+		{in: "https://[2001:db8::10]:8443", want: "https://[2001:db8::10]:8443", https: true},
+		{in: "https://localhost", want: "https://localhost", https: true},
+		{in: "http://localhost:8080", want: "http://localhost:8080"},
+		{in: "http://LOCALHOST:8080/", want: "http://localhost:8080"},
+		{in: "http://127.0.0.1:8080", want: "http://127.0.0.1:8080"},
+		{in: "http://[::1]:8080", want: "http://[::1]:8080"},
+		{in: "http://localhost:80", want: "http://localhost"},
+	}
+	for _, tt := range accepted {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+
+			cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": tt.in}}.load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.Server.BaseURL.String(); got != tt.want {
+				t.Errorf("base URL %q, want %q", got, tt.want)
+			}
+			if got := cfg.Server.BaseURL.IsHTTPS(); got != tt.https {
+				t.Errorf("IsHTTPS = %v, want %v", got, tt.https)
+			}
+			direct, err := config.ParseBaseURL(tt.in)
+			if err != nil || direct != cfg.Server.BaseURL {
+				t.Errorf("ParseBaseURL(%q) = %v, %v, want what Load made", tt.in, direct, err)
+			}
+		})
+	}
+
+	for _, in := range []string{
+		"http://blog.example.org",
+		"http://blog.example.org:8080",
+		"http://127.0.0.2:8080",
+		"http://[::ffff:127.0.0.1]:8080",
+		"http://localhost.example.org",
+		"http://0.0.0.0:8080",
+		"https://blog.example.org/blog",
+		"https://blog.example.org//",
+		"https://blog.example.org/%2F",
+		"https://blog.example.org?x=1",
+		"https://blog.example.org?",
+		"https://blog.example.org#top",
+		"https://blog.example.org#",
+		"https://someone@blog.example.org",
+		"https://someone:pw@blog.example.org",
+		"ftp://blog.example.org",
+		"blog.example.org",
+		"//blog.example.org",
+		"https:blog.example.org",
+		"https://",
+		"https:///",
+		"https://blog example.org",
+		"https://blog.example.org:0",
+		"https://blog.example.org:65536",
+		"https://[127.0.0.1]",
+		"https://[fe80::1%25eth0]",
+		"https://127.1",
+		"https://-blog.example.org",
+		"https://blog..example.org",
+		"https://blog.example.org.",
+		" https://blog.example.org",
+		"https://blog.example.org\n",
+	} {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := setup{env: env{"PISATI_SERVER_BASE_URL": in}}.load()
+			refused(t, err, config.ErrInvalid, "server.base_url (PISATI_SERVER_BASE_URL)", "https")
+			if _, err := config.ParseBaseURL(in); !errors.Is(err, config.ErrInvalid) {
+				t.Errorf("ParseBaseURL(%q) = %v, want ErrInvalid", in, err)
+			}
+		})
+	}
+}
+
+func TestSettingRules(t *testing.T) {
+	t.Parallel()
+
+	listen := func(c config.Config) string { return c.Server.Listen.String() }
+	proxies := func(c config.Config) string { return fmt.Sprint(c.Server.TrustedProxies) }
+	hsts := func(c config.Config) string { return c.Server.HSTS.String() }
+	level := func(c config.Config) string { return c.Log.Level.String() }
+	format := func(c config.Config) string { return c.Log.Format.String() }
+	pprof := func(c config.Config) string { return c.Telemetry.Pprof.String() }
+	otlp := func(c config.Config) string { return optional(c.Telemetry.OTLPEndpoint) }
+
+	tests := []struct {
+		env, value string
+		got        func(config.Config) string
+		want       string // empty when the value is refused
+	}{
+		{env: "PISATI_SERVER_LISTEN", value: "127.0.0.1:9000", got: listen, want: "127.0.0.1:9000"},
+		{env: "PISATI_SERVER_LISTEN", value: "[::1]:9000", got: listen, want: "[::1]:9000"},
+		{env: "PISATI_SERVER_LISTEN", value: "localhost:9000", got: listen, want: "localhost:9000"},
+		{env: "PISATI_SERVER_LISTEN", value: ":65535", got: listen, want: ":65535"},
+		{env: "PISATI_SERVER_LISTEN", value: ":0", got: listen},
+		{env: "PISATI_SERVER_LISTEN", value: ":65536", got: listen},
+		{env: "PISATI_SERVER_LISTEN", value: ":http", got: listen},
+		{env: "PISATI_SERVER_LISTEN", value: ":-1", got: listen},
+		{env: "PISATI_SERVER_LISTEN", value: "8080", got: listen},
+		{env: "PISATI_SERVER_LISTEN", value: "", got: listen},
+		{env: "PISATI_SERVER_LISTEN", value: "::1:8080", got: listen},
+		{env: "PISATI_SERVER_LISTEN", value: "bad host:8080", got: listen},
+		{env: "PISATI_SERVER_TRUSTED_PROXIES", value: "10.0.0.1", got: proxies, want: "[10.0.0.1/32]"},
+		{env: "PISATI_SERVER_TRUSTED_PROXIES", value: "2001:db8::1", got: proxies, want: "[2001:db8::1/128]"},
+		{env: "PISATI_SERVER_TRUSTED_PROXIES", value: "10.0.0.0/8,192.168.0.0/16", got: proxies, want: "[10.0.0.0/8 192.168.0.0/16]"},
+		{env: "PISATI_SERVER_TRUSTED_PROXIES", value: "", got: proxies, want: "[]"},
+		{env: "PISATI_SERVER_TRUSTED_PROXIES", value: "10.0.0.1/8", got: proxies},
+		{env: "PISATI_SERVER_TRUSTED_PROXIES", value: "10.0.0.0/33", got: proxies},
+		{env: "PISATI_SERVER_TRUSTED_PROXIES", value: "10.0.0.0/8,,192.168.0.0/16", got: proxies},
+		{env: "PISATI_SERVER_TRUSTED_PROXIES", value: "fe80::1%eth0", got: proxies},
+		{env: "PISATI_SERVER_TRUSTED_PROXIES", value: "proxy.example.org", got: proxies},
+		{env: "PISATI_SERVER_HSTS", value: "preload", got: hsts, want: "preload"},
+		{env: "PISATI_SERVER_HSTS", value: "Preload", got: hsts},
+		{env: "PISATI_LOG_LEVEL", value: "debug", got: level, want: "DEBUG"},
+		{env: "PISATI_LOG_LEVEL", value: "warn", got: level, want: "WARN"},
+		{env: "PISATI_LOG_LEVEL", value: "INFO", got: level},
+		{env: "PISATI_LOG_LEVEL", value: "info+2", got: level},
+		{env: "PISATI_LOG_FORMAT", value: "text", got: format, want: "text"},
+		{env: "PISATI_LOG_FORMAT", value: "yaml", got: format},
+		{env: "PISATI_TELEMETRY_PPROF", value: "on", got: pprof, want: "on"},
+		{env: "PISATI_TELEMETRY_PPROF", value: "true", got: pprof},
+		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "http://collector:4318", got: otlp, want: "http://collector:4318"},
+		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "https://Collector.Example.org/v1/traces", got: otlp, want: "https://collector.example.org/v1/traces"},
+		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "", got: otlp, want: "unset"},
+		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "ftp://collector", got: otlp},
+		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "collector:4318", got: otlp},
+		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "http://someone:pw@collector.example.org", got: otlp},
+		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "http://collector#x", got: otlp},
+		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "http://collector?x=1", got: otlp},
+		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "http:///v1/traces", got: otlp},
+	}
+	for _, tt := range tests {
+		t.Run(tt.env+"="+tt.value, func(t *testing.T) {
+			t.Parallel()
+
+			cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": baseURL, tt.env: tt.value}}.load()
+			if tt.want == "" {
+				refused(t, err, config.ErrInvalid, tt.env)
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := tt.got(cfg); got != tt.want {
+				t.Errorf("%s=%q gives %q, want %q", tt.env, tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStateDirFromSystemd(t *testing.T) {
+	t.Parallel()
+
+	const systemd = "/var/lib/private/pisati"
+	stateFile := fstest.MapFS{"pisati.toml": tomlFile("[storage]\nstate_dir = \"/srv/pisati\"\n")}
+
+	accepted := map[string]struct {
+		s    setup
+		want string
+	}{
+		"from systemd":          {s: setup{state: systemd}, want: systemd},
+		"the default":           {s: setup{}, want: "/var/lib/pisati"},
+		"a file wins":           {s: setup{state: systemd, files: stateFile}, want: "/srv/pisati"},
+		"a variable wins":       {s: setup{state: systemd, files: stateFile, env: env{"PISATI_STORAGE_STATE_DIR": "/srv/env"}}, want: "/srv/env"},
+		"unused when overruled": {s: setup{state: "relative", env: env{"PISATI_STORAGE_STATE_DIR": "/srv/env"}}, want: "/srv/env"},
+	}
+	for name, tt := range accepted {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if tt.s.env == nil {
+				tt.s.env = env{}
+			}
+			tt.s.env["PISATI_SERVER_BASE_URL"] = baseURL
+			cfg, err := tt.s.load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Storage.StateDir != tt.want {
+				t.Errorf("state directory %q, want %q", cfg.Storage.StateDir, tt.want)
+			}
+		})
+	}
+
+	refusals := map[string]struct {
+		s    setup
+		name string
+	}{
+		"relative from systemd": {s: setup{state: "pisati"}, name: "STATE_DIRECTORY"},
+		"several from systemd":  {s: setup{state: "/var/lib/a:/var/lib/b"}, name: "STATE_DIRECTORY"},
+		"unclean from systemd":  {s: setup{state: "/var/lib/../lib/pisati"}, name: "STATE_DIRECTORY"},
+		"relative in a file": {
+			s:    setup{files: fstest.MapFS{"pisati.toml": tomlFile("[storage]\nstate_dir = \"data\"\n")}},
+			name: "storage.state_dir (PISATI_STORAGE_STATE_DIR)",
+		},
+		"unclean in a variable": {
+			s:    setup{env: env{"PISATI_STORAGE_STATE_DIR": "/srv/pisati/"}},
+			name: "storage.state_dir (PISATI_STORAGE_STATE_DIR)",
+		},
+	}
+	for name, tt := range refusals {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if tt.s.env == nil {
+				tt.s.env = env{}
+			}
+			tt.s.env["PISATI_SERVER_BASE_URL"] = baseURL
+			_, err := tt.s.load()
+			refused(t, err, config.ErrInvalid, tt.name)
+		})
+	}
+}
+
+func TestMasterKeySourceOrder(t *testing.T) {
+	t.Parallel()
+
+	key := &fstest.MapFile{Data: bytes.Repeat([]byte{7}, 32), Mode: 0o400}
+	withKey := fstest.MapFS{"pisati-master-key": key, "other": key}
+	keyFile := fstest.MapFS{"pisati.toml": tomlFile("[keys]\nmaster_key_file = \"/etc/pisati/master.key\"\n")}
+
+	tests := map[string]struct {
+		s    setup
+		want string
+	}{
+		"nothing given":       {s: setup{}, want: "generated"},
+		"another credential":  {s: setup{creds: fstest.MapFS{"other": key}}, want: "generated"},
+		"the credential":      {s: setup{creds: withKey}, want: "credential pisati-master-key"},
+		"a file setting wins": {s: setup{creds: withKey, files: keyFile}, want: "file /etc/pisati/master.key"},
+		"a variable wins": {
+			s:    setup{creds: withKey, files: keyFile, env: env{"PISATI_KEYS_MASTER_KEY_FILE": "/run/secrets/master.key"}},
+			want: "file /run/secrets/master.key",
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if tt.s.env == nil {
+				tt.s.env = env{}
+			}
+			tt.s.env["PISATI_SERVER_BASE_URL"] = baseURL
+			cfg, err := tt.s.load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := source(cfg.Keys.MasterKey); got != tt.want {
+				t.Errorf("master key from %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDevViteURLOnlyWithLocalhost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name, base, vite, want string // want is empty when refused
+	}{
+		{name: "localhost", base: "http://localhost:8080", vite: "http://localhost:5173", want: "http://localhost:5173"},
+		{name: "loopback", base: "https://127.0.0.1:8443", vite: "http://127.0.0.1:5173", want: "http://127.0.0.1:5173"},
+		{name: "ipv6 loopback", base: "http://[::1]:8080", vite: "https://[::1]:5173", want: "https://[::1]:5173"},
+		{name: "unset", base: baseURL, vite: "", want: "unset"},
+		{name: "a public base URL", base: baseURL, vite: "http://localhost:5173"},
+		{name: "a public Vite URL", base: "http://localhost:8080", vite: "http://vite.example.org:5173"},
+		{name: "another loopback address", base: "http://localhost:8080", vite: "http://127.0.0.2:5173"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": tt.base, "PISATI_DEV_VITE_URL": tt.vite}}.load()
+			if tt.want == "" {
+				refused(t, err, config.ErrInvalid, "dev.vite_url (PISATI_DEV_VITE_URL)", "localhost")
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := optional(cfg.Dev.ViteURL); got != tt.want {
+				t.Errorf("Vite URL %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// brokenFS fails to open anything, with err.
+type brokenFS struct{ err error }
+
+func (b brokenFS) Open(name string) (fs.File, error) {
+	return nil, &fs.PathError{Op: "open", Path: name, Err: b.err}
+}
+
+func TestSourcesThatCannotBeRead(t *testing.T) {
+	t.Parallel()
+
+	base := env{"PISATI_SERVER_BASE_URL": baseURL}
+
+	t.Run("files", func(t *testing.T) {
+		t.Parallel()
+
+		src := base.sources()
+		src.Files = brokenFS{err: fs.ErrPermission}
+		_, err := config.Load(src, "")
+		refused(t, err, fs.ErrPermission, "pisati.toml")
+	})
+
+	t.Run("credentials", func(t *testing.T) {
+		t.Parallel()
+
+		src := base.sources()
+		src.Credentials = brokenFS{err: fs.ErrPermission}
+		_, err := config.Load(src, "")
+		refused(t, err, fs.ErrPermission, "pisati-master-key")
+	})
+
+	for name, files := range map[string]fstest.MapFS{
+		"pisati.toml is a directory": {"pisati.toml/inner": tomlFile("")},
+		"a drop-in is a directory":   {"pisati.toml.d/10-dir.toml/inner": tomlFile("")},
+		"pisati.toml.d is a file":    {"pisati.toml.d": tomlFile("")},
+		"too large":                  {"pisati.toml": {Data: bytes.Repeat([]byte("#"), 1<<20+1)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := setup{files: files, env: base}.load()
+			if err == nil {
+				t.Fatal("Load succeeded")
+			}
+			if !strings.Contains(err.Error(), "pisati.toml") {
+				t.Errorf("error %q does not name the file", err)
+			}
+		})
+	}
+}
+
+func TestSecretRedacts(t *testing.T) {
+	t.Parallel()
+
+	const value = "correct-horse-battery-staple"
+	in := []byte(value)
+	s, err := config.NewSecret(in)
+	if err != nil {
+		t.Fatalf("NewSecret: %v", err)
+	}
+	in[0] = 'X'
+	if got := string(s.Reveal()); got != value {
+		t.Errorf("Reveal = %q after the caller changed its slice, want %q", got, value)
+	}
+	revealed := s.Reveal()
+	revealed[0] = 'Y'
+	if got := string(s.Reveal()); got != value {
+		t.Errorf("Reveal = %q after a caller changed what it revealed, want %q", got, value)
+	}
+
+	var logs bytes.Buffer
+	slog.New(slog.NewJSONHandler(&logs, nil)).Info("loaded", "key", s)
+	slog.New(slog.NewTextHandler(&logs, nil)).Info("loaded", "key", s)
+	if !strings.Contains(logs.String(), `"key":"[redacted]"`) || !strings.Contains(logs.String(), "key=[redacted]") {
+		t.Errorf("logs %q do not show [redacted]", logs.String())
+	}
+
+	// A secret held in another value's unexported field is out of fmt's
+	// reach for methods, so the bytes themselves must not print.
+	type holder struct{ key config.Secret }
+	printed := []string{logs.String()}
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%o", "%b", "%c", "%U"} {
+		printed = append(printed, fmt.Sprintf(verb, s), fmt.Sprintf(verb, holder{key: s}), fmt.Sprintf(verb, []config.Secret{s}))
+	}
+	for _, out := range printed {
+		for _, leak := range []string{value, fmt.Sprintf("%x", value), fmt.Sprintf("%d", []byte(value))[1:20]} {
+			if strings.Contains(out, leak) {
+				t.Errorf("%q shows the secret as %q", out, leak)
+			}
+		}
+	}
+
+	for _, empty := range [][]byte{nil, {}} {
+		if _, err := config.NewSecret(empty); !errors.Is(err, config.ErrInvalid) {
+			t.Errorf("NewSecret(%v) = %v, want ErrInvalid", empty, err)
+		}
+	}
+	var zero config.Secret
+	if got := zero.Reveal(); len(got) != 0 {
+		t.Errorf("the zero Secret reveals %d bytes", len(got))
+	}
+}
+
+func FuzzLoad(f *testing.F) {
+	f.Add(everyKey, "[log]\nlevel = \"debug\"\n", "", "", false)
+	f.Add("", "", "PISATI_SERVER_BASE_URL=http://localhost:8080\nPISATI_DEV_VITE_URL=http://localhost:5173", "/var/lib/private/pisati", true)
+	f.Add("[server]\nbase_url = \"https://blog.example.org/\"\ntrusted_proxies = [\"10.0.0.1\"]\n", "[server]\ntrusted_proxies = []\n",
+		"PISATI_SERVER_TRUSTED_PROXIES=192.0.2.0/24, 2001:db8::/32\nPISATI_KEYS_MASTER_KEY_FILE=/run/k", "", true)
+	f.Add("[keys]\nmaster_key = \"x\"\n[nope]\n", "x = [", "PISATI_NOPE=1\nPISATI_LOG_LEVEL=loud", "relative", false)
+	f.Add("server.base_url = 'https://[::1]:8443'\nserver.hsts = 'preload'", "[server]\nbase_url = \"http://127.0.0.1\"",
+		"PISATI_SERVER_LISTEN=[::1]:1\nPISATI_TELEMETRY_OTLP_ENDPOINT=https://c/v1", "/", false)
+
+	f.Fuzz(func(t *testing.T, file, dropIn, vars, stateDir string, credential bool) {
+		e := env{}
+		for line := range strings.Lines(vars) {
+			name, value, _ := strings.Cut(strings.TrimSuffix(line, "\n"), "=")
+			if name != "" {
+				e[name] = value
+			}
+		}
+		s := setup{
+			files: fstest.MapFS{"pisati.toml": tomlFile(file), "pisati.toml.d/10-fuzz.toml": tomlFile(dropIn)},
+			env:   e,
+			state: stateDir,
+		}
+		if credential {
+			s.creds = fstest.MapFS{"pisati-master-key": tomlFile("key")}
+		}
+
+		cfg, err := s.load()
+		again, errAgain := s.load()
+		if fmt.Sprint(err) != fmt.Sprint(errAgain) || !reflect.DeepEqual(cfg, again) {
+			t.Fatalf("Load is not deterministic: %v, %v", err, errAgain)
+		}
+		if err != nil {
+			if !reflect.DeepEqual(cfg, config.Config{}) {
+				t.Errorf("Load failed with %v but returned %+v", err, cfg)
+			}
+			errorsAreTheAPI(t, err)
+			return
+		}
+		valid(t, cfg)
+	})
+}
+
+// errorsAreTheAPI fails t unless each error err joins wraps one of the
+// package's sentinels.
+func errorsAreTheAPI(t *testing.T, err error) {
+	t.Helper()
+	parts := []error{err}
+	if joined, ok := errors.AsType[interface {
+		error
+		Unwrap() []error
+	}](err); ok {
+		parts = joined.Unwrap()
+	}
+	for _, part := range parts {
+		if !errors.Is(part, config.ErrInvalid) && !errors.Is(part, config.ErrUnknown) && !errors.Is(part, config.ErrMissing) {
+			t.Errorf("error %q wraps none of ErrInvalid, ErrUnknown and ErrMissing", part)
+		}
+	}
+}
+
+func localhost(host string) bool {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// valid fails t for every rule c breaks.
+func valid(t *testing.T, c config.Config) {
+	t.Helper()
+
+	base := c.Server.BaseURL
+	if again, err := config.ParseBaseURL(base.String()); err != nil || again != base {
+		t.Errorf("base URL %q does not parse back to itself: %v, %v", base, again, err)
+	}
+	bu, err := url.Parse(base.String())
+	if err != nil {
+		t.Fatalf("base URL %q: %v", base, err)
+	}
+	if s := base.String(); strings.ContainsAny(s, "?#@") || bu.Path != "" || bu.Host == "" {
+		t.Errorf("base URL %q has more than a scheme and a host", s)
+	}
+	if base.IsHTTPS() != (bu.Scheme == "https") || bu.Scheme != "https" && bu.Scheme != "http" {
+		t.Errorf("base URL %q: IsHTTPS = %v", base, base.IsHTTPS())
+	}
+	if !base.IsHTTPS() && !localhost(bu.Hostname()) {
+		t.Errorf("base URL %q is plain http away from localhost", base)
+	}
+
+	for _, a := range []config.ListenAddr{c.Server.Listen, c.Server.InternalListen} {
+		if again, err := config.ParseListenAddr(a.String()); err != nil || again != a || a.Port() == 0 {
+			t.Errorf("listen address %q does not parse back to itself: %v, %v", a, again, err)
+		}
+	}
+	for _, p := range c.Server.TrustedProxies {
+		if !p.IsValid() || p != p.Masked() {
+			t.Errorf("trusted proxy %v is not a masked prefix", p)
+		}
+	}
+	switch c.Server.HSTS {
+	case config.HSTSHostOnly, config.HSTSIncludeSubdomains, config.HSTSPreload:
+	default:
+		t.Errorf("HSTS scope %d is not one of the constants", c.Server.HSTS)
+	}
+	if d := c.Storage.StateDir; !filepath.IsAbs(d) || filepath.Clean(d) != d {
+		t.Errorf("state directory %q is not absolute and clean", d)
+	}
+	switch c.Log.Level {
+	case slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError:
+	default:
+		t.Errorf("log level %v is not one of slog's four", c.Log.Level)
+	}
+	switch c.Log.Format {
+	case config.LogJSON, config.LogText:
+	default:
+		t.Errorf("log format %d is not one of the constants", c.Log.Format)
+	}
+	switch c.Telemetry.Pprof {
+	case config.Off, config.On:
+	default:
+		t.Errorf("pprof switch %d is not one of the constants", c.Telemetry.Pprof)
+	}
+	for _, o := range []config.OptionalURL{c.Telemetry.OTLPEndpoint, c.Dev.ViteURL} {
+		u, ok := o.Get()
+		if !ok {
+			continue
+		}
+		again, err := config.ParseOptionalURL(u.String())
+		if got, set := again.Get(); err != nil || !set || got != u {
+			t.Errorf("URL %q does not parse back to itself: %v, %v", u.String(), got.String(), err)
+		}
+	}
+	if u, ok := c.Dev.ViteURL.Get(); ok && (!localhost(u.Hostname()) || !localhost(bu.Hostname())) {
+		t.Errorf("Vite URL %q with base URL %q: both must be on localhost", u.String(), base)
+	}
+	switch s := c.Keys.MasterKey.(type) {
+	case config.FromFile:
+		if !filepath.IsAbs(s.Path) || filepath.Clean(s.Path) != s.Path {
+			t.Errorf("master key file %q is not absolute and clean", s.Path)
+		}
+	case config.FromCredential:
+		if s.Name != "pisati-master-key" {
+			t.Errorf("master key credential %q", s.Name)
+		}
+	case config.Generated:
+	case nil:
+		t.Error("no master key source")
+	}
+}

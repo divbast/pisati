@@ -61,6 +61,7 @@ linters:
         - error
         - stdlib
         - generic
+        - 'github\.com/divbast/pisati/internal/config\.SecretSource$'
     iface:
       enable:
         - identical
@@ -124,6 +125,7 @@ linters:
           allow:
             - $gostd
             - github.com/divbast/pisati
+            - github.com/pelletier/go-toml/v2
           deny:
             - pkg: log$
               desc: use log/slog
