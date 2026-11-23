@@ -212,9 +212,9 @@ func TestOpenNamesUnopenablePath(t *testing.T) {
 
 func TestInTxRollsBackOnError(t *testing.T) {
 	s := migratedStore(t, dbPath(t))
-	ctx := t.Context()
 
 	t.Run("an error", func(t *testing.T) {
+		ctx := t.Context()
 		errStop := errors.New("stop")
 		err := s.InTx(ctx, func(q *storedb.Queries) error {
 			if err := q.InsertSession(ctx, newSession("refused", 1)); err != nil {
@@ -231,6 +231,7 @@ func TestInTxRollsBackOnError(t *testing.T) {
 	})
 
 	t.Run("a panic", func(t *testing.T) {
+		ctx := t.Context()
 		func() {
 			defer func() {
 				if recover() == nil {
@@ -258,6 +259,7 @@ func TestInTxRollsBackOnError(t *testing.T) {
 	})
 
 	t.Run("no error", func(t *testing.T) {
+		ctx := t.Context()
 		if err := s.InTx(ctx, func(q *storedb.Queries) error {
 			return q.InsertSession(ctx, newSession("kept", 1))
 		}); err != nil {

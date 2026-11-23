@@ -4,6 +4,7 @@
 package store_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/divbast/pisati/internal/store"
 )
@@ -337,6 +339,136 @@ func TestRestoreSharedLockRunsOneAtATime(t *testing.T) {
 	}
 	if found != 1 || hasSession(t, s, "live") {
 		t.Errorf("the database holds %d of the restored sessions, want exactly one, the last restore's", found)
+	}
+}
+
+// TestQueuedRestoreStopsWithItsContext queues a Restore behind a Migrate
+// that holds the lock, then ends the Restore's context. The waits here are
+// bounded in real time rather than run in a synctest bubble: what holds
+// Migrate up is SQLite's lock on the file, which a bubble cannot see.
+func TestQueuedRestoreStopsWithItsContext(t *testing.T) {
+	state := t.TempDir()
+	path := store.DatabasePath(state)
+	s := openStore(t, path)
+	lock := lockOn(t, state)
+	ctx := t.Context()
+
+	// SQLite's write lock, held on a connection of its own until letGo.
+	conn, err := s.DB().Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	letGo := sync.OnceFunc(func() {
+		if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+			t.Error(err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	// The holder: Migrate must write to the new database, so it holds the
+	// store's lock while it waits, up to the busy timeout, for SQLite's.
+	// migrateErr is read only once migrated is closed.
+	var migrateErr error
+	migrated := make(chan struct{})
+	go func() {
+		defer close(migrated)
+		_, _, migrateErr = s.Migrate(ctx, lock)
+	}()
+	// The database itself is the source of every Restore here: one that
+	// gets the lock refuses it at once, and changes nothing.
+	// Each result is sent, then its channel closed, so that the deferred
+	// drain below returns whether or not the test has read it.
+	var unfinished []<-chan error
+	restore := func(rctx context.Context) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			defer close(done)
+			done <- store.Restore(rctx, path, lock)
+		}()
+		unfinished = append(unfinished, done)
+		return done
+	}
+	defer func() {
+		letGo()
+		<-migrated
+		for _, done := range unfinished {
+			for range done {
+			}
+		}
+	}()
+
+	// Migrate takes the lock before anything else, but may not have yet,
+	// and until it has, a Restore takes the lock first. One still waiting
+	// after 50 ms is queued behind Migrate.
+	var queued <-chan error
+	var cancel context.CancelFunc
+	for attempt := 0; queued == nil; attempt++ {
+		if attempt == 100 {
+			t.Fatal("Migrate never held the lock")
+		}
+		rctx, stop := context.WithCancel(ctx)
+		done := restore(rctx)
+		select {
+		case err := <-done:
+			stop()
+			if err == nil || !strings.Contains(err.Error(), "removes or replaces") {
+				t.Fatalf("Restore with the lock free: %v, want its source refused", err)
+			}
+			time.Sleep(10 * time.Millisecond)
+		case <-time.After(50 * time.Millisecond):
+			queued, cancel = done, stop
+		}
+	}
+	cancel()
+	select {
+	case err := <-queued:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("queued Restore whose context ended: %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Error("a queued Restore did not return within 1 s of its context ending")
+	}
+
+	// Release waits for Migrate, which still holds the lock, and a Restore
+	// that asks for the lock once Release has begun gets none.
+	released := make(chan error, 1)
+	go func() { released <- lock.Release() }()
+	select {
+	case err := <-released:
+		t.Errorf("Release returned %v while Migrate held the lock", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case err := <-restore(ctx):
+		if !errors.Is(err, store.ErrLockNotHeld) {
+			t.Errorf("Restore once Release has begun: %v, want ErrLockNotHeld", err)
+		}
+	case <-time.After(time.Second):
+		t.Error("a Restore asked for the lock once Release had begun, and waited for it")
+	}
+	select {
+	case <-migrated:
+		t.Fatalf("Migrate returned %v while SQLite's write lock was held", migrateErr)
+	default:
+	}
+
+	letGo()
+	<-migrated
+	if migrateErr != nil {
+		t.Errorf("Migrate: %v", migrateErr)
+	}
+	select {
+	case err := <-released:
+		if err != nil {
+			t.Errorf("Release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("Release did not return once Migrate had")
 	}
 }
 

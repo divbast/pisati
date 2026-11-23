@@ -113,10 +113,9 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
+	// Idle connections stay at database/sql's default of two: each one
+	// kept keeps an instance of SQLite, with its cache.
 	db.SetMaxOpenConns(maxConns)
-	// Kept open, rather than closed and opened again as the load changes:
-	// opening one starts an instance of SQLite and sets each pragma again.
-	db.SetMaxIdleConns(maxConns)
 	// sql.Open connects to nothing; a connection opens the file.
 	if err := db.PingContext(ctx); err != nil {
 		return nil, errors.Join(fmt.Errorf("store: open %s: %w", path, err), db.Close())
@@ -154,16 +153,21 @@ func dataSourceName(path string) string {
 	return u.String()
 }
 
-// Close stops new queries and transactions from starting, and closes each
-// connection that is idle. It does not wait for a query or transaction in
-// flight: the connection running one closes when it ends. Closing a
-// connection ends its instance of SQLite, and closing the last one
-// checkpoints the write-ahead log into the database file and removes the
-// log. When that last connection is idle, Close waits for the checkpoint;
-// otherwise it runs when the last query or transaction ends. The
-// checkpoint copies what the log holds, which SQLite keeps to about 1000
-// pages (4 MiB) by checkpointing whenever it passes that, and no context
-// bounds it. Closing a Store again, or the zero Store, does nothing.
+// Close stops new work: once it is called, every call through the Store
+// that needs a connection, whether a query, a transaction, InTx, Migrate
+// or Backup, fails with an error. Work already running, a query or a
+// transaction such as an InTx in progress, keeps its connection and runs
+// to its end, and the connection then closes. database/sql speaks of
+// Close waiting for the queries a server has begun; SQLite has no server,
+// as its queries run in this process, and Close may return while they
+// still run. So the caller stops every user of the Store first, the
+// servers and the workers, and lets their calls return.
+//
+// Closing the last connection checkpoints the write-ahead log into the
+// database file and removes the log. With every user stopped, Close does
+// that before it returns, a wait bounded by the size of the log, which
+// SQLite keeps to about 1000 pages (4 MiB), and by no context. Closing a
+// Store again, or the zero Store, does nothing.
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil

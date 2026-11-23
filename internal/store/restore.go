@@ -33,8 +33,9 @@ const restoreSuffix = ".restore"
 //
 // lock must hold its lock, as proof that no Pisati serves from the state
 // directory; otherwise Restore returns ErrLockNotHeld. Migrate and Restore
-// run one at a time under one Lock, and the lock cannot be released until
-// Restore returns. No Store may have the database open meanwhile.
+// run one at a time under one Lock: waiting for another, Restore returns
+// ctx's error if ctx ends first, and Release waits for a Restore that
+// runs. No Store may have the database open meanwhile.
 //
 // Restore refuses, before it changes anything, a src that is one of the
 // files it removes or replaces in the state directory, named by its path
@@ -57,7 +58,7 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	if err := absolute(src); err != nil {
 		return err
 	}
-	dir, unhold, err := lock.hold()
+	dir, unhold, err := lock.hold(ctx)
 	if err != nil {
 		return err
 	}
@@ -81,7 +82,8 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	}
 	// What a restore cut short may have left. The lock keeps any other
 	// Restore from building a copy here meanwhile: one in another process
-	// cannot take it, and one under a copy of the same Lock waits in hold.
+	// cannot take it, and one under a copy of the same Lock waits in hold
+	// until this one returns.
 	if err := removeFiles(root, copied...); err != nil {
 		return err
 	}

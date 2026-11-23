@@ -46,7 +46,9 @@ func pisatiMigrations() (fs.FS, error) {
 // lock must hold the lock on the state directory whose database the Store
 // has open, DatabasePath of it, so that no other Pisati migrates the same
 // file meanwhile; otherwise Migrate returns ErrLockNotHeld and writes
-// nothing. Migrate and Restore run one at a time under one Lock.
+// nothing. Migrate and Restore run one at a time under one Lock: waiting
+// for another, Migrate returns ctx's error if ctx ends first, and Release
+// waits for a Migrate that runs.
 //
 // A step that fails is rolled back, and Migrate returns its error, with to
 // the version of the last step that succeeded. A database at a version
@@ -58,7 +60,7 @@ func (s *Store) Migrate(ctx context.Context, lock Lock) (from, to SchemaVersion,
 	if err := s.open(); err != nil {
 		return 0, 0, err
 	}
-	dir, unhold, err := lock.hold()
+	dir, unhold, err := lock.hold(ctx)
 	if err != nil {
 		return 0, 0, fmt.Errorf("store: migrate %s: %w", s.path, err)
 	}

@@ -197,7 +197,7 @@ func TestMigrateRefusesWithoutTheLock(t *testing.T) {
 		"the lock on another directory": lockOn(t, t.TempDir()),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := s.Migrate(ctx, lock); !errors.Is(err, store.ErrLockNotHeld) {
+			if _, _, err := s.Migrate(t.Context(), lock); !errors.Is(err, store.ErrLockNotHeld) {
 				t.Errorf("Migrate: %v, want ErrLockNotHeld", err)
 			}
 			if n := schemaSize(t, s); n != 0 {

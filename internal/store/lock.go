@@ -19,8 +19,8 @@ var (
 	// another Lock in this one.
 	ErrLocked = errors.New("store: the state directory is locked")
 	// ErrLockNotHeld is a Lock that does not hold the lock it must: the
-	// zero Lock, one released, or, for Migrate, one on a state directory
-	// other than the Store's.
+	// zero Lock, one released or being released, or, for Migrate, one on
+	// a state directory other than the Store's.
 	ErrLockNotHeld = errors.New("store: the state directory's lock is not held")
 )
 
@@ -34,8 +34,9 @@ const lockFile = "pisati.lock"
 // <state>/pisati.lock. serve holds it for as long as it runs, and Migrate
 // and Restore need it, so that neither runs on a database another Pisati
 // is using. The zero Lock holds nothing. A Lock and its copies are one
-// lock: releasing any of them releases it, and Migrate and Restore run one
-// at a time under it.
+// lock: releasing any of them releases it. Migrate and Restore run one at
+// a time under it, and one that waits for another stops, failing with its
+// context's error, when its context ends.
 type Lock struct {
 	held *heldLock
 }
@@ -43,12 +44,19 @@ type Lock struct {
 type heldLock struct {
 	// dir is the state directory, as filepath.Clean leaves it.
 	dir string
-	// mu guards file. Migrate and Restore hold it while they run, so that
-	// the lock cannot be released under them, and so that two of them
-	// under copies of one Lock never run at once: two Restores would each
-	// build their copy under the same name.
-	mu sync.Mutex
-	// file holds the flock; nil once released.
+	// slot holds a token while a Migrate or Restore runs under the lock,
+	// so that the lock is not released under it, and so that two under
+	// copies of one Lock never run at once: two Restores would each build
+	// their copy under the same name. A channel rather than a mutex, so
+	// that one waiting for the slot can stop when its context ends. Once
+	// Release has the slot, it keeps it.
+	slot chan struct{}
+	// released is closed as Release begins: no Migrate or Restore starts
+	// under the lock after that.
+	released chan struct{}
+	// once runs the release once; a second Release waits for the first.
+	once sync.Once
+	// file holds the flock. Only the release touches it.
 	file *os.File
 }
 
@@ -83,7 +91,12 @@ func AcquireLock(ctx context.Context, stateDir string) (_ Lock, err error) {
 	if err := flock(f); err != nil {
 		return Lock{}, errors.Join(err, f.Close())
 	}
-	return Lock{held: &heldLock{dir: filepath.Clean(stateDir), file: f}}, nil
+	return Lock{held: &heldLock{
+		dir:      filepath.Clean(stateDir),
+		slot:     make(chan struct{}, 1),
+		released: make(chan struct{}),
+		file:     f,
+	}}, nil
 }
 
 // flock takes an exclusive flock on f without waiting, or returns
@@ -106,39 +119,65 @@ func flock(f *os.File) error {
 	return lockErr
 }
 
-// Release releases the lock. It first waits for any Migrate or Restore
-// running under the lock to return, a wait that only their own contexts
-// bound, then closes pisati.lock, which releases the flock. Releasing the
-// zero Lock, or one released already, does nothing.
+// Release releases the lock. From the moment it begins, no Migrate or
+// Restore starts under the lock: one waiting for it returns ErrLockNotHeld.
+// Release then waits for the one running under the lock, if there is one,
+// to return, a wait that only that call's context bounds, and closes
+// pisati.lock, which releases the flock. A Release made while another
+// runs waits for that one, then does nothing, as does releasing the zero
+// Lock or one released already.
 func (l Lock) Release() error {
 	if l.held == nil {
 		return nil
 	}
-	l.held.mu.Lock()
-	defer l.held.mu.Unlock()
-	f := l.held.file
-	if f == nil {
-		return nil
-	}
-	l.held.file = nil
+	var err error
+	l.held.once.Do(func() {
+		err = l.held.release()
+	})
+	return err
+}
+
+// release closes released, takes the slot from whatever runs under the
+// lock, and closes the lock file.
+func (h *heldLock) release() error {
+	close(h.released)
+	// hold refuses once released is closed, so the slot is never given
+	// back, and only a call that holds it now delays this.
+	h.slot <- struct{}{}
 	// Closing the only descriptor of the open file releases the flock.
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("store: release the lock on %s: %w", l.held.dir, err)
+	if err := h.file.Close(); err != nil {
+		return fmt.Errorf("store: release the lock on %s: %w", h.dir, err)
 	}
 	return nil
 }
 
 // hold keeps l from being released, and any other Migrate or Restore from
-// running under it, until the function it returns is called. It returns
-// the state directory l locks, or ErrLockNotHeld unless l holds its lock.
-func (l Lock) hold() (stateDir string, unhold func(), err error) {
-	if l.held == nil {
+// running under it, until the function it returns is called, and returns
+// the state directory l locks. While another runs under l, hold waits for
+// it, and returns ctx's error if ctx ends first. It returns ErrLockNotHeld
+// unless l holds its lock, as it no longer does once Release has begun.
+func (l Lock) hold(ctx context.Context) (stateDir string, unhold func(), err error) {
+	h := l.held
+	if h == nil {
 		return "", nil, ErrLockNotHeld
 	}
-	l.held.mu.Lock()
-	if l.held.file == nil {
-		l.held.mu.Unlock()
-		return "", nil, ErrLockNotHeld
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
 	}
-	return l.held.dir, l.held.mu.Unlock, nil
+	select {
+	case h.slot <- struct{}{}:
+	case <-h.released:
+		return "", nil, ErrLockNotHeld
+	case <-ctx.Done():
+		return "", nil, ctx.Err()
+	}
+	// select chooses at random among the cases ready at once, so the slot
+	// may have come free just as Release began.
+	select {
+	case <-h.released:
+		<-h.slot
+		return "", nil, ErrLockNotHeld
+	default:
+	}
+	return h.dir, func() { <-h.slot }, nil
 }
