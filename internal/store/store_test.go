@@ -292,7 +292,16 @@ func TestInTxConcurrentReadThenWrite(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					return q.TouchSession(ctx, storedb.TouchSessionParams{LastSeenAt: got.LastSeenAt + 1, IDHash: id})
+					n, err := q.TouchSession(ctx, storedb.TouchSessionParams{
+						LastSeenAt:  got.LastSeenAt + 1,
+						ExpiresAt:   got.ExpiresAt,
+						IDHash:      id,
+						TouchBefore: got.LastSeenAt,
+					})
+					if err == nil && n != 1 {
+						err = errors.New("the touch's condition on what the transaction read did not hold")
+					}
+					return err
 				})
 			}
 		})

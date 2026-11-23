@@ -64,6 +64,7 @@ linters:
         - 'github\.com/divbast/pisati/internal/config\.SecretSource$'
         - 'github\.com/divbast/pisati/internal/jobs\.Outcome$'
         - 'github\.com/divbast/pisati/internal/core/auth\.(Verdict|SessionState)$'
+        - 'github\.com/divbast/pisati/internal/app\.Error$'
     iface:
       enable:
         - identical

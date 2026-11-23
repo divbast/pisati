@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
+
+// Package web serves Pisati's website. SessionMiddleware loads each
+// request's session from its cookie, and SessionFrom hands it to the
+// handlers.
+package web
+
+import (
+	"context"
+	"log/slog"
+	"net/http"
+
+	"github.com/divbast/pisati/internal/app"
+	"github.com/divbast/pisati/internal/httpx"
+)
+
+// sessionKey keys the request's session in its context.
+type sessionKey struct{}
+
+// SessionMiddleware loads the session that each request's session cookie
+// names, with sessions.Load, and hands it on in the request's context,
+// for SessionFrom. It reads only the cookie of sessions.CookieName: over
+// https, a pisati cookie, which another host could have set, is not
+// read. A request without the cookie goes on with no session.
+//
+// A cookie that names no live session, being malformed, unknown,
+// destroyed or expired, is cleared with sessions.Clear's expiring cookie,
+// and the request goes on with no session.
+//
+// When the session cannot be read, the database failing, the failure is
+// logged to log, once and without the cookie, and the request is answered
+// 500 with Cache-Control: no-store, its handler never called. It is not
+// served as signed out: a signed-in user would then be sent to sign in
+// again for the server's fault, which signing in would not mend, and the
+// cookie is left as it is, since it may well name a live session.
+//
+// A nil sessions or log, or the zero Sessions, is a bug, and
+// SessionMiddleware panics on it.
+func SessionMiddleware(sessions *app.Sessions, log *slog.Logger) httpx.Middleware {
+	name := sessions.CookieName()
+	if name == "" {
+		panic("web: SessionMiddleware needs Sessions made by app.NewSessions")
+	}
+	if log == nil {
+		panic("web: SessionMiddleware needs a logger")
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// r.Cookie fails only with http.ErrNoCookie.
+			c, err := r.Cookie(name)
+			if err != nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			sess, ok, err := sessions.Load(r.Context(), c.Value)
+			if err != nil {
+				log.ErrorContext(r.Context(), "session load failed", "error", err)
+				w.Header().Set("Cache-Control", "no-store")
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+				return
+			}
+			if !ok {
+				expired := sessions.Clear()
+				http.SetCookie(w, &expired)
+				next.ServeHTTP(w, r)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, sess)))
+		})
+	}
+}
+
+// SessionFrom returns the session SessionMiddleware loaded for the request
+// whose context is ctx, or false when it has none: it had no session
+// cookie, or one that named no live session.
+func SessionFrom(ctx context.Context) (app.Session, bool) {
+	sess, ok := ctx.Value(sessionKey{}).(app.Session)
+	return sess, ok
+}

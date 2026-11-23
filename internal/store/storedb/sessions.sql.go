@@ -10,6 +10,31 @@ import (
 	"database/sql"
 )
 
+const deleteSession = `-- name: DeleteSession :exec
+DELETE FROM sessions WHERE id_hash = ?
+`
+
+// DeleteSession deletes the session with the ID hash id_hash, if there is
+// one.
+func (q *Queries) DeleteSession(ctx context.Context, idHash []byte) error {
+	_, err := q.db.ExecContext(ctx, deleteSession, idHash)
+	return err
+}
+
+const deleteUserSessions = `-- name: DeleteUserSessions :execrows
+DELETE FROM sessions WHERE user_id = ?
+`
+
+// DeleteUserSessions deletes every session of user_id, and returns how
+// many it deleted.
+func (q *Queries) DeleteUserSessions(ctx context.Context, userID sql.NullInt64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteUserSessions, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getSession = `-- name: GetSession :one
 SELECT id_hash, user_id, created_at, last_seen_at, expires_at
 FROM sessions
@@ -53,16 +78,55 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 	return err
 }
 
-const touchSession = `-- name: TouchSession :exec
-UPDATE sessions SET last_seen_at = ? WHERE id_hash = ?
+const sweepSessions = `-- name: SweepSessions :execrows
+DELETE FROM sessions
+WHERE id_hash IN (
+    SELECT old.id_hash FROM sessions AS old
+    WHERE old.expires_at <= ?1
+    LIMIT ?2
+)
+`
+
+type SweepSessionsParams struct {
+	Now   int64
+	Batch int64
+}
+
+// SweepSessions deletes at most batch of the sessions that expire at now
+// or before, and returns how many it deleted.
+func (q *Queries) SweepSessions(ctx context.Context, arg SweepSessionsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, sweepSessions, arg.Now, arg.Batch)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const touchSession = `-- name: TouchSession :execrows
+UPDATE sessions
+SET last_seen_at = ?1, expires_at = ?2
+WHERE id_hash = ?3 AND last_seen_at <= ?4
 `
 
 type TouchSessionParams struct {
-	LastSeenAt int64
-	IDHash     []byte
+	LastSeenAt  int64
+	ExpiresAt   int64
+	IDHash      []byte
+	TouchBefore int64
 }
 
-func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) error {
-	_, err := q.db.ExecContext(ctx, touchSession, arg.LastSeenAt, arg.IDHash)
-	return err
+// TouchSession sets a session's last_seen_at and expires_at, unless it was
+// last seen after touch_before: of two requests that find a touch due at
+// once, only the first writes. It returns how many rows it changed.
+func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, touchSession,
+		arg.LastSeenAt,
+		arg.ExpiresAt,
+		arg.IDHash,
+		arg.TouchBefore,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
