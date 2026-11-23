@@ -36,7 +36,9 @@ import (
 // ctx ends when the job's lease does, or, once Run's context has ended,
 // when the drain deadline passes, and a Handler returns promptly then. A
 // job may run more than once (see the package doc), so a Handler must be
-// idempotent.
+// idempotent. A Worker may run one Kind's Handler on up to
+// Options.Workers goroutines at once, so a Handler must also be safe for
+// concurrent use.
 type Handler func(ctx context.Context, payload []byte) error
 
 // Outcome is how a failing Handler says what should follow: a *Retry or a
@@ -129,11 +131,19 @@ type Options struct {
 	// Drain is how long the Handlers running when Run's context ends may
 	// go on before their contexts end too. Positive.
 	Drain time.Duration
+	// SweepEvery is how often Run deletes the done and dead jobs past
+	// their retention, after a first sweep as it starts. Positive.
+	SweepEvery time.Duration
+	// KeepDone is how long a job is kept once it is done, and KeepDead how
+	// long once it is dead, before a sweep deletes it. A job's idempotency
+	// key stays taken until then. Positive.
+	KeepDone, KeepDead time.Duration
 }
 
 // DefaultOptions returns the Options Pisati runs with: 4 workers, a 5 min
 // lease, a backoff of 30 s doubling to 6 h with ±20% jitter, 12 attempts,
-// a poll every second, and an 8 s drain.
+// a poll every second, an 8 s drain, and a sweep every hour that keeps
+// done jobs for 7 days and dead ones for 30.
 func DefaultOptions() Options {
 	return Options{
 		Workers:     4,
@@ -144,6 +154,9 @@ func DefaultOptions() Options {
 		MaxAttempts: 12,
 		Poll:        time.Second,
 		Drain:       8 * time.Second,
+		SweepEvery:  time.Hour,
+		KeepDone:    7 * 24 * time.Hour,
+		KeepDead:    30 * 24 * time.Hour,
 	}
 }
 
@@ -164,6 +177,9 @@ func (o Options) problems() []error {
 		{"BackoffBase", o.BackoffBase},
 		{"Poll", o.Poll},
 		{"Drain", o.Drain},
+		{"SweepEvery", o.SweepEvery},
+		{"KeepDone", o.KeepDone},
+		{"KeepDead", o.KeepDead},
 	} {
 		if d.value <= 0 {
 			errs = append(errs, fmt.Errorf("jobs: %w options: %s is %v, want it positive", ErrInvalid, d.name, d.value))
@@ -207,8 +223,9 @@ type Worker struct {
 // h do not reach it. A job of a Kind h has no Handler for goes to the
 // dead letter.
 //
-// clock gives the time every lease, due time and retry is measured from.
-// rnd is the source of the backoff's jitter, crypto/rand.Reader in Pisati;
+// clock gives the time every lease, due time, retry and retention is
+// measured from. The Worker calls it from several goroutines at once, so
+// it must be safe for concurrent use, as time.Now is. rnd is the source of the backoff's jitter, crypto/rand.Reader in Pisati;
 // the Worker reads it from one goroutine at a time. A retry for which rnd
 // cannot be read is logged, and gets no jitter. log receives the Worker's
 // events, which never include a payload.
@@ -257,20 +274,26 @@ func NewWorker(s *store.Store, h map[Kind]Handler, clock func() time.Time, rnd i
 // the job due first, leases it for Options.Lease, runs its Handler and
 // records the outcome, then claims the next; one that finds no job due
 // waits for Options.Poll, or until Notify wakes it. A claim or a record
-// that fails is logged, and the worker carries on.
+// that fails is logged, and the worker carries on. Run first deletes the
+// done and dead jobs kept past Options.KeepDone and Options.KeepDead,
+// before any claim, and then again every Options.SweepEvery, a bounded
+// batch to a transaction so that no sweep holds the write lock for long.
 //
-// Once ctx ends, no job is claimed. The Handlers still running go on under
-// context.WithoutCancel(ctx) for up to Options.Drain, after which their
-// contexts end. Each outcome is recorded even after ctx has ended, a write
-// that SQLite's 5 s busy timeout bounds, so that a job cut off is ready to
-// retry at once rather than left leased. Run returns when every goroutine
-// it started has, so it waits for each Handler to return once its context
-// ends.
+// Once ctx ends, no job is claimed and no sweep starts. The Handlers still
+// running go on under context.WithoutCancel(ctx) for up to Options.Drain,
+// after which their contexts end. A job whose Handler then returns an
+// error, of whatever kind, is given back as a free retry: ready at once,
+// due when it was, its attempt not counted, as being cut off says nothing
+// of the job. A Handler that returns nil all the same has its job done,
+// and one that panics, dead. Each outcome is recorded even after ctx has
+// ended, a write that SQLite's 5 s busy timeout bounds, so that no job is
+// left leased. Run returns when every goroutine it started has, so it
+// waits for each Handler to return once its context ends.
 //
 // Run returns nil once it has stopped because ctx ended, even when the
-// drain deadline cut Handlers off: their jobs are retried like any failed
-// attempt. It returns an error at once, running nothing, when the Worker
-// was not made by NewWorker or another Run of it has not returned.
+// drain deadline cut Handlers off. It returns an error at once, running
+// nothing, when the Worker was not made by NewWorker or another Run of it
+// has not returned.
 func (w *Worker) Run(ctx context.Context) error {
 	if w == nil || w.store == nil {
 		return errors.New("jobs: run: the Worker was not made by NewWorker")
@@ -280,9 +303,13 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	defer w.running.Store(false)
 
-	work, stopWork := context.WithCancel(context.WithoutCancel(ctx))
-	defer stopWork()
+	// The first sweep runs before the workers start, so that it never
+	// contends with their claims for the write lock.
+	w.sweep(ctx)
+	work, stopWork := context.WithCancelCause(context.WithoutCancel(ctx))
+	defer stopWork(nil)
 	var workers sync.WaitGroup
+	workers.Go(func() { w.sweepEvery(ctx) })
 	for range w.opts.Workers {
 		workers.Go(func() { w.work(ctx, work) })
 	}
@@ -292,7 +319,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		close(finished)
 	}()
 
-	// The workers return only once ctx has ended.
+	// The workers and the sweeper return only once ctx has ended.
 	<-ctx.Done()
 	drain := time.NewTimer(w.opts.Drain)
 	defer drain.Stop()
@@ -300,11 +327,15 @@ func (w *Worker) Run(ctx context.Context) error {
 	case <-finished:
 	case <-drain.C:
 		w.log.WarnContext(ctx, "job drain deadline passed", "drain", w.opts.Drain)
-		stopWork()
+		stopWork(errDrained)
 		<-finished
 	}
 	return nil
 }
+
+// errDrained is the cause with which Run ends the Handlers' contexts when
+// the drain deadline passes.
+var errDrained = errors.New("jobs: the drain deadline passed")
 
 // Notify wakes an idle worker of a running Run to claim at once, rather
 // than at its next poll. A worker that claims a job wakes another in
@@ -352,9 +383,12 @@ func (w *Worker) idle(ctx context.Context) {
 // claim leases the job due first, in one IMMEDIATE transaction, and
 // reports whether there was one.
 func (w *Worker) claim(ctx context.Context) (storedb.ClaimJobRow, bool) {
-	now := w.clock()
 	var j storedb.ClaimJobRow
 	err := w.store.InTx(ctx, func(q *storedb.Queries) error {
+		// Read once the transaction holds the write lock, which it may
+		// have waited up to the busy timeout for: a lease measured from
+		// before the wait would end that much early.
+		now := w.clock()
 		var err error
 		j, err = q.ClaimJob(ctx, storedb.ClaimJobParams{
 			Now:        now.UnixMilli(),
@@ -392,7 +426,28 @@ func (w *Worker) process(ctx context.Context, j storedb.ClaimJobRow) {
 		}
 		return
 	}
-	w.record(rec, j, w.call(ctx, h, j))
+	// The Handler's context ends when the lease written does, measured on
+	// the Worker's clock, so that no other claim can take the job while it
+	// runs.
+	leased, cancel := context.WithTimeout(ctx, time.UnixMilli(j.LeaseUntil.Int64).Sub(w.clock()))
+	err := w.call(leased, h, j)
+	cutOff := errors.Is(context.Cause(leased), errDrained)
+	cancel()
+	if err != nil && cutOff && !errors.Is(err, errPanicked) {
+		w.release(rec, j)
+		return
+	}
+	w.record(rec, j, err)
+}
+
+// release gives j back, ready at once and its attempt uncounted: the
+// drain deadline cut it off, which says nothing of the job.
+func (w *Worker) release(ctx context.Context, j storedb.ClaimJobRow) {
+	if w.settle(ctx, j, func(q *storedb.Queries) (int64, error) {
+		return q.ReleaseJob(ctx, storedb.ReleaseJobParams{ID: j.ID, LeaseToken: j.LeaseToken})
+	}) {
+		w.log.InfoContext(ctx, "job released at shutdown", "kind", j.Kind, "job_id", j.ID, "attempt", j.Attempts)
+	}
 }
 
 // handler returns the Handler for the kind named name.
@@ -409,12 +464,9 @@ func (w *Worker) handler(name string) (Handler, bool) {
 // can return it, as it is not exported.
 var errPanicked = errors.New("handler panicked")
 
-// call runs h on j's payload under a context that ends with j's lease.
-// This is the top of the job's run, so it recovers a panic in h, which it
-// logs and returns as errPanicked.
+// call runs h on j's payload under ctx. This is the top of the job's run,
+// so it recovers a panic in h, which it logs and returns as errPanicked.
 func (w *Worker) call(ctx context.Context, h Handler, j storedb.ClaimJobRow) (err error) {
-	ctx, cancel := context.WithTimeout(ctx, w.opts.Lease)
-	defer cancel()
 	defer func() {
 		if r := recover(); r != nil {
 			w.log.ErrorContext(ctx, "job handler panicked", "kind", j.Kind, "job_id", j.ID,
@@ -440,7 +492,7 @@ func describePanic(r any) string {
 func (w *Worker) record(ctx context.Context, j storedb.ClaimJobRow, err error) {
 	if err == nil {
 		if w.settle(ctx, j, func(q *storedb.Queries) (int64, error) {
-			return q.CompleteJob(ctx, storedb.CompleteJobParams{ID: j.ID, Attempts: j.Attempts})
+			return q.CompleteJob(ctx, storedb.CompleteJobParams{FinishedAt: w.now(), ID: j.ID, LeaseToken: j.LeaseToken})
 		}) {
 			w.log.DebugContext(ctx, "job done", "kind", j.Kind, "job_id", j.ID, "attempt", j.Attempts)
 		}
@@ -490,10 +542,10 @@ func (w *Worker) retry(ctx context.Context, j storedb.ClaimJobRow, err error, af
 	why := lastError(err.Error())
 	if w.settle(ctx, j, func(q *storedb.Queries) (int64, error) {
 		return q.RetryJob(ctx, storedb.RetryJobParams{
-			RunAt:     w.clock().Add(delay).UnixMilli(),
-			LastError: why,
-			ID:        j.ID,
-			Attempts:  j.Attempts,
+			RunAt:      w.clock().Add(delay).UnixMilli(),
+			LastError:  why,
+			ID:         j.ID,
+			LeaseToken: j.LeaseToken,
 		})
 	}) {
 		w.log.WarnContext(ctx, "job retry scheduled", "kind", j.Kind, "job_id", j.ID,
@@ -514,12 +566,23 @@ func (w *Worker) bury(ctx context.Context, j storedb.ClaimJobRow, why string) {
 // reports whether j's lease was still its own to do so.
 func (w *Worker) deadLetter(ctx context.Context, j storedb.ClaimJobRow, why string) bool {
 	return w.settle(ctx, j, func(q *storedb.Queries) (int64, error) {
-		return q.DeadLetterJob(ctx, storedb.DeadLetterJobParams{LastError: lastError(why), ID: j.ID, Attempts: j.Attempts})
+		return q.DeadLetterJob(ctx, storedb.DeadLetterJobParams{
+			LastError:  lastError(why),
+			FinishedAt: w.now(),
+			ID:         j.ID,
+			LeaseToken: j.LeaseToken,
+		})
 	})
 }
 
+// now returns the Worker's clock as a timestamp for the database.
+func (w *Worker) now() sql.NullInt64 {
+	return sql.NullInt64{Int64: w.clock().UnixMilli(), Valid: true}
+}
+
 // settle runs update, which records j's outcome if j's lease is still its
-// own and returns the rows it changed, in one transaction. It reports
+// own and returns the rows it changed, in one transaction, so that update
+// reads the clock once the write lock is held. It reports
 // whether the outcome was recorded, and logs why when it was not: the
 // write failed, or the lease expired and another claim took the job.
 func (w *Worker) settle(ctx context.Context, j storedb.ClaimJobRow, update func(*storedb.Queries) (int64, error)) bool {

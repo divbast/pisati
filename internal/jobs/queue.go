@@ -7,7 +7,9 @@
 // if the change commits: a transactional outbox. A Worker claims each due
 // job under a lease, runs it with the Handler for its Kind, and then marks
 // it done, makes it ready again after a backoff, or moves it to the dead
-// letter, where it is never tried again.
+// letter, where it is never tried again. The Worker deletes done and dead
+// jobs once they are past their retention, and their idempotency keys
+// with them.
 //
 // A job runs at least once, not exactly once: a worker that stops or hangs
 // mid-job keeps its lease only until the lease expires, and another worker
@@ -29,6 +31,13 @@ import (
 // job, or something given to NewWorker. Every error the package returns
 // for one wraps it and says which rule.
 var ErrInvalid = errors.New("invalid")
+
+// ErrPayloadTooLarge is a job whose payload is larger than MaxPayload.
+// Enqueue's error for one wraps it, and ErrInvalid too.
+var ErrPayloadTooLarge = errors.New("payload too large")
+
+// MaxPayload is the largest payload Enqueue accepts, in bytes: 1 MiB.
+const MaxPayload = 1 << 20
 
 const (
 	// maxKindBytes bounds a Kind's name.
@@ -88,8 +97,10 @@ func (k Kind) String() string {
 }
 
 // IdempotencyKey names an effect, so that it is queued once however often
-// it is enqueued: Enqueue adds no job whose key a job already queued, in
-// any state, has. The zero IdempotencyKey is no key, and a job without one
+// it is enqueued: Enqueue adds no job whose key a job still kept, in any
+// state, has. A done or dead job is kept until a sweep deletes it, once
+// it is past Options.KeepDone or Options.KeepDead, and its key is free
+// from then. The zero IdempotencyKey is no key, and a job without one
 // never conflicts with another. Keys are comparable.
 type IdempotencyKey struct {
 	key string
@@ -115,10 +126,11 @@ func NewIdempotencyKey(s string) (IdempotencyKey, error) {
 type Job struct {
 	// Kind picks the Handler that runs the job. It is never the zero Kind.
 	Kind Kind
-	// Payload is what the Handler is given. nil is stored as empty.
+	// Payload is what the Handler is given: at most MaxPayload bytes. nil
+	// is stored as empty.
 	Payload []byte
 	// Key, unless it is the zero key, has Enqueue add the job only if no
-	// job queued has the same key.
+	// job still kept has the same key.
 	Key IdempotencyKey
 	// RunAt is the earliest time the job may run, to the millisecond. The
 	// zero time means as soon as a worker is free.
@@ -127,20 +139,26 @@ type Job struct {
 
 // Enqueue adds j to the queue through q, ready to run from j.RunAt, and
 // reports whether it did: false, with no error, when j has a key that a
-// job already queued has, in which case nothing changes. It is meant to
+// job still kept has, in which case nothing changes. It is meant to
 // run in the caller's transaction (Store.InTx), so that the job commits or
 // rolls back with the change that caused it.
 //
 // Enqueue reads no clock, so the caller gives RunAt; and it wakes no
 // Worker, so the caller calls Worker.Notify once the transaction commits,
 // or the job waits for a worker's next poll. A job with the zero Kind, or
-// a nil q, is refused with an error wrapping ErrInvalid.
+// a nil q, is refused with an error wrapping ErrInvalid; a payload larger
+// than MaxPayload, with one wrapping ErrPayloadTooLarge and ErrInvalid.
+// Either way, Enqueue writes nothing.
 func Enqueue(ctx context.Context, q *storedb.Queries, j Job) (bool, error) {
 	if j.Kind == (Kind{}) {
 		return false, fmt.Errorf("jobs: enqueue: %w job: it has no kind", ErrInvalid)
 	}
 	if q == nil {
 		return false, fmt.Errorf("jobs: enqueue a %s job: %w queries: nil", j.Kind, ErrInvalid)
+	}
+	if len(j.Payload) > MaxPayload {
+		return false, fmt.Errorf("jobs: enqueue a %s job: %w %w: %d bytes, at most %d",
+			j.Kind, ErrInvalid, ErrPayloadTooLarge, len(j.Payload), MaxPayload)
 	}
 	payload := j.Payload
 	if payload == nil {

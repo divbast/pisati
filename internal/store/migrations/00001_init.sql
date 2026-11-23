@@ -28,7 +28,12 @@ CREATE INDEX sessions_by_expiry ON sessions (expires_at);
 CREATE INDEX sessions_by_user ON sessions (user_id);
 
 -- The persisted job queue. A job is ready, leased to a worker until
--- lease_until, done, or dead once it may be tried no more.
+-- lease_until, done, or dead once it may be tried no more. Every claim
+-- raises lease_token, which never goes down, and a worker records an
+-- outcome only while the token is still its claim's: attempts cannot
+-- serve, as a try cut off by shutdown is given back uncounted.
+-- finished_at is when the job became done or dead, which its retention
+-- runs from.
 CREATE TABLE jobs (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -38,11 +43,17 @@ CREATE TABLE jobs (
     attempts INTEGER NOT NULL DEFAULT 0,
     run_at INTEGER NOT NULL,
     lease_until INTEGER,
+    lease_token INTEGER NOT NULL DEFAULT 0,
+    finished_at INTEGER,
     last_error TEXT
 ) STRICT;
 
 -- For a worker's claim, which takes the ready job that is due first.
 CREATE INDEX jobs_by_state_run_at ON jobs (state, run_at);
+
+-- For the sweep, which deletes the done and dead jobs past their
+-- retention.
+CREATE INDEX jobs_by_state_finished_at ON jobs (state, finished_at);
 
 -- The data keys, each wrapped by the master key. New data is sealed with
 -- the current one; a retired one only opens what it sealed.

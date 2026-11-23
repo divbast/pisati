@@ -24,6 +24,8 @@ type Job struct {
 	Attempts       int64
 	RunAt          int64
 	LeaseUntil     sql.NullInt64
+	LeaseToken     int64
+	FinishedAt     sql.NullInt64
 	LastError      sql.NullString
 }
 

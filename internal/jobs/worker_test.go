@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -136,9 +137,13 @@ func TestRetryBacksOffThenDeadLetters(t *testing.T) {
 		// 57,600 of them a worker. With half as its random source, every
 		// wait is a multiple of 30 s, so each attempt still comes the
 		// moment it is due.
+		// No sweep runs after the first: one at the same instant as a poll
+		// would contend with it for the write lock, and SQLite's busy
+		// handler sleeps on the bubble's clock, moving every later poll.
 		opts := jobs.DefaultOptions()
 		opts.Workers = 1
 		opts.Poll = opts.BackoffBase
+		opts.SweepEvery = 1000 * time.Hour
 		w, log := newWorker(t, s, handlers, opts, half)
 		enqueue(t, s, jobs.Job{Kind: k, Payload: []byte("flaky")})
 
@@ -171,18 +176,27 @@ func TestRetryBacksOffThenDeadLetters(t *testing.T) {
 	})
 }
 
-func TestExpiredLeaseIsReclaimed(t *testing.T) {
-	// stuck is a handler that ignores its context, as a call that hangs
-	// would. It closes entered once it runs, and returns once release is
-	// closed.
-	stuck := func(entered, release chan struct{}) jobs.Handler {
-		return func(context.Context, []byte) error {
-			close(entered)
-			<-release
-			return nil
-		}
+// stuck returns a handler that ignores its context, as a call that hangs
+// would. It closes entered once it runs, and returns nil once release is
+// closed.
+func stuck(entered, release chan struct{}) jobs.Handler {
+	return func(context.Context, []byte) error {
+		close(entered)
+		<-release
+		return nil
 	}
+}
 
+// oneWorker returns DefaultOptions with one worker, for a test that checks
+// exact instants: two workers' transactions could contend for the write
+// lock, and SQLite's busy handler sleeps on the bubble's clock.
+func oneWorker() jobs.Options {
+	opts := jobs.DefaultOptions()
+	opts.Workers = 1
+	return opts
+}
+
+func TestExpiredLeaseIsReclaimed(t *testing.T) {
 	t.Run("by another worker", func(t *testing.T) {
 		inBubble(t, func(t *testing.T, s *store.Store) {
 			k := kind(t, "test.hangs")
@@ -252,6 +266,101 @@ func TestExpiredLeaseIsReclaimed(t *testing.T) {
 			stopped(t, stopFirst)
 			stopped(t, stopSecond)
 		})
+	})
+}
+
+func TestClaimTakesEarliestDueFirst(t *testing.T) {
+	inBubble(t, func(t *testing.T, s *store.Store) {
+		k := kind(t, "test.ordered")
+		order := make(chan string, 10)
+		w, _ := newWorker(t, s, map[jobs.Kind]jobs.Handler{k: func(_ context.Context, payload []byte) error {
+			order <- string(payload)
+			return nil
+		}}, oneWorker(), half)
+		now := time.Now()
+		for _, j := range []struct {
+			name  string
+			runAt time.Time
+		}{
+			{"in a minute", now.Add(time.Minute)},
+			{"an hour ago", now.Add(-time.Hour)},
+			{"three hours ago", now.Add(-3 * time.Hour)},
+			{"also an hour ago", now.Add(-time.Hour)},
+			{"as soon as possible", time.Time{}},
+			{"two hours ago", now.Add(-2 * time.Hour)},
+		} {
+			enqueue(t, s, jobs.Job{Kind: k, Payload: []byte(j.name), RunAt: j.runAt})
+		}
+
+		stop := start(t, w)
+		time.Sleep(2 * time.Minute)
+		stopped(t, stop)
+		close(order)
+		var got []string
+		for name := range order {
+			got = append(got, name)
+		}
+		want := []string{"as soon as possible", "three hours ago", "two hours ago", "an hour ago", "also an hour ago", "in a minute"}
+		if !slices.Equal(got, want) {
+			t.Errorf("ran %q, want %q: the earliest due first, and of two due together, the first enqueued", got, want)
+		}
+	})
+}
+
+// TestHandlerDeadlineIsTheLease holds the write lock while a claim waits
+// for it. The lease must run from when the claim took the lock, not from
+// when it began to wait, and the handler's context must end when the
+// lease written ends: no later, so that no other claim can take the job
+// while the handler still runs.
+func TestHandlerDeadlineIsTheLease(t *testing.T) {
+	inBubble(t, func(t *testing.T, s *store.Store) {
+		k := kind(t, "test.leased")
+		opts := oneWorker()
+		type seen struct {
+			deadline   time.Time
+			leaseUntil int64
+			err        error
+		}
+		seenBy := make(chan seen, 1)
+		w, _ := newWorker(t, s, map[jobs.Kind]jobs.Handler{k: func(ctx context.Context, _ []byte) error {
+			deadline, _ := ctx.Deadline()
+			var until int64
+			err := s.DB().QueryRowContext(ctx, "SELECT lease_until FROM jobs").Scan(&until)
+			seenBy <- seen{deadline, until, err}
+			return nil
+		}}, opts, half)
+		enqueue(t, s, jobs.Job{Kind: k, RunAt: time.Now().Add(10 * time.Second)})
+		stop := start(t, w)
+
+		// Just before the job is due, hold the write lock for 1 s: the
+		// claim at the next poll waits half a second for it.
+		time.Sleep(9500 * time.Millisecond)
+		holding, held := make(chan struct{}), make(chan error, 1)
+		go func() {
+			held <- s.InTx(t.Context(), func(*storedb.Queries) error {
+				close(holding)
+				time.Sleep(time.Second)
+				return nil
+			})
+		}()
+		<-holding
+		freed := time.Now().Add(time.Second)
+		got := <-seenBy
+		if err := <-held; err != nil {
+			t.Fatal(err)
+		}
+		stopped(t, stop)
+
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if earliest := freed.Add(opts.Lease).UnixMilli(); got.leaseUntil < earliest {
+			t.Errorf("the lease ends %v after the lock was free, want at least %v: it must run from the claim",
+				time.UnixMilli(got.leaseUntil).Sub(freed), opts.Lease)
+		}
+		if until := time.UnixMilli(got.leaseUntil); !got.deadline.Equal(until) {
+			t.Errorf("the handler's context ends %v after the lease written, want as it ends", got.deadline.Sub(until))
+		}
 	})
 }
 
@@ -363,7 +472,7 @@ func TestHandlerOutcomes(t *testing.T) {
 				w, _ := newWorker(t, s, map[jobs.Kind]jobs.Handler{k: func(context.Context, []byte) error {
 					calls.Add(1)
 					return c.err
-				}}, jobs.DefaultOptions(), half)
+				}}, oneWorker(), half)
 				j := jobs.Job{Kind: k, Key: key(t, "outcome")}
 				enqueue(t, s, j)
 
@@ -424,9 +533,9 @@ func TestRetryJitterComesFromRnd(t *testing.T) {
 				var w *jobs.Worker
 				var err error
 				if c.failed {
-					w, err = jobs.NewWorker(s, handlers, time.Now, failingRand{}, log, jobs.DefaultOptions())
+					w, err = jobs.NewWorker(s, handlers, time.Now, failingRand{}, log, oneWorker())
 				} else {
-					w, err = jobs.NewWorker(s, handlers, time.Now, c.rnd, log, jobs.DefaultOptions())
+					w, err = jobs.NewWorker(s, handlers, time.Now, c.rnd, log, oneWorker())
 				}
 				if err != nil {
 					t.Fatal(err)
@@ -507,30 +616,112 @@ func TestRunDrainsOnShutdown(t *testing.T) {
 	})
 
 	t.Run("a handler past the deadline", func(t *testing.T) {
+		for _, c := range []struct {
+			name     string
+			returns  func(ctx context.Context) error
+			state    string
+			attempts int64
+		}{
+			// Cut off, the attempt does not count, whatever the handler
+			// makes of its context ending: the job is as it was before the
+			// claim, and ready at once.
+			{"its context's error", func(ctx context.Context) error { return ctx.Err() }, "ready", 0},
+			{"a Retry", func(ctx context.Context) error { return &jobs.Retry{After: time.Hour, Err: ctx.Err()} }, "ready", 0},
+			{"a Permanent", func(ctx context.Context) error { return &jobs.Permanent{Err: ctx.Err()} }, "ready", 0},
+			// A job that finishes all the same is done.
+			{"nil", func(context.Context) error { return nil }, "done", 1},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				inBubble(t, func(t *testing.T, s *store.Store) {
+					k := kind(t, "test.endless")
+					entered := make(chan struct{})
+					opts := oneWorker()
+					w, log := newWorker(t, s, map[jobs.Kind]jobs.Handler{k: func(ctx context.Context, _ []byte) error {
+						close(entered)
+						<-ctx.Done()
+						return c.returns(ctx)
+					}}, opts, half)
+					runAt := time.Now().Add(-time.Minute)
+					enqueue(t, s, jobs.Job{Kind: k, RunAt: runAt})
+
+					stop := start(t, w)
+					<-entered
+					stopping := time.Now()
+					stopped(t, stop)
+					if took := time.Since(stopping); took != opts.Drain {
+						t.Errorf("Run returned %v after its context ended, want the drain deadline, %v", took, opts.Drain)
+					}
+					row := onlyRow(t, s)
+					wantRow(t, row, c.state, c.attempts, "")
+					if c.state == "ready" && (row.RunAt != runAt.UnixMilli() || row.LeaseUntil.Valid) {
+						t.Errorf("the job is due at %d with lease %v, want due at %d, as before, and no lease",
+							row.RunAt, row.LeaseUntil, runAt.UnixMilli())
+					}
+					if got := log.find("job drain deadline passed"); len(got) != 1 || got[0].level != slog.LevelWarn {
+						t.Errorf("logged %+v, want one warning", got)
+					}
+					if c.state != "ready" {
+						return
+					}
+
+					// The next Run claims it again, and it can be done.
+					next, _ := newWorker(t, s, map[jobs.Kind]jobs.Handler{k: func(context.Context, []byte) error {
+						return nil
+					}}, opts, half)
+					stop = start(t, next)
+					time.Sleep(time.Millisecond)
+					stopped(t, stop)
+					wantRow(t, onlyRow(t, s), "done", 1, "")
+				})
+			})
+		}
+	})
+
+	t.Run("a stale outcome after a free retry", func(t *testing.T) {
 		inBubble(t, func(t *testing.T, s *store.Store) {
-			k := kind(t, "test.endless")
-			entered := make(chan struct{})
-			opts := jobs.DefaultOptions()
-			w, log := newWorker(t, s, map[jobs.Kind]jobs.Handler{k: func(ctx context.Context, _ []byte) error {
-				close(entered)
+			k := kind(t, "test.hangs")
+			opts := oneWorker()
+			hungIn, hungOut := make(chan struct{}), make(chan struct{})
+			cutIn := make(chan struct{})
+			lastIn, lastOut := make(chan struct{}), make(chan struct{})
+			hung, hungLog := newWorker(t, s, map[jobs.Kind]jobs.Handler{k: stuck(hungIn, hungOut)}, opts, half)
+			cut, _ := newWorker(t, s, map[jobs.Kind]jobs.Handler{k: func(ctx context.Context, _ []byte) error {
+				close(cutIn)
 				<-ctx.Done()
 				return ctx.Err()
 			}}, opts, half)
+			last, _ := newWorker(t, s, map[jobs.Kind]jobs.Handler{k: stuck(lastIn, lastOut)}, opts, half)
 			enqueue(t, s, jobs.Job{Kind: k})
 
-			stop := start(t, w)
-			<-entered
-			stopping := time.Now()
-			stopped(t, stop)
-			if took := time.Since(stopping); took != opts.Drain {
-				t.Errorf("Run returned %v after its context ended, want the drain deadline, %v", took, opts.Drain)
+			stopHung := start(t, hung)
+			<-hungIn // attempt 1, under lease 1, which then expires
+			stopCut := start(t, cut)
+			<-cutIn // attempt 2, under lease 2
+			stopped(t, stopCut)
+			row := onlyRow(t, s)
+			wantRow(t, row, "ready", 1, "")
+			if row.LeaseToken != 2 {
+				t.Errorf("after the free retry the lease token is %d, want 2: it never goes back", row.LeaseToken)
 			}
-			// Cut off, the handler returned its context's error: a retry,
-			// recorded although Run's context had ended.
-			wantRow(t, onlyRow(t, s), "ready", 1, context.Canceled.Error())
-			if got := log.find("job drain deadline passed"); len(got) != 1 || got[0].level != slog.LevelWarn {
-				t.Errorf("logged %+v, want one warning", got)
+
+			stopLast := start(t, last)
+			<-lastIn // attempt 2 again, under lease 3
+			close(hungOut)
+			synctest.Wait()
+			row = onlyRow(t, s)
+			wantRow(t, row, "leased", 2, "")
+			if row.LeaseToken != 3 {
+				t.Errorf("the third claim's lease token is %d, want 3", row.LeaseToken)
 			}
+			if lost := hungLog.find("job lease lost"); len(lost) != 1 {
+				t.Errorf("the first claim's late outcome logged %d lost leases, want 1", len(lost))
+			}
+
+			close(lastOut)
+			synctest.Wait()
+			wantRow(t, onlyRow(t, s), "done", 2, "")
+			stopped(t, stopHung)
+			stopped(t, stopLast)
 		})
 	})
 }
@@ -555,8 +746,11 @@ func TestNotifyWakesWorkers(t *testing.T) {
 			enqueue(t, s, jobs.Job{Kind: k})
 		}
 		w.Notify() // once, for them all
+		// Not the very instant: the workers' claims may contend for the
+		// write lock, and SQLite's busy handler sleeps on the bubble's
+		// clock. Well within a second, against an hour's poll, is at once.
 		for range opts.Workers {
-			if when := <-started; !when.Equal(woken) {
+			if when := <-started; when.Sub(woken) >= time.Second {
 				t.Errorf("a job started %v after Notify, want at once, on every idle worker", when.Sub(woken))
 			}
 		}
@@ -671,6 +865,9 @@ func TestNewWorkerRefusesInvalid(t *testing.T) {
 		"no poll":                     func(o *jobs.Options) { o.Poll = 0 },
 		"no drain":                    func(o *jobs.Options) { o.Drain = 0 },
 		"a negative drain":            func(o *jobs.Options) { o.Drain = -time.Second },
+		"no sweep interval":           func(o *jobs.Options) { o.SweepEvery = 0 },
+		"no retention for done jobs":  func(o *jobs.Options) { o.KeepDone = 0 },
+		"no retention for dead jobs":  func(o *jobs.Options) { o.KeepDead = -time.Hour },
 	} {
 		cases[name] = func() (*jobs.Worker, error) {
 			o := jobs.DefaultOptions()

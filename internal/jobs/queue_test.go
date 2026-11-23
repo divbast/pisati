@@ -247,6 +247,32 @@ func TestEnqueueStoresTheJob(t *testing.T) {
 	}
 }
 
+func TestEnqueueRefusesLargePayload(t *testing.T) {
+	if jobs.MaxPayload != 1<<20 {
+		t.Errorf("MaxPayload = %d, want 1 MiB", jobs.MaxPayload)
+	}
+	s := newStore(t)
+	ctx := t.Context()
+	k := kind(t, "test.large")
+	if !enqueue(t, s, jobs.Job{Kind: k, Payload: make([]byte, jobs.MaxPayload)}) {
+		t.Fatal("a payload of exactly 1 MiB was not added")
+	}
+	// The transaction commits: Enqueue itself must write nothing.
+	if err := s.InTx(ctx, func(q *storedb.Queries) error {
+		added, err := jobs.Enqueue(ctx, q, jobs.Job{Kind: k, Payload: make([]byte, jobs.MaxPayload+1)})
+		if added || !errors.Is(err, jobs.ErrPayloadTooLarge) || !errors.Is(err, jobs.ErrInvalid) {
+			t.Errorf("Enqueue of 1 MiB + 1 byte = %t, %v; want false and an error wrapping ErrPayloadTooLarge and ErrInvalid", added, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	all := jobRows(t, s)
+	if len(all) != 1 || len(all[0].Payload) != jobs.MaxPayload {
+		t.Errorf("%d jobs stored, want only the 1 MiB one", len(all))
+	}
+}
+
 func TestEnqueueRefusesInvalidJob(t *testing.T) {
 	s := newStore(t)
 	ctx := t.Context()

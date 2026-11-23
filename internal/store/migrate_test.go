@@ -97,12 +97,13 @@ func TestMigrateFreshThenNoop(t *testing.T) {
 		t.Fatalf("first Migrate = %d, %d, %v; want 0, %d, nil", from, to, err, newestVersion)
 	}
 	want := map[string]string{
-		"sessions":             "strict table",
-		"sessions_by_expiry":   "index",
-		"sessions_by_user":     "index",
-		"jobs":                 "strict table",
-		"jobs_by_state_run_at": "index",
-		"data_keys":            "strict table",
+		"sessions":                  "strict table",
+		"sessions_by_expiry":        "index",
+		"sessions_by_user":          "index",
+		"jobs":                      "strict table",
+		"jobs_by_state_run_at":      "index",
+		"jobs_by_state_finished_at": "index",
+		"data_keys":                 "strict table",
 	}
 	if got := tables(t, s); !maps.Equal(got, want) {
 		t.Errorf("schema = %v, want %v", got, want)

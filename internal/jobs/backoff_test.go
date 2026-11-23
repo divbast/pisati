@@ -29,6 +29,9 @@ func TestDefaultOptions(t *testing.T) {
 		MaxAttempts: 12,
 		Poll:        time.Second,
 		Drain:       8 * time.Second,
+		SweepEvery:  time.Hour,
+		KeepDone:    7 * 24 * time.Hour,
+		KeepDead:    30 * 24 * time.Hour,
 	}
 	if got := jobs.DefaultOptions(); got != want {
 		t.Errorf("DefaultOptions() = %+v, want the approved values %+v", got, want)

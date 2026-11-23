@@ -100,7 +100,7 @@ func enqueue(t *testing.T, s *store.Store, j jobs.Job) bool {
 func jobRows(t *testing.T, s *store.Store) []storedb.Job {
 	t.Helper()
 	rows, err := s.DB().QueryContext(t.Context(), `SELECT id, kind, payload, idempotency_key, state,
-		attempts, run_at, lease_until, last_error FROM jobs ORDER BY id`)
+		attempts, run_at, lease_until, lease_token, finished_at, last_error FROM jobs ORDER BY id`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func jobRows(t *testing.T, s *store.Store) []storedb.Job {
 	for rows.Next() {
 		var j storedb.Job
 		if err := rows.Scan(&j.ID, &j.Kind, &j.Payload, &j.IdempotencyKey, &j.State,
-			&j.Attempts, &j.RunAt, &j.LeaseUntil, &j.LastError); err != nil {
+			&j.Attempts, &j.RunAt, &j.LeaseUntil, &j.LeaseToken, &j.FinishedAt, &j.LastError); err != nil {
 			t.Fatal(errors.Join(err, rows.Close()))
 		}
 		all = append(all, j)
