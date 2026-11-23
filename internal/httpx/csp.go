@@ -23,17 +23,26 @@ const cspHeader = "Content-Security-Policy"
 // in one line, with the response's nonce as <n>, and with
 // upgrade-insecure-requests at the end over https. A handler widens its
 // own response's policy through WithCSP, and only in the ways CSP's
-// methods allow, so a script runs only with the nonce whatever a handler
-// does. Nothing it allows outlasts the one response.
+// methods allow, none of which touches script-src: a script runs only
+// with the nonce whatever a handler does. Nothing it allows outlasts the
+// one response. The only other widening is dev mode's, which
+// SecurityHeaders makes for the Vite dev server.
 //
 // The zero CSP is the strict policy without a nonce, which runs no script
 // but its origin's own files. SecurityHeaders makes each response's.
 type CSP struct {
 	nonce       string
 	upgrade     bool
+	dev         devServer
 	styleAttrs  bool
 	httpsFrames bool
 	httpsMedia  bool
+}
+
+// devServer is where the Vite dev server is: its origin, and its
+// hot-update WebSocket's. Both are empty outside dev mode.
+type devServer struct {
+	origin, socket string
 }
 
 // AllowStyleAttributes allows style attributes, as a rich post's HTML
@@ -61,7 +70,21 @@ func (c *CSP) value() string {
 	if c.nonce != "" {
 		b.WriteString(" 'nonce-" + c.nonce + "'")
 	}
-	b.WriteString("; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'")
+	b.WriteString("; style-src 'self'")
+	if c.dev.origin != "" {
+		// Style sheets come from the dev server's origin. The style
+		// elements Vite's client adds, for CSS that TypeScript imports,
+		// are inline, which no origin allows: the client gives them the
+		// page's nonce, read from its csp-nonce meta element.
+		b.WriteString(" " + c.dev.origin)
+		if c.nonce != "" {
+			b.WriteString(" 'nonce-" + c.nonce + "'")
+		}
+	}
+	b.WriteString("; img-src 'self'; font-src 'self'; connect-src 'self'")
+	if c.dev.origin != "" {
+		b.WriteString(" " + c.dev.origin + " " + c.dev.socket)
+	}
 	if c.httpsMedia {
 		b.WriteString("; media-src https:")
 	}

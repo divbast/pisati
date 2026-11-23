@@ -15,6 +15,20 @@ import (
 	"github.com/divbast/pisati/internal/httpx"
 )
 
+// representation is what a handler may set for the response it means to
+// send, none of which fits the 500 that replaces it.
+var representation = map[string]string{
+	"Set-Cookie":          "pisati-session=renewed; Path=/; HttpOnly",
+	"ETag":                `"v1"`,
+	"Last-Modified":       "Mon, 23 Nov 2026 00:00:00 GMT",
+	"Expires":             "Tue, 23 Nov 2027 00:00:00 GMT",
+	"Content-Disposition": "attachment; filename=post.html",
+	"Content-Encoding":    "gzip",
+	"Content-Language":    "en",
+	"Content-Location":    "/posts/hello",
+	"Content-Range":       "bytes 0-999/1000",
+}
+
 // panicky serves the paths TestRecoverReturns500AndKeepsServing asks for.
 func panicky(t *testing.T) http.Handler {
 	t.Helper()
@@ -26,8 +40,12 @@ func panicky(t *testing.T) http.Handler {
 	})
 	mux.HandleFunc("GET /value", func(w http.ResponseWriter, _ *http.Request) {
 		// Headers for a response the handler never gets to send.
+		for k, v := range representation {
+			w.Header().Set(k, v)
+		}
 		w.Header().Set("Content-Type", "text/html")
 		w.Header().Set("Content-Length", "1000")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		panic("the request's own words")
 	})
 	mux.HandleFunc("GET /runtime", func(w http.ResponseWriter, r *http.Request) {
@@ -66,19 +84,30 @@ func TestRecoverReturns500AndKeepsServing(t *testing.T) {
 				// In the order Pisati chains them: the 500 is written past
 				// SecurityHeaders' writer.
 				srv := serve(t, httpx.Chain(panicky(t), httpx.RequestID(), httpx.Recover(log),
-					httpx.SecurityHeaders(baseURL(t, "http://localhost:8080"), config.HSTSHostOnly)))
+					httpx.SecurityHeaders(baseURL(t, "http://localhost:8080"), config.HSTSHostOnly, config.Dev{})))
 
 				var reused []bool
 				trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
 					reused = append(reused, info.Reused)
 				}}
-				status, header, body := send(t, srv, request(t, srv, http.MethodGet, tt.path, http.NoBody).
-					WithContext(httptrace.WithClientTrace(t.Context(), trace)))
+				req := request(t, srv, http.MethodGet, tt.path, http.NoBody).WithContext(httptrace.WithClientTrace(t.Context(), trace))
+				// So that the client shows a Content-Encoding rather than
+				// decoding by it.
+				req.Header.Set("Accept-Encoding", "identity")
+				status, header, body := send(t, srv, req)
 				if status != http.StatusInternalServerError || body != "Internal Server Error\n" {
 					t.Errorf("GET %s = %d %q, want 500 with the generic body", tt.path, status, body)
 				}
 				if got := header.Get("Content-Type"); got != "text/plain; charset=utf-8" {
 					t.Errorf("GET %s Content-Type = %q, want text/plain; charset=utf-8", tt.path, got)
+				}
+				if got := header.Get("Cache-Control"); got != "no-store" {
+					t.Errorf("GET %s Cache-Control = %q, want no-store", tt.path, got)
+				}
+				for k := range representation {
+					if got := header.Values(k); len(got) != 0 {
+						t.Errorf("GET %s has %s %q, which the handler set for the response it never sent", tt.path, k, got)
+					}
 				}
 				csp := header.Get("Content-Security-Policy")
 				if want := strictCSP(nonceIn(csp)); csp != want || header.Get("Cross-Origin-Opener-Policy") != "same-origin" {

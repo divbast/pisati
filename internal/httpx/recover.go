@@ -19,6 +19,11 @@ import (
 // value might hold the request's data. The connection stays open for the
 // client's next request.
 //
+// The 500 has Cache-Control: no-store, so no cache keeps it, and none of
+// the cookies, validators or representation headers the handler had set
+// for the response it meant to send. Every other header stays as it is,
+// so the ones SecurityHeaders set still go out.
+//
 // A handler that panics once its response has begun can no longer be
 // given a status: Recover logs the panic, then aborts the response, so
 // the client sees it cut off rather than take what it has for the whole.
@@ -45,11 +50,27 @@ func Recover(log *slog.Logger) Middleware {
 				if rec.wroteHeader {
 					panic(http.ErrAbortHandler)
 				}
+				forError(w.Header())
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			}()
 			next.ServeHTTP(rec, r)
 		})
 	}
+}
+
+// forError readies h, which holds what a handler set for the response it
+// never sent, for the 500 sent instead: it can be stored by no cache, and
+// carries none of the handler's cookies, validators or representation
+// metadata. http.Error drops only Content-Length, and resets the content
+// type.
+func forError(h http.Header) {
+	for _, name := range [...]string{
+		"Set-Cookie", "ETag", "Last-Modified", "Expires", "Content-Disposition",
+		"Content-Encoding", "Content-Language", "Content-Location", "Content-Range",
+	} {
+		h.Del(name)
+	}
+	h.Set("Cache-Control", "no-store")
 }
 
 // describePanic describes the value a handler panicked with, for the log.

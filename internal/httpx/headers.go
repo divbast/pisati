@@ -6,6 +6,7 @@ package httpx
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strconv"
 
 	"github.com/divbast/pisati/internal/config"
@@ -42,14 +43,23 @@ type header struct {
 // written, whatever the handler sets as Content-Security-Policy itself.
 // Cross-Origin-Embedder-Policy is each route's to set: see Isolation.
 //
-// The zero BaseURL, or an hsts that is none of the HSTSScope constants,
-// is a bug, since config.Load returns neither, and SecurityHeaders panics
-// on it.
-func SecurityHeaders(base config.BaseURL, hsts config.HSTSScope) Middleware {
+// In dev mode, when dev.ViteURL is set, every policy also lets the page
+// use the Vite dev server: its origin in style-src and connect-src, its
+// hot-update WebSocket's (ws:, or wss: for an https server) in
+// connect-src, and the response's nonce in style-src too, for the style
+// elements Vite's client adds to the page. script-src is left as it is.
+// Besides CSP's methods, this is the only way a policy is widened.
+//
+// The zero BaseURL, an hsts that is none of the HSTSScope constants, or a
+// dev.ViteURL with it or base away from localhost, 127.0.0.1 and [::1],
+// is a bug, since config.Load returns none of them, and SecurityHeaders
+// panics on it.
+func SecurityHeaders(base config.BaseURL, hsts config.HSTSScope, dev config.Dev) Middleware {
 	if base.String() == "" {
 		panic("httpx: SecurityHeaders needs a base URL, and the zero BaseURL is none")
 	}
 	sts := hstsValue(hsts)
+	vite := devServerOf(base, dev)
 	https := base.IsHTTPS()
 	fixed := []header{
 		{name: "Reporting-Endpoints", value: `csp="` + base.String() + `/_/csp-report"`},
@@ -68,7 +78,7 @@ func SecurityHeaders(base config.BaseURL, hsts config.HSTSScope) Middleware {
 			for _, f := range fixed {
 				h.Set(f.name, f.value)
 			}
-			p := &policy{csp: CSP{nonce: newNonce(), upgrade: https}}
+			p := &policy{csp: CSP{nonce: newNonce(), upgrade: https, dev: vite}}
 			// Set now as well as when the header is written, so that a
 			// response written past this writer, as Recover writes its
 			// 500, still carries the strict policy.
@@ -96,6 +106,32 @@ func hstsValue(s config.HSTSScope) string {
 		return hstsMaxAge + "; includeSubDomains; preload"
 	}
 	panic("httpx: SecurityHeaders was given an unknown " + s.String())
+}
+
+// devServerOf returns where dev's Vite dev server is, or the zero
+// devServer when dev sets none. It panics when the server, or base, is
+// away from loopback: config.Load sets ViteURL only when both are on it.
+func devServerOf(base config.BaseURL, dev config.Dev) devServer {
+	u, ok := dev.ViteURL.Get()
+	if !ok {
+		return devServer{}
+	}
+	b, err := url.Parse(base.String())
+	if err != nil || !loopback(b.Hostname()) || !loopback(u.Hostname()) {
+		panic("httpx: SecurityHeaders was given the Vite dev server " + u.Redacted() + " for the base URL " +
+			base.String() + ", and both must be on localhost, 127.0.0.1 or [::1]")
+	}
+	socket := "ws://"
+	if u.Scheme == "https" {
+		socket = "wss://"
+	}
+	return devServer{origin: u.Scheme + "://" + u.Host, socket: socket + u.Host}
+}
+
+// loopback reports whether host, without brackets or a port, is one of
+// the hosts config allows a dev server on: localhost, 127.0.0.1 or ::1.
+func loopback(host string) bool {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 // Nonce returns the nonce of the response to the request ctx belongs to,

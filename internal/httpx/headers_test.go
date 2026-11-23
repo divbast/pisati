@@ -73,25 +73,90 @@ func TestSecurityHeadersByScheme(t *testing.T) {
 			t.Parallel()
 
 			var nonce string
-			got := get(t, httpx.Chain(nonceHandler(t, &nonce), httpx.SecurityHeaders(baseURL(t, tt.base), tt.hsts)))
+			got := get(t, httpx.Chain(nonceHandler(t, &nonce), httpx.SecurityHeaders(baseURL(t, tt.base), tt.hsts, config.Dev{})))
 
 			csp := strictCSP(nonce)
 			if tt.wantHSTS != "" {
 				csp += "; upgrade-insecure-requests"
 			}
-			want := http.Header{
-				"Content-Security-Policy":      {csp},
-				"Reporting-Endpoints":          {`csp="` + tt.base + `/_/csp-report"`},
-				"X-Content-Type-Options":       {"nosniff"},
-				"Referrer-Policy":              {"strict-origin-when-cross-origin"},
-				"Cross-Origin-Opener-Policy":   {"same-origin"},
-				"Cross-Origin-Resource-Policy": {"same-origin"},
-				"Permissions-Policy":           {"camera=(), microphone=(), geolocation=(), payment=(), usb=()"},
+			if want := wantHeaders(tt.base, csp, tt.wantHSTS); !maps.EqualFunc(got, want, slices.Equal) {
+				t.Errorf("headers:\n%v\nwant exactly:\n%v", got, want)
 			}
-			if tt.wantHSTS != "" {
-				want.Set("Strict-Transport-Security", tt.wantHSTS)
-			}
-			if !maps.EqualFunc(got, want, slices.Equal) {
+		})
+	}
+}
+
+// wantHeaders is every header SecurityHeaders sets for base, with csp as
+// the policy and hsts as Strict-Transport-Security, or none when it is
+// empty.
+func wantHeaders(base, csp, hsts string) http.Header {
+	want := http.Header{
+		"Content-Security-Policy":      {csp},
+		"Reporting-Endpoints":          {`csp="` + base + `/_/csp-report"`},
+		"X-Content-Type-Options":       {"nosniff"},
+		"Referrer-Policy":              {"strict-origin-when-cross-origin"},
+		"Cross-Origin-Opener-Policy":   {"same-origin"},
+		"Cross-Origin-Resource-Policy": {"same-origin"},
+		"Permissions-Policy":           {"camera=(), microphone=(), geolocation=(), payment=(), usb=()"},
+	}
+	if hsts != "" {
+		want.Set("Strict-Transport-Security", hsts)
+	}
+	return want
+}
+
+// devAt returns the dev settings with vite as the Vite dev server's URL,
+// failing the test if it is not one.
+func devAt(t *testing.T, vite string) config.Dev {
+	t.Helper()
+	u, err := config.ParseOptionalURL(vite)
+	if err != nil {
+		t.Fatalf("ParseOptionalURL(%q): %v", vite, err)
+	}
+	return config.Dev{ViteURL: u}
+}
+
+func TestSecurityHeadersDevMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name, base, vite string
+		// origin and live are the Vite server's origin and its HMR
+		// socket's.
+		origin, live string
+		hsts         string
+		upgrade      string
+	}{
+		{
+			name: "localhost", base: "http://localhost:8080", vite: "http://localhost:5173",
+			origin: "http://localhost:5173", live: "ws://localhost:5173",
+		},
+		{
+			name: "127.0.0.1, with a path", base: "http://127.0.0.1:8080", vite: "http://127.0.0.1:5173/src/",
+			origin: "http://127.0.0.1:5173", live: "ws://127.0.0.1:5173",
+		},
+		{
+			name: "[::1]", base: "http://[::1]:8080", vite: "http://[::1]:5173",
+			origin: "http://[::1]:5173", live: "ws://[::1]:5173",
+		},
+		{
+			name: "https on localhost", base: "https://localhost:8443", vite: "https://localhost:5173",
+			origin: "https://localhost:5173", live: "wss://localhost:5173",
+			hsts: "max-age=63072000", upgrade: "; upgrade-insecure-requests",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var nonce string
+			got := get(t, httpx.Chain(nonceHandler(t, &nonce),
+				httpx.SecurityHeaders(baseURL(t, tt.base), config.HSTSHostOnly, devAt(t, tt.vite))))
+			csp := "default-src 'none'; script-src 'self' 'nonce-" + nonce + "'; " +
+				"style-src 'self' " + tt.origin + " 'nonce-" + nonce + "'; img-src 'self'; font-src 'self'; " +
+				"connect-src 'self' " + tt.origin + " " + tt.live + "; form-action 'self'; frame-ancestors 'none'; " +
+				"base-uri 'none'; object-src 'none'; report-to csp" + tt.upgrade
+			if want := wantHeaders(tt.base, csp, tt.hsts); !maps.EqualFunc(got, want, slices.Equal) {
 				t.Errorf("headers:\n%v\nwant exactly:\n%v", got, want)
 			}
 		})
@@ -105,9 +170,18 @@ func TestSecurityHeadersRefusesUnsetArguments(t *testing.T) {
 		name string
 		base config.BaseURL
 		hsts config.HSTSScope
+		dev  config.Dev
 	}{
 		{name: "zero base URL", hsts: config.HSTSHostOnly},
 		{name: "unknown HSTS scope", base: baseURL(t, "https://blog.example"), hsts: config.HSTSPreload + 1},
+		{
+			name: "a Vite server away from loopback", base: baseURL(t, "http://localhost:8080"),
+			hsts: config.HSTSHostOnly, dev: devAt(t, "http://vite.example:5173"),
+		},
+		{
+			name: "a Vite server for a base URL away from loopback", base: baseURL(t, "https://blog.example"),
+			hsts: config.HSTSHostOnly, dev: devAt(t, "http://localhost:5173"),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -115,10 +189,10 @@ func TestSecurityHeadersRefusesUnsetArguments(t *testing.T) {
 
 			defer func() {
 				if recover() == nil {
-					t.Errorf("SecurityHeaders(%q, %v) returned, want a panic: only a bug passes it", tt.base, tt.hsts)
+					t.Errorf("SecurityHeaders(%q, %v, %v) returned, want a panic: only a bug passes it", tt.base, tt.hsts, tt.dev)
 				}
 			}()
-			httpx.SecurityHeaders(tt.base, tt.hsts)
+			httpx.SecurityHeaders(tt.base, tt.hsts, tt.dev)
 		})
 	}
 }
@@ -127,7 +201,7 @@ func TestNonceUniquePerRequest(t *testing.T) {
 	t.Parallel()
 
 	var nonce string
-	h := httpx.Chain(nonceHandler(t, &nonce), httpx.SecurityHeaders(baseURL(t, "https://blog.example"), config.HSTSHostOnly))
+	h := httpx.Chain(nonceHandler(t, &nonce), httpx.SecurityHeaders(baseURL(t, "https://blog.example"), config.HSTSHostOnly, config.Dev{}))
 	seen := map[string]bool{}
 	for range 200 {
 		header := get(t, h)
@@ -168,7 +242,7 @@ func TestIsolationSetsCOEPOnlyWhenDeclared(t *testing.T) {
 
 			var nonce string
 			got := get(t, httpx.Chain(nonceHandler(t, &nonce),
-				httpx.SecurityHeaders(baseURL(t, "https://blog.example"), config.HSTSHostOnly), tt.iso.Middleware()))
+				httpx.SecurityHeaders(baseURL(t, "https://blog.example"), config.HSTSHostOnly, config.Dev{}), tt.iso.Middleware()))
 			if coep := got.Values("Cross-Origin-Embedder-Policy"); !slices.Equal(coep, tt.want) {
 				t.Errorf("Cross-Origin-Embedder-Policy = %q, want %q", coep, tt.want)
 			}

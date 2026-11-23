@@ -64,7 +64,7 @@ func TestWithCSPWidensOneResponse(t *testing.T) {
 		// net/http writes the header once the handler returns.
 		widened = httpx.WithCSP(r.Context(), rich)
 	})
-	h := httpx.Chain(mux, httpx.SecurityHeaders(baseURL(t, "https://blog.example"), config.HSTSHostOnly))
+	h := httpx.Chain(mux, httpx.SecurityHeaders(baseURL(t, "https://blog.example"), config.HSTSHostOnly, config.Dev{}))
 
 	tests := []struct {
 		path  string
