@@ -1,0 +1,309 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee> */
+
+/*
+ * What every page gets: a reset, the look of plain HTML elements, the
+ * page's layout and the utilities. Pages are semantic HTML first, so a
+ * form, a heading or a table looks right with no class at all.
+ *
+ * Every size is a logical property (inline and block, start and end), so
+ * a right-to-left post lays out as a mirror image with no rule of its own.
+ */
+
+/*
+ * The reset sits in the weakest layer, and :where() keeps its selectors at
+ * zero specificity, so any rule anywhere else overrides it.
+ */
+@layer reset {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  :where(body, h1, h2, h3, h4, h5, h6, p, figure, blockquote, dl, dd, pre) {
+    margin: 0;
+  }
+
+  :where(html) {
+    /* A phone keeps the text size the page asks for when it turns. */
+    text-size-adjust: none;
+  }
+
+  :where(img, picture, svg, video, canvas) {
+    display: block;
+    max-inline-size: 100%;
+  }
+
+  :where(img, video) {
+    block-size: auto;
+  }
+
+  :where(input, button, textarea, select) {
+    font: inherit;
+    color: inherit;
+  }
+
+  :where(h1, h2, h3, h4, h5, h6, p, li, dt, dd, figcaption) {
+    overflow-wrap: break-word;
+  }
+}
+
+@layer base {
+  html {
+    font-family: var(--font-body);
+    line-height: var(--leading-body);
+    color: var(--color-text);
+    background-color: var(--color-canvas);
+    /* Checkboxes, radios, range and progress take the accent too. */
+    accent-color: var(--color-accent);
+    hanging-punctuation: first last;
+
+    @media (prefers-reduced-motion: no-preference) {
+      scroll-behavior: smooth;
+    }
+  }
+
+  body {
+    min-block-size: 100dvb;
+    font-size: var(--step-0);
+  }
+
+  :is(h1, h2, h3, h4, h5, h6) {
+    line-height: var(--leading-tight);
+    /* Headings break into lines of even length, never an orphaned word. */
+    text-wrap: balance;
+  }
+
+  h1 {
+    font-size: var(--step-4);
+  }
+
+  h2 {
+    font-size: var(--step-3);
+  }
+
+  h3 {
+    font-size: var(--step-2);
+  }
+
+  h4 {
+    font-size: var(--step-1);
+  }
+
+  /*
+   * Running text avoids a lone word on its last line, where the browser
+   * can; elsewhere it wraps as it always has.
+   */
+  :is(p, li, dd, figcaption, blockquote) {
+    text-wrap: pretty;
+  }
+
+  small {
+    font-size: var(--step--1);
+  }
+
+  a {
+    color: var(--color-accent);
+    text-decoration-thickness: from-font;
+    text-underline-offset: 0.15em;
+
+    &:hover {
+      color: var(--color-accent-strong);
+      text-decoration-thickness: 0.12em;
+    }
+  }
+
+  /*
+   * Every focusable element shows the same ring when the keyboard puts
+   * focus on it, and none when a pointer does.
+   */
+  :focus-visible {
+    outline: var(--focus-width) solid var(--color-accent);
+    outline-offset: var(--focus-offset);
+  }
+
+  ::selection {
+    background-color: var(--color-selection);
+  }
+
+  :is(code, kbd, samp, pre) {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+  }
+
+  pre {
+    padding: var(--space-xs);
+    overflow: auto;
+    background-color: var(--color-surface);
+    border-radius: var(--radius-m);
+  }
+
+  blockquote {
+    padding-inline-start: var(--space-s);
+    color: var(--color-text-muted);
+    border-inline-start: 0.25rem solid var(--color-accent);
+  }
+
+  /* A rule, a table's lines and a field's border are the text colour, faded. */
+  hr {
+    border: none;
+    border-block-start: var(--border-width) solid color-mix(in oklch, currentcolor 25%, transparent);
+  }
+
+  table {
+    border-collapse: collapse;
+  }
+
+  :is(th, td) {
+    padding-block: var(--space-3xs);
+    padding-inline: var(--space-2xs);
+    text-align: start;
+    border-block-end: var(--border-width) solid color-mix(in oklch, currentcolor 25%, transparent);
+  }
+
+  fieldset {
+    padding: var(--space-s);
+    border: var(--border-width) solid color-mix(in oklch, currentcolor 25%, transparent);
+    border-radius: var(--radius-m);
+  }
+
+  label {
+    display: block;
+    font-weight: 600;
+  }
+
+  :is(
+    input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"]),
+    select,
+    textarea
+  ) {
+    inline-size: 100%;
+    padding-block: var(--space-2xs);
+    padding-inline: var(--space-xs);
+    color: var(--color-text);
+    background-color: var(--color-canvas);
+    border: var(--border-width) solid color-mix(in oklch, currentcolor 45%, transparent);
+    border-radius: var(--radius-s);
+
+    /* A field turns red only once the reader has had a go at it. */
+    &:user-invalid {
+      border-color: var(--color-danger);
+    }
+  }
+
+  textarea {
+    min-block-size: 6lh;
+    resize: block;
+
+    /* Where the browser can, a text box grows with what is typed into it. */
+    @supports (field-sizing: content) {
+      field-sizing: content;
+    }
+  }
+
+  button {
+    padding-block: var(--space-2xs);
+    padding-inline: var(--space-s);
+    font-weight: 600;
+    color: var(--color-on-accent);
+    cursor: pointer;
+    background-color: var(--color-accent);
+    border: var(--border-width) solid transparent;
+    border-radius: var(--radius-s);
+    transition: background-color var(--duration-fast) var(--ease-out);
+
+    &:hover {
+      background-color: var(--color-accent-strong);
+    }
+
+    &:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+  }
+}
+
+/*
+ * The page is one centred column, never wider than the content width and
+ * never closer to the screen's edges than the gutters, with the header at
+ * the top and the footer at the bottom of even a short page.
+ */
+@layer layout {
+  body {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    grid-template-columns:
+      minmax(var(--space-s), 1fr)
+      minmax(0, var(--content-width))
+      minmax(var(--space-s), 1fr);
+    row-gap: var(--space-l);
+    padding-block: var(--space-m);
+
+    > * {
+      grid-column: 2;
+    }
+  }
+
+  /*
+   * The header, main and footer are each a container, so what sits in
+   * one is laid out by the room it has, not by the screen's width.
+   */
+  :where(body > header, main, body > footer) {
+    container-type: inline-size;
+  }
+
+  main {
+    > * + * {
+      margin-block-start: var(--space-s);
+    }
+
+    > :is(h1, h2, h3) + * {
+      margin-block-start: var(--space-xs);
+    }
+  }
+
+  /* A form's fields stack, with even gaps. */
+  form {
+    display: grid;
+    gap: var(--space-s);
+  }
+
+  /*
+   * A form of buttons alone, a choice between actions, puts them side by
+   * side once its container has room, and stacks them, each easy to tap,
+   * when it has not.
+   */
+  @container (inline-size >= 32rem) {
+    form:not(:has(> :not(button, [type="hidden"]))) {
+      grid-auto-flow: column;
+      justify-content: start;
+    }
+  }
+}
+
+/*
+ * Moving from page to page fades between them, where the browser can and
+ * the reader has not asked for less motion. The rule is the document's,
+ * not a layer's, so it sits outside them.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition {
+    navigation: auto;
+  }
+}
+
+@layer utilities {
+  /*
+   * Hidden from sight but read out by a screen reader: an icon-only
+   * button's name, say. It shows again once focus lands in it.
+   */
+  .visually-hidden:not(:focus-within, :active) {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    white-space: nowrap;
+    clip-path: inset(50%);
+  }
+}

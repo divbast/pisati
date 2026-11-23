@@ -189,7 +189,8 @@ breaking change.
 ## Key commands
 
 - `just setup` — fetch divbast/ci into `.ci/` at the commit the workflows
-  pin, then install the pinned toolchain. One command on a
+  pin, then install the pinned toolchain and, with `pnpm install
+  --frozen-lockfile`, the front end's packages. One command on a
   fresh clone, and again whenever the pin moves; `just lint` fails, naming
   it, when `.ci` is not at the pinned commit (`ci-fresh`)
 - `just build` — build the image locally. It does not verify the images it
@@ -204,9 +205,9 @@ breaking change.
   -C test/acceptance test -run TestServes ./...` runs one test
 - `just test` — build, then the acceptance suite
 - `just lint` — pinact, zizmor, actionlint, ShellCheck and shfmt, the Go
-  gates (`go-gates`, `go-unit`, `vuln` and `secrets`), `reuse lint`,
-  hadolint and `docker build --check`. `go-gates` runs the compiler,
-  `go fix -diff`, `go mod tidy -diff`, `go mod verify` and `golangci-lint
+  gates (`go-gates`, `go-unit`, `vuln` and `secrets`), `fe-check`,
+  `reuse lint`, hadolint and `docker build --check`. `go-gates` runs the
+  compiler, `go fix -diff`, `go mod tidy -diff`, `go mod verify` and `golangci-lint
   run`, which reports formatting too, in the root module and the
   acceptance module, and tidies and verifies `tools/`. It also fails
   unless both modules require the same goleak, and on any suppression
@@ -217,6 +218,12 @@ breaking change.
   modules. `secrets` runs betterleaks over the history of every ref the
   clone holds: all of it locally, and in CI once the lint job checks out
   the full history
+- `just fe-check` — the front end's gates: `vp check` (Oxfmt, Oxlint and
+  the TypeScript type checks), `vp test` (Vitest, on happy-dom),
+  Stylelint over `web/**/*.css`, and `pnpm audit --prod`
+- `just fe-build` — `vp build` the stylesheets and scripts under `web/`
+  into `internal/web/dist`, which `go:embed` compiles into the binary.
+  Only `PLACEHOLDER` there is tracked: the build output never is
 - `just archive`, `just scan` — write the image as an OCI archive, then run
   `divbast-scan` over it and the published `:latest`. Needs network access
   to ghcr.io
@@ -226,8 +233,11 @@ breaking change.
 ## Where the toolchain comes from
 
 - **`mise.toml` is where tool versions are written.** Go, golangci-lint,
-  betterleaks, hadolint, ShellCheck, shfmt, actionlint, reuse, just,
-  pinact, trivy, grype, zizmor and cosign are all listed there. Every
+  Node, pnpm, betterleaks, hadolint, ShellCheck, shfmt, actionlint, reuse,
+  just, pinact, trivy, grype, zizmor and cosign are all listed there. The
+  front end's own tools (Vite+, TypeScript, Lightning CSS, Stylelint and
+  happy-dom) are pinned in `package.json` and `pnpm-lock.yaml`, and pnpm
+  installs only releases at least 7 days old (`pnpm-workspace.yaml`). Every
   justfile recipe but `setup`, which installs them, runs through `mise
   exec`, so a recipe resolves those binaries and not a same-named one on
   PATH. The recipes that call GitHub,

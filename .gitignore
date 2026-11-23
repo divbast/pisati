@@ -6,3 +6,9 @@
 .agents/
 .superpowers/
 vendor/
+# The front end's packages, which just setup installs from pnpm-lock.yaml
+node_modules/
+# The front end's build, which just fe-build writes and go:embed compiles
+# in: only the placeholder that keeps a fresh clone compiling is tracked
+/internal/web/dist/*
+!/internal/web/dist/PLACEHOLDER

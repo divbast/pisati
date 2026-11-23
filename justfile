@@ -30,12 +30,14 @@ import? '.ci/just/app.just'
 default:
     @just --list
 
-# Fetch divbast/ci at the commit the workflows pin, then install the toolchain
+# Fetch divbast/ci at the commit the workflows pin, then install the toolchain and packages
 setup: ci-checkout
     #!/usr/bin/env bash
     # Not through the mise exec shell: this is what installs what it runs
     set -euo pipefail
     mise install
+    # Exactly the packages pnpm-lock.yaml records, or nothing at all
+    mise exec -- pnpm install --frozen-lockfile
 
 # Fetch divbast/ci at the commit the workflows pin, into .ci, and nothing else
 ci-checkout:
@@ -157,9 +159,31 @@ vuln:
 secrets:
     betterleaks git --ignore-gitleaks-allow --redact --verbose --no-color --no-banner .
 
+# The front end's gates. vp check runs Oxfmt, Oxlint and the TypeScript
+# type checks, and vp test the scripts' tests. pnpm audit reads only the
+# packages whose code a page ships, the dependencies; the tools that build
+# it are devDependencies. The audit asks the npm registry.
+
+# Every gate of the stylesheets and scripts under web/
+fe-check:
+    pnpm exec vp check
+    pnpm exec vp test
+    pnpm exec stylelint "web/**/*.css"
+    pnpm audit --prod
+
+# vp build writes internal/web/dist, which go:embed compiles into the
+# binary. Everything there but PLACEHOLDER is build output, cleared first
+# so no earlier build's file lingers: vite.config.ts leaves Vite's own
+# emptying off, which would delete the placeholder too.
+
+# Build the stylesheets and scripts into internal/web/dist
+fe-build:
+    find internal/web/dist -mindepth 1 ! -name PLACEHOLDER -delete
+    pnpm exec vp build
+
 # Every lint gate. Needs a running Docker daemon, for docker build --check
 lint:
-    {{ just_executable() }} ci-fresh actions-check workflow-audit actionlint shell-lint go-gates go-unit vuln secrets reuse-lint app-lint
+    {{ just_executable() }} ci-fresh actions-check workflow-audit actionlint shell-lint go-gates go-unit vuln secrets fe-check reuse-lint app-lint
 
 # Every gate. Run before committing
 ci:

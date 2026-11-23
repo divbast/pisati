@@ -132,7 +132,8 @@ signed commits. The App, the `renovate` environment holding its key,
 ## Development
 
 - `just setup` fetches divbast/ci into `.ci/` at the commit the workflows
-  pin, then installs the pinned toolchain from `mise.toml`.
+  pin, then installs the pinned toolchain from `mise.toml` and the front
+  end's packages from `pnpm-lock.yaml`.
 - `just scan` reads the published image with
   [skopeo](https://github.com/containers/skopeo), which must be on `PATH`;
   so must it for `just ci`.
@@ -142,6 +143,8 @@ signed commits. The App, the `renovate` environment holding its key,
   under `ENGINE`, docker unless it says podman.
 - `just lint` runs every lint gate, and needs a running Docker daemon
   logged in to dhi.io.
+- `just fe-check` runs the gates of the stylesheets and scripts under
+  `web/`, and `just fe-build` builds them into `internal/web/dist`.
 - `just ci` runs every gate, the scan included. Run it before committing.
 
 The recipes that call GitHub, pinact's and zizmor's, read a fine-grained

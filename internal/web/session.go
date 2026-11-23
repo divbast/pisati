@@ -3,7 +3,8 @@
 
 // Package web serves Pisati's website. SessionMiddleware loads each
 // request's session from its cookie, and SessionFrom hands it to the
-// handlers.
+// handlers. Assets gives pages the front end's stylesheets and scripts,
+// each checked by its integrity value, and serves them under /static/.
 package web
 
 import (

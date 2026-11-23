@@ -1,0 +1,16 @@
+{
+  "name": "pisati-web",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "browserslist": "4.29.6",
+    "happy-dom": "21.0.4",
+    "lightningcss": "1.33.0",
+    "stylelint": "18.0.0",
+    "typescript": "7.0.2",
+    "vite-plus": "1.6.0"
+  },
+  "browserslist": [
+    "last 2 years"
+  ]
+}

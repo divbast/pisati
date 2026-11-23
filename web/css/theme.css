@@ -1,0 +1,73 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee> */
+
+/*
+ * Light and dark. Each colour token holds both schemes' values in one
+ * light-dark(), and color-scheme decides which one a page shows: both, so
+ * the visitor's system setting picks, unless <html>'s data-theme, which
+ * the server sets from the theme cookie, names one. "auto", or no
+ * data-theme at all, follows the system. Every colour is oklch(), whose
+ * lightness is perceptual, so the two schemes keep the same contrast, and
+ * every one is built on --accent-hue, which a blog's accent setting moves.
+ *
+ * light-dark() takes the scheme of the element a token is used on, and
+ * color-scheme is inherited, so one value on :root themes the whole page,
+ * form controls and scroll bars included.
+ */
+@layer tokens {
+  :root {
+    color-scheme: light dark;
+    --color-canvas: light-dark(
+      oklch(99% 0.004 var(--accent-hue)),
+      oklch(18% 0.012 var(--accent-hue))
+    );
+    --color-surface: light-dark(
+      oklch(96% 0.01 var(--accent-hue)),
+      oklch(23% 0.016 var(--accent-hue))
+    );
+    --color-text: light-dark(oklch(23% 0.02 var(--accent-hue)), oklch(92% 0.01 var(--accent-hue)));
+    --color-text-muted: light-dark(
+      oklch(45% 0.02 var(--accent-hue)),
+      oklch(72% 0.015 var(--accent-hue))
+    );
+    --color-accent: light-dark(
+      oklch(47% 0.15 var(--accent-hue)),
+      oklch(78% 0.12 var(--accent-hue))
+    );
+    --color-accent-strong: light-dark(
+      oklch(38% 0.15 var(--accent-hue)),
+      oklch(86% 0.09 var(--accent-hue))
+    );
+    --color-on-accent: light-dark(
+      oklch(99% 0.004 var(--accent-hue)),
+      oklch(18% 0.012 var(--accent-hue))
+    );
+    --color-selection: light-dark(
+      oklch(88% 0.06 var(--accent-hue)),
+      oklch(38% 0.08 var(--accent-hue))
+    );
+    --color-danger: light-dark(oklch(50% 0.19 27), oklch(74% 0.15 27));
+
+    &[data-theme="light"] {
+      color-scheme: light;
+    }
+
+    &[data-theme="dark"] {
+      color-scheme: dark;
+    }
+
+    /*
+     * A reader who asks for more contrast gets text at full strength on
+     * a pure background, in either scheme.
+     */
+    @media (prefers-contrast: more) {
+      --color-canvas: light-dark(oklch(100% 0 0), oklch(0% 0 0));
+      --color-text: light-dark(oklch(0% 0 0), oklch(100% 0 0));
+      --color-text-muted: var(--color-text);
+      --color-accent: light-dark(
+        oklch(35% 0.15 var(--accent-hue)),
+        oklch(88% 0.09 var(--accent-hue))
+      );
+    }
+  }
+}
