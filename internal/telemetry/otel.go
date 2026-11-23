@@ -33,6 +33,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
+	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -58,9 +59,12 @@ const (
 	otlpTimeout = 10 * time.Second
 	// otlpIdle is how long a connection to the collector stays open idle.
 	otlpIdle = 90 * time.Second
-	// collectorReply bounds the collector's answer the exporter reads,
-	// which it puts in its error when the export fails.
+	// collectorReply bounds the body of the collector's answer that the
+	// exporter reads, which it puts in its error when the export fails.
 	collectorReply = 64 << 10
+	// collectorHeader bounds the header of the collector's answer, as the
+	// guarded client bounds the header of every answer it reads.
+	collectorHeader = 64 << 10
 	// attributeValue bounds a span attribute's value, in bytes, which the
 	// SDK otherwise leaves unbounded.
 	attributeValue = 1024
@@ -82,10 +86,19 @@ type Providers struct {
 	meters   *sdkmetric.MeterProvider
 	metrics  http.Handler
 	duration httpconv.ServerRequestDuration
-	// traces is nil when no OTLP endpoint is configured, and tracer is
-	// then a no-op.
-	traces *sdktrace.TracerProvider
+	// traces is the zero tracing when no OTLP endpoint is configured, and
+	// tracer is then a no-op.
+	traces tracing
 	tracer trace.Tracer
+	// propagator reads the W3C trace headers of a trusted proxy's request.
+	propagator propagation.TraceContext
+}
+
+// tracing is the tracer provider spans are made by, and the batcher that
+// sends them. The zero tracing makes and sends none.
+type tracing struct {
+	provider *sdktrace.TracerProvider
+	batcher  sdktrace.SpanProcessor
 }
 
 // NewProviders returns Providers that describe this process as
@@ -146,30 +159,36 @@ func NewProviders(ctx context.Context, c config.Telemetry, version string, log *
 		if p.traces, err = newTraces(ctx, u, res, log); err != nil {
 			return Providers{}, err
 		}
-		p.tracer = p.traces.Tracer(scope)
+		p.tracer = p.traces.provider.Tracer(scope)
 	}
 	return p, nil
 }
 
-// Shutdown exports the spans still waiting, then stops both providers,
-// returning their failures joined. It returns once that is done or ctx
-// ends, whichever is first: spans still going out when ctx ends may be
-// lost. Nothing HTTP records after it is kept, and Metrics then serves no
-// readings. Calls after the first do nothing and return nil.
+// Shutdown stops both providers, and returns their failures joined. Both
+// stop even when ctx has already ended: nothing HTTP records afterwards is
+// kept, and Metrics then serves no readings.
+//
+// The spans still waiting are sent first, in one last export, which the
+// batcher's own 30 s export timeout bounds. Shutdown waits for that export
+// until ctx ends; if ctx ends first, it returns ctx's error while the
+// export carries on in the background, its goroutine ending with it.
+// Calls after the first do nothing and return nil.
 func (p Providers) Shutdown(ctx context.Context) error {
 	if p.meters == nil {
 		return nil
 	}
-	var traces error
-	if p.traces != nil {
-		traces = p.traces.Shutdown(ctx)
+	var errs []error
+	if p.traces.provider != nil {
+		// The batcher first: the tracer provider stops no span processor
+		// once ctx has ended, and stopping it afterwards does nothing.
+		errs = append(errs, p.traces.batcher.Shutdown(ctx), p.traces.provider.Shutdown(ctx))
 	}
-	meters := p.meters.Shutdown(ctx)
-	// The meter provider says so on every call after the first.
-	if errors.Is(meters, sdkmetric.ErrReaderShutdown) {
-		meters = nil
+	// The meter provider stops its reader whatever ctx says, and reports
+	// ErrReaderShutdown on every call after the first.
+	if err := p.meters.Shutdown(ctx); !errors.Is(err, sdkmetric.ErrReaderShutdown) {
+		errs = append(errs, err)
 	}
-	return errors.Join(traces, meters)
+	return errors.Join(errs...)
 }
 
 // made panics, as a bug, on the zero Providers.
@@ -203,9 +222,9 @@ func newMeters(res *resource.Resource) (*sdkmetric.MeterProvider, http.Handler, 
 	return meters, promhttp.HandlerFor(reg, promhttp.HandlerOpts{MaxRequestsInFlight: scrapes}), nil
 }
 
-// newTraces returns a tracer provider that sends the spans it ends, in
-// batches, to the OTLP/HTTP collector whose base URL is base.
-func newTraces(ctx context.Context, base url.URL, res *resource.Resource, log *slog.Logger) (*sdktrace.TracerProvider, error) {
+// newTraces returns a tracer provider whose spans, once ended, its batcher
+// sends in batches to the OTLP/HTTP collector whose base URL is base.
+func newTraces(ctx context.Context, base url.URL, res *resource.Resource, log *slog.Logger) (tracing, error) {
 	base.Path, base.RawPath = path.Join(base.Path, "/v1/traces"), ""
 	client := otlpClient()
 	exp, err := otlptracehttp.New(ctx,
@@ -222,18 +241,19 @@ func newTraces(ctx context.Context, base url.URL, res *resource.Resource, log *s
 		otlptracehttp.WithMaxResponseSize(collectorReply),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("telemetry: the OTLP exporter: %w", err)
+		return tracing{}, fmt.Errorf("telemetry: the OTLP exporter: %w", err)
 	}
 	// Below, every setting an OTEL_ variable would change, at the SDK's
 	// default but for the attribute value bound.
-	return sdktrace.NewTracerProvider(
+	batcher := sdktrace.NewBatchSpanProcessor(spanExporter{next: exp, res: res, log: log, client: client},
+		sdktrace.WithBatchTimeout(sdktrace.DefaultScheduleDelay*time.Millisecond),
+		sdktrace.WithExportTimeout(sdktrace.DefaultExportTimeout*time.Millisecond),
+		sdktrace.WithMaxQueueSize(sdktrace.DefaultMaxQueueSize),
+		sdktrace.WithMaxExportBatchSize(sdktrace.DefaultMaxExportBatchSize),
+	)
+	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
-		sdktrace.WithBatcher(spanExporter{next: exp, res: res, log: log, client: client},
-			sdktrace.WithBatchTimeout(sdktrace.DefaultScheduleDelay*time.Millisecond),
-			sdktrace.WithExportTimeout(sdktrace.DefaultExportTimeout*time.Millisecond),
-			sdktrace.WithMaxQueueSize(sdktrace.DefaultMaxQueueSize),
-			sdktrace.WithMaxExportBatchSize(sdktrace.DefaultMaxExportBatchSize),
-		),
+		sdktrace.WithSpanProcessor(batcher),
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample())),
 		sdktrace.WithRawSpanLimits(sdktrace.SpanLimits{
 			AttributeValueLengthLimit:   attributeValue,
@@ -245,18 +265,29 @@ func newTraces(ctx context.Context, base url.URL, res *resource.Resource, log *s
 			AttributePerLinkCountLimit:  sdktrace.DefaultAttributePerLinkCountLimit,
 		}),
 		sdktrace.WithIDGenerator(randomIDs{}),
-	), nil
+	)
+	return tracing{provider: provider, batcher: batcher}, nil
 }
 
 // otlpClient returns the client spans go out on. The collector is the
 // operator's own, often at a private address, which the guarded client
-// refuses, so this is a client of its own, bounded as that one is: each
-// exchange ends within otlpTimeout, and no redirect is followed, since the
-// collector is where the operator said. It has no proxy: a transport's
-// usual one, http.ProxyFromEnvironment, would read the environment.
+// refuses, so this client checks no address. It is bounded as that one
+// is: each exchange, the TLS handshake included, ends within otlpTimeout,
+// and the answer's header is read to collectorHeader at most, as its body
+// is, by the exporter, to collectorReply. It follows no redirect, where
+// the guarded client follows a few, since the collector is where the
+// operator said.
 func otlpClient() *http.Client {
 	return &http.Client{
-		Transport:     &http.Transport{IdleConnTimeout: otlpIdle},
+		Transport: &http.Transport{
+			// Never http.ProxyFromEnvironment: the environment is main's to
+			// read.
+			Proxy: nil,
+			// The transport bounds a handshake only when told to.
+			TLSHandshakeTimeout:    otlpTimeout,
+			MaxResponseHeaderBytes: collectorHeader,
+			IdleConnTimeout:        otlpIdle,
+		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		Timeout:       otlpTimeout,
 	}
@@ -287,11 +318,11 @@ func (e spanExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnly
 }
 
 // Shutdown stops next, then closes the client's idle connections, each of
-// which keeps goroutines of its own until it is closed. The SDK hands an
-// error from here to OTel's global error handler, never to the caller of
-// Providers.Shutdown, so it is logged here instead.
+// which keeps goroutines of its own until it is closed. The SDK does not
+// hand an error from here to the caller of Providers.Shutdown, so it is
+// logged here instead: all but ctx's end, which that caller is told of.
 func (e spanExporter) Shutdown(ctx context.Context) error {
-	if err := e.next.Shutdown(ctx); err != nil {
+	if err := e.next.Shutdown(ctx); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
 		e.log.WarnContext(ctx, "trace exporter shutdown failed", "error", err)
 	}
 	e.client.CloseIdleConnections()

@@ -4,7 +4,9 @@
 package telemetry_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -23,9 +25,13 @@ import (
 // testVersion is the version every test's Providers report.
 const testVersion = "1.2.3-test"
 
-// clientTrace is the trace every test request names, in a traceparent
-// header of its own, as a client may.
-const clientTrace = "4bf92f3577b34da6a3ce929d0e0e4736"
+// clientTrace and clientSpan are the trace and span every test request
+// names as its parent, in a traceparent header of its own, as a client
+// may.
+const (
+	clientTrace = "4bf92f3577b34da6a3ce929d0e0e4736"
+	clientSpan  = "00f067aa0ba902b7"
+)
 
 // start is when every test's clock starts.
 var start = time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC)
@@ -48,7 +54,13 @@ func steppingClock(step time.Duration) func() time.Time {
 // ends if the test has not shut them down itself.
 func newProviders(t *testing.T, c config.Telemetry) telemetry.Providers {
 	t.Helper()
-	p, err := telemetry.NewProviders(t.Context(), c, testVersion, slog.New(slog.DiscardHandler))
+	return newLoggingProviders(t, c, slog.New(slog.DiscardHandler))
+}
+
+// newLoggingProviders is newProviders, logging to log.
+func newLoggingProviders(t *testing.T, c config.Telemetry, log *slog.Logger) telemetry.Providers {
+	t.Helper()
+	p, err := telemetry.NewProviders(t.Context(), c, testVersion, log)
 	if err != nil {
 		t.Fatalf("NewProviders: %v", err)
 	}
@@ -81,16 +93,27 @@ func ok(w http.ResponseWriter, _ *http.Request) {
 	io.WriteString(w, "ok") //nolint:errcheck // a test recorder's write cannot fail
 }
 
-// serve sends h a request, and returns the status it answers with.
-func serve(t *testing.T, h http.Handler, method, target string) int {
+// clientPeer is the address every test request comes from.
+const clientPeer = "203.0.113.7:4321"
+
+// request returns a test request from clientPeer, with a cookie, a user
+// agent, and a traceparent naming clientTrace and clientSpan.
+func request(t *testing.T, method, target string) *http.Request {
 	t.Helper()
 	req := httptest.NewRequestWithContext(t.Context(), method, target, http.NoBody)
-	req.RemoteAddr = "203.0.113.7:4321"
+	req.RemoteAddr = clientPeer
 	req.Header.Set("Cookie", "pisati-session=quokka-cookie")
 	req.Header.Set("User-Agent", "probe/1.0")
-	req.Header.Set("Traceparent", "00-"+clientTrace+"-00f067aa0ba902b7-01")
+	req.Header.Set("Traceparent", "00-"+clientTrace+"-"+clientSpan+"-01")
+	return req
+}
+
+// serve sends h a request made by request, and returns the status it
+// answers with.
+func serve(t *testing.T, h http.Handler, method, target string) int {
+	t.Helper()
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, request(t, method, target))
 	return rec.Code
 }
 
@@ -181,12 +204,21 @@ func value(t *testing.T, all []sample, name string, want map[string]string) stri
 }
 
 // collector is a stand-in OTLP/HTTP collector on loopback. It keeps every
-// request it is sent, and answers each 200 with an empty body.
+// request it is sent, and answers each with its reply.
 type collector struct {
 	url string
+	// got has a value sent, when there is room, for each request.
+	got chan struct{}
 
 	mu   sync.Mutex
 	reqs []received
+}
+
+// reply is how a collector answers: with status, header and body.
+type reply struct {
+	status int
+	header map[string]string
+	body   []byte
 }
 
 // received is one request a collector was sent.
@@ -196,10 +228,18 @@ type received struct {
 	body   []byte
 }
 
-// newCollector starts a collector, closed when the test ends.
+// newCollector starts a collector that answers 200 with an empty body,
+// closed when the test ends.
 func newCollector(t *testing.T) *collector {
 	t.Helper()
-	c := &collector{}
+	return newReplyingCollector(t, reply{status: http.StatusOK})
+}
+
+// newReplyingCollector starts a collector that answers with rep, closed
+// when the test ends.
+func newReplyingCollector(t *testing.T, rep reply) *collector {
+	t.Helper()
+	c := &collector{got: make(chan struct{}, 64)}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		if err != nil {
@@ -208,11 +248,33 @@ func newCollector(t *testing.T) *collector {
 		c.mu.Lock()
 		c.reqs = append(c.reqs, received{path: r.URL.Path, header: r.Header.Clone(), body: body})
 		c.mu.Unlock()
-		w.WriteHeader(http.StatusOK)
+		select {
+		case c.got <- struct{}{}:
+		default:
+		}
+		for k, v := range rep.header {
+			w.Header().Set(k, v)
+		}
+		w.WriteHeader(rep.status)
+		w.Write(rep.body) //nolint:errcheck // the exporter stops reading at its bound, so the rest may not be wanted
 	}))
 	t.Cleanup(srv.Close)
 	c.url = srv.URL
 	return c
+}
+
+// wait waits, at most 10 s, until the collector has been sent n
+// requests, failing the test if it is not.
+func (c *collector) wait(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for len(c.requests()) < n {
+		select {
+		case <-c.got:
+		case <-deadline:
+			t.Fatalf("the collector has %d requests after 10 s, want %d", len(c.requests()), n)
+		}
+	}
 }
 
 // requests returns every request the collector has been sent so far.
@@ -231,4 +293,41 @@ func endpoint(t *testing.T, s string) config.OptionalURL {
 		t.Fatalf("ParseOptionalURL(%q): %v", s, err)
 	}
 	return u
+}
+
+// logBuffer holds what a JSON slog handler writes to it, and is safe for
+// the exporter's goroutines and the test's at once.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+// records returns each record logged so far, decoded.
+func (b *logBuffer) records(t *testing.T) []map[string]any {
+	t.Helper()
+	b.mu.Lock()
+	text := b.buf.String()
+	b.mu.Unlock()
+	var out []map[string]any
+	for line := range strings.Lines(text) {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("the log line %q is not JSON: %v", line, err)
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// newLog returns a logger that writes JSON records, at every level, to
+// the buffer it returns.
+func newLog() (*slog.Logger, *logBuffer) {
+	buf := &logBuffer{}
+	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})), buf
 }

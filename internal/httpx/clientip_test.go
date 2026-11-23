@@ -34,6 +34,41 @@ func forwarded(remote string, lines ...string) *http.Request {
 	return r
 }
 
+func TestTrustedPeer(t *testing.T) {
+	t.Parallel()
+
+	trusted := httpx.NewTrustedPeer(proxies())
+	tests := []struct {
+		name   string
+		remote string
+		want   bool
+	}{
+		{name: "a peer in an IPv4 prefix", remote: "10.0.0.1:4000", want: true},
+		{name: "a peer in an IPv6 prefix", remote: "[2001:db8:1::5]:4000", want: true},
+		{name: "an IPv4-mapped peer in an IPv4 prefix", remote: "[::ffff:10.0.0.1]:4000", want: true},
+		{name: "an IPv4 peer in an IPv4-mapped prefix", remote: "172.16.0.9:4000", want: true},
+		{name: "a peer outside every prefix", remote: "192.0.2.7:4000", want: false},
+		{name: "what it forwards is not the peer", remote: "192.0.2.7:4000", want: false},
+		{name: "a peer that is not an address", remote: "pipe", want: false},
+		{name: "a peer without a port", remote: "10.0.0.1", want: false},
+		{name: "no peer", remote: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := trusted(forwarded(tt.remote, "10.0.0.2")); got != tt.want {
+				t.Errorf("a request from %q: trusted %t, want %t", tt.remote, got, tt.want)
+			}
+		})
+	}
+
+	none := httpx.NewTrustedPeer(nil)
+	if none(forwarded("10.0.0.1:4000")) {
+		t.Error("with no prefixes, a peer is trusted")
+	}
+}
+
 func TestClientIP(t *testing.T) {
 	t.Parallel()
 

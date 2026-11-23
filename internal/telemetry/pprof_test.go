@@ -46,10 +46,14 @@ func TestPprofOnMountsOnTheGivenMux(t *testing.T) {
 		t.Errorf("the pprof index lists no goroutine profile: %q", rec.Body.String())
 	}
 
-	// net/http/pprof registers on http.DefaultServeMux when imported; a
-	// mux Pprof was not given has none of it.
-	other := http.NewServeMux()
-	if got := serve(t, other, http.MethodGet, "/debug/pprof/"); got != http.StatusNotFound {
-		t.Errorf("GET /debug/pprof/ on another mux: status %d, want 404", got)
+	// go tool pprof posts the addresses it wants named.
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/debug/pprof/symbol", strings.NewReader("0x1"))
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Body.String(), "num_symbols:") {
+		t.Errorf("POST /debug/pprof/symbol: status %d, body %q; want 200 and the symbols", rec.Code, rec.Body.String())
+	}
+	if got := serve(t, mux, http.MethodPut, "/debug/pprof/symbol"); got != http.StatusMethodNotAllowed {
+		t.Errorf("PUT /debug/pprof/symbol: status %d, want 405", got)
 	}
 }

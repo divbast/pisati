@@ -5,6 +5,7 @@ package telemetry_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,6 +25,7 @@ import (
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"go.uber.org/goleak"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/divbast/pisati/internal/config"
@@ -41,7 +44,7 @@ func TestNoOTLPWhenUnset(t *testing.T) {
 	p := newProviders(t, config.Telemetry{})
 	mux := http.NewServeMux()
 	route(mux, "GET /p/{id}", ok)
-	h := httpx.Chain(mux, p.HTTP(steppingClock(time.Millisecond)))
+	h := httpx.Chain(mux, p.HTTP(steppingClock(time.Millisecond), nil))
 	if got := serve(t, h, http.MethodGet, "/p/1"); got != http.StatusOK {
 		t.Fatalf("GET /p/1: status %d, want 200", got)
 	}
@@ -72,7 +75,7 @@ func TestOTLPExportsSpan(t *testing.T) {
 			route(mux, "GET /p/{id}", ok)
 			route(mux, "GET /boom", func(http.ResponseWriter, *http.Request) { panic("quokka") })
 			route(mux, "GET /busy", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
-			h := httpx.Chain(mux, httpx.Recover(slog.New(slog.DiscardHandler)), p.HTTP(steppingClock(250*time.Millisecond)))
+			h := httpx.Chain(mux, httpx.Recover(slog.New(slog.DiscardHandler)), p.HTTP(steppingClock(250*time.Millisecond), nil))
 			serve(t, h, http.MethodGet, "/p/123?q=quokka-query")
 			serve(t, h, http.MethodGet, "/boom")
 			serve(t, h, http.MethodGet, "/busy")
@@ -145,6 +148,83 @@ func TestOTLPExportsSpan(t *testing.T) {
 	}
 }
 
+func TestHTTPContinuesTracesFromTrustedProxiesAlone(t *testing.T) {
+	t.Parallel()
+
+	// clientPeer is in this prefix, and not in the other.
+	proxies := []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}
+	elsewhere := []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}
+	sampled := "00-" + clientTrace + "-" + clientSpan + "-01"
+	tests := []struct {
+		name        string
+		trusted     []netip.Prefix
+		traceparent string
+		// continued is whether the span joins the trace the request names,
+		// and exported whether it is sent at all.
+		continued, exported bool
+	}{
+		{name: "a trusted proxy's trace", trusted: proxies, traceparent: sampled, continued: true, exported: true},
+		{name: "an untrusted peer's trace", trusted: nil, traceparent: sampled, exported: true},
+		{name: "a peer outside the trusted prefixes", trusted: elsewhere, traceparent: sampled, exported: true},
+		{name: "a trusted proxy's malformed traceparent", trusted: proxies, traceparent: "00-" + clientTrace + "-quokka-01", exported: true},
+		{name: "a trusted proxy's traceparent of an unknown form", trusted: proxies, traceparent: "ff-" + clientTrace + "-" + clientSpan + "-01", exported: true},
+		{name: "a trusted proxy with no traceparent", trusted: proxies, traceparent: "", exported: true},
+		{name: "a trusted proxy's unsampled trace is not sampled", trusted: proxies, traceparent: "00-" + clientTrace + "-" + clientSpan + "-00", exported: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := newCollector(t)
+			p := newProviders(t, config.Telemetry{OTLPEndpoint: endpoint(t, c.url)})
+			mux := http.NewServeMux()
+			route(mux, "GET /p/{id}", ok)
+			h := httpx.Chain(mux, p.HTTP(steppingClock(time.Millisecond), tt.trusted))
+			req := request(t, http.MethodGet, "/p/1")
+			req.Header.Del("Traceparent")
+			if tt.traceparent != "" {
+				req.Header.Set("Traceparent", tt.traceparent)
+			}
+			req.Header.Set("Tracestate", "quokka=1")
+			// The proxy names the client it forwards for, which no prefix
+			// holds: trust is the peer's, not the client's.
+			req.Header.Set("X-Forwarded-For", "192.0.2.55")
+			h.ServeHTTP(httptest.NewRecorder(), req)
+			shutdown(t, p)
+
+			var spans []*tracepb.Span
+			for _, r := range c.requests() {
+				for _, rs := range decode(t, r.body).GetResourceSpans() {
+					for _, ss := range rs.GetScopeSpans() {
+						spans = append(spans, ss.GetSpans()...)
+					}
+				}
+			}
+			if !tt.exported {
+				if len(spans) != 0 {
+					t.Errorf("%d spans exported, want none", len(spans))
+				}
+				return
+			}
+			if len(spans) != 1 {
+				t.Fatalf("%d spans exported, want 1", len(spans))
+			}
+			s := spans[0]
+			trace, parent := hex.EncodeToString(s.GetTraceId()), hex.EncodeToString(s.GetParentSpanId())
+			if tt.continued {
+				if trace != clientTrace || parent != clientSpan || s.GetTraceState() != "quokka=1" {
+					t.Errorf("trace %s, parent %q, state %q; want the request's: %s, %s, quokka=1",
+						trace, parent, s.GetTraceState(), clientTrace, clientSpan)
+				}
+				return
+			}
+			if trace == clientTrace || parent != "" || s.GetTraceState() != "" {
+				t.Errorf("trace %s, parent %q, state %q; want a fresh trace", trace, parent, s.GetTraceState())
+			}
+		})
+	}
+}
+
 func TestTelemetryIgnoresOTELEnvironment(t *testing.T) {
 	// Not parallel: it sets the environment.
 	ours, theirs := newCollector(t), newCollector(t)
@@ -174,7 +254,7 @@ func TestTelemetryIgnoresOTELEnvironment(t *testing.T) {
 	mux := http.NewServeMux()
 	route(mux, "GET /p/{id}", ok)
 	route(mux, "GET /q/{id}", ok)
-	h := httpx.Chain(mux, p.HTTP(steppingClock(time.Millisecond)))
+	h := httpx.Chain(mux, p.HTTP(steppingClock(time.Millisecond), nil))
 	serve(t, h, http.MethodGet, "/p/1")
 	serve(t, h, http.MethodGet, "/q/1")
 
@@ -240,6 +320,67 @@ func TestTelemetryIgnoresOTELEnvironment(t *testing.T) {
 	}
 }
 
+func TestFailedExportIsLoggedOnce(t *testing.T) {
+	t.Parallel()
+
+	// bound is the most of the collector's answer the exporter reads.
+	const bound = 64 << 10
+	tests := []struct {
+		name string
+		rep  reply
+		// want is in the logged error.
+		want string
+	}{
+		{
+			name: "a refusal",
+			rep:  reply{status: http.StatusBadRequest, body: []byte("quokka refused")},
+			want: "400 Bad Request (body: quokka refused)",
+		},
+		{
+			name: "a refusal longer than the bound",
+			rep:  reply{status: http.StatusBadRequest, body: bytes.Repeat([]byte("quokka "), 1<<20/7)},
+			want: "response body too large: exceeded 65536 bytes",
+		},
+		{
+			name: "a header longer than the bound",
+			rep:  reply{status: http.StatusOK, header: map[string]string{"X-Quokka": strings.Repeat("q", 2*bound)}},
+			want: "server response headers exceeded 65536 bytes",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := newReplyingCollector(t, tt.rep)
+			log, buf := newLog()
+			p := newLoggingProviders(t, config.Telemetry{OTLPEndpoint: endpoint(t, c.url)}, log)
+			mux := http.NewServeMux()
+			route(mux, "GET /p/{id}", ok)
+			serve(t, httpx.Chain(mux, p.HTTP(steppingClock(time.Millisecond), nil)), http.MethodGet, "/p/1")
+			shutdown(t, p)
+
+			recs := buf.records(t)
+			if len(recs) != 1 {
+				t.Fatalf("%d records, want one: %v", len(recs), recs)
+			}
+			rec := recs[0]
+			if rec["level"] != "WARN" || rec["msg"] != "trace export failed" || rec["spans"] != 1.0 {
+				t.Errorf("the record %v, want level WARN, msg \"trace export failed\", spans 1", rec)
+			}
+			text, isText := rec["error"].(string)
+			if !isText {
+				t.Fatalf("the record %v has no error text", rec)
+			}
+			if !strings.Contains(text, tt.want) {
+				t.Errorf("the error %.300q has no %q", text, tt.want)
+			}
+			if len(text) > bound {
+				t.Errorf("the error is %d bytes, over the %d-byte bound", len(text), bound)
+			}
+		})
+	}
+}
+
 func TestNewProvidersRefuses(t *testing.T) {
 	t.Parallel()
 
@@ -264,6 +405,38 @@ func TestNewProvidersRefuses(t *testing.T) {
 				t.Errorf("Shutdown of the Providers returned with the error: %v", err)
 			}
 		})
+	}
+}
+
+func TestShutdownWithAnEndedContext(t *testing.T) {
+	// Not parallel: it checks that every goroutine it starts ends, and
+	// another test's would get in the way.
+	log, buf := newLog()
+	// Cleanups run last first: the log is read once the goroutines end.
+	t.Cleanup(func() {
+		if recs := buf.records(t); len(recs) != 0 {
+			t.Errorf("logged %v: the end of ctx is Shutdown's to report, and nothing failed", recs)
+		}
+	})
+	before := goleak.IgnoreCurrent()
+	t.Cleanup(func() { goleak.VerifyNone(t, before) })
+
+	c := newCollector(t)
+	p := newLoggingProviders(t, config.Telemetry{OTLPEndpoint: endpoint(t, c.url)}, log)
+	mux := http.NewServeMux()
+	route(mux, "GET /p/{id}", ok)
+	h := httpx.Chain(mux, p.HTTP(steppingClock(time.Millisecond), nil))
+	serve(t, h, http.MethodGet, "/p/1")
+
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := p.Shutdown(ended); err != nil && !errors.Is(err, context.Canceled) {
+		t.Errorf("Shutdown: %v, want nil or context.Canceled", err)
+	}
+	// The batcher stops all the same, sending the span that was waiting.
+	c.wait(t, 1)
+	if text := scrape(t, p); strings.Contains(text, duration) {
+		t.Errorf("/metrics still serves readings after Shutdown:\n%s", text)
 	}
 }
 

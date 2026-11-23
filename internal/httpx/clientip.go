@@ -34,22 +34,12 @@ type ClientIP func(*http.Request) (netip.Addr, bool)
 // its right, the trusted proxy that appended it, or the peer. When every
 // hop is trusted, the client is the left-most.
 func NewClientIP(trusted []netip.Prefix) ClientIP {
-	own := make([]netip.Prefix, 0, len(trusted))
-	for _, p := range trusted {
-		if a := p.Addr(); a.Is4In6() && p.Bits() >= 96 {
-			p = netip.PrefixFrom(a.Unmap(), p.Bits()-96)
-		}
-		own = append(own, p.Masked())
-	}
-	isTrusted := func(a netip.Addr) bool {
-		return slices.ContainsFunc(own, func(p netip.Prefix) bool { return p.Contains(a) })
-	}
+	isTrusted := trustSet(trusted)
 	return func(r *http.Request) (netip.Addr, bool) {
-		peer, err := netip.ParseAddrPort(r.RemoteAddr)
-		if err != nil {
+		client, ok := peerOf(r)
+		if !ok {
 			return netip.Addr{}, false
 		}
-		client := plain(peer.Addr())
 		if !isTrusted(client) {
 			return client, true
 		}
@@ -73,6 +63,51 @@ func NewClientIP(trusted []netip.Prefix) ClientIP {
 		}
 		return client, true
 	}
+}
+
+// TrustedPeer reports whether a request's peer is a trusted proxy.
+type TrustedPeer func(*http.Request) bool
+
+// NewTrustedPeer returns the TrustedPeer that trusts the proxies trusted
+// holds, by the rule NewClientIP believes X-Forwarded-For by: the peer is
+// the request's RemoteAddr, an address and port, and is trusted when a
+// prefix in trusted holds its address. It keeps a copy of trusted. A
+// prefix in its IPv4-mapped spelling trusts the IPv4 addresses it maps;
+// the zero Prefix, and a nil or empty trusted, trust nothing. A request
+// whose RemoteAddr is not an address and port has no trusted peer, and
+// nothing the request says of itself, such as X-Forwarded-For, is read.
+func NewTrustedPeer(trusted []netip.Prefix) TrustedPeer {
+	isTrusted := trustSet(trusted)
+	return func(r *http.Request) bool {
+		peer, ok := peerOf(r)
+		return ok && isTrusted(peer)
+	}
+}
+
+// trustSet returns whether an address, unzoned and unmapped, is in one of
+// trusted's prefixes, a copy of which it keeps: a prefix in its
+// IPv4-mapped spelling holds the IPv4 addresses it maps.
+func trustSet(trusted []netip.Prefix) func(netip.Addr) bool {
+	own := make([]netip.Prefix, 0, len(trusted))
+	for _, p := range trusted {
+		if a := p.Addr(); a.Is4In6() && p.Bits() >= 96 {
+			p = netip.PrefixFrom(a.Unmap(), p.Bits()-96)
+		}
+		own = append(own, p.Masked())
+	}
+	return func(a netip.Addr) bool {
+		return slices.ContainsFunc(own, func(p netip.Prefix) bool { return p.Contains(a) })
+	}
+}
+
+// peerOf returns the address of r's peer, its RemoteAddr, unzoned and
+// unmapped, and whether RemoteAddr is an address and port.
+func peerOf(r *http.Request) (netip.Addr, bool) {
+	peer, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return plain(peer.Addr()), true
 }
 
 // parseHop reads one X-Forwarded-For hop: an address, or an address and

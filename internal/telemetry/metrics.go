@@ -6,11 +6,13 @@ package telemetry
 import (
 	"context"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 
@@ -43,8 +45,10 @@ func (p Providers) Metrics() http.Handler {
 //   - http.route: what RecordRoute recorded, or "unmatched" when nothing
 //     did;
 //   - http.response.status_code: the status sent, which is 200 when the
-//     handler wrote none, and 500 when it panicked before writing one, as
-//     httpx.Recover then sends.
+//     handler wrote none. A handler that panics before writing one is
+//     recorded as 500, which httpx.Recover then sends, with one exception:
+//     a panic with http.ErrAbortHandler, which Recover lets abort the
+//     response unanswered, is recorded as 500 all the same.
 //
 // Neither holds the request's path, query or headers, or the client's
 // address, so a client can neither add a series nor put its data in a
@@ -52,24 +56,36 @@ func (p Providers) Metrics() http.Handler {
 //
 // The span is named for the method and route, as in GET /p/{id}, or for
 // the method alone when unmatched, and its status is an error for a 5xx or
-// a panic. It starts a trace of its own, which the handler's context
-// carries: a trace the request names in its headers is not continued, so
-// a client cannot choose how its requests are traced.
+// a panic. The handler's context carries it.
+//
+// The span continues the W3C trace that the request's traceparent and
+// tracestate headers name only when the request's peer is a proxy trusted
+// holds, by httpx.NewTrustedPeer's rule, and then follows that trace's
+// sampling decision. Every other request, and one whose traceparent is
+// malformed, starts a trace of its own, so a client cannot choose how its
+// requests are traced. A nil or empty trusted trusts no peer. The
+// propagator that reads the headers is the Providers' own, never OTel's
+// global one.
 //
 // clock times the request: it is read once as the request arrives and
 // once as its handler returns, and those two readings are the span's
 // start and end. A nil clock, or the zero Providers, is a bug, and HTTP
 // panics on it.
-func (p Providers) HTTP(clock func() time.Time) httpx.Middleware {
+func (p Providers) HTTP(clock func() time.Time, trusted []netip.Prefix) httpx.Middleware {
 	p.made()
 	if clock == nil {
 		panic("telemetry: HTTP needs a clock")
 	}
+	fromProxy := httpx.NewTrustedPeer(trusted)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := clock()
 			method := requestMethod(r.Method)
-			ctx, span := p.tracer.Start(r.Context(), spanName(method, ""),
+			parent := r.Context()
+			if fromProxy(r) {
+				parent = p.propagator.Extract(parent, propagation.HeaderCarrier(r.Header))
+			}
+			ctx, span := p.tracer.Start(parent, spanName(method, ""),
 				trace.WithSpanKind(trace.SpanKindServer), trace.WithTimestamp(start))
 			m := &matched{}
 			rec := &recorder{ResponseWriter: w}

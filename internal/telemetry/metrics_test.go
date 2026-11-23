@@ -5,11 +5,15 @@ package telemetry_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/divbast/pisati/internal/config"
@@ -25,7 +29,7 @@ func TestMetricsExposesRequestHistogram(t *testing.T) {
 	p := newProviders(t, config.Telemetry{})
 	mux := http.NewServeMux()
 	route(mux, "GET /p/{id}", ok)
-	h := httpx.Chain(mux, p.HTTP(steppingClock(250*time.Millisecond)))
+	h := httpx.Chain(mux, p.HTTP(steppingClock(250*time.Millisecond), nil))
 
 	if got := serve(t, h, http.MethodGet, "/p/123?q=quokka-query"); got != http.StatusOK {
 		t.Fatalf("GET /p/123: status %d, want 200", got)
@@ -87,7 +91,7 @@ func TestMetricsUsesRoutePattern(t *testing.T) {
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), key{}, "copy")))
 		})
 	}
-	h := httpx.Chain(mux, p.HTTP(steppingClock(time.Millisecond)), copying)
+	h := httpx.Chain(mux, p.HTTP(steppingClock(time.Millisecond), nil), copying)
 
 	for _, req := range []struct {
 		method, target string
@@ -142,6 +146,8 @@ func TestHTTPRecordsTheStatusSent(t *testing.T) {
 		name    string
 		handler http.HandlerFunc
 		status  string
+		// aborts is whether Recover lets the panic abort the response.
+		aborts bool
 	}{
 		{
 			name:    "nothing written",
@@ -168,6 +174,12 @@ func TestHTTPRecordsTheStatusSent(t *testing.T) {
 			handler: func(http.ResponseWriter, *http.Request) { panic("quokka") },
 			status:  "500",
 		},
+		{
+			name:    "an abort before the header",
+			handler: func(http.ResponseWriter, *http.Request) { panic(http.ErrAbortHandler) },
+			status:  "500",
+			aborts:  true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -176,8 +188,17 @@ func TestHTTPRecordsTheStatusSent(t *testing.T) {
 			p := newProviders(t, config.Telemetry{})
 			mux := http.NewServeMux()
 			route(mux, "GET /x", tt.handler)
-			h := httpx.Chain(mux, httpx.Recover(slog.New(slog.DiscardHandler)), p.HTTP(steppingClock(time.Millisecond)))
-			serve(t, h, http.MethodGet, "/x")
+			h := httpx.Chain(mux, httpx.Recover(slog.New(slog.DiscardHandler)), p.HTTP(steppingClock(time.Millisecond), nil))
+			func() {
+				// net/http's server takes this panic, aborting the response.
+				defer func() {
+					err, isErr := recover().(error)
+					if aborted := isErr && errors.Is(err, http.ErrAbortHandler); aborted != tt.aborts {
+						t.Errorf("the response aborted: %t, want %t", aborted, tt.aborts)
+					}
+				}()
+				serve(t, h, http.MethodGet, "/x")
+			}()
 
 			series := map[string]string{"http_route": "/x", "http_response_status_code": tt.status}
 			if got := value(t, samples(t, scrape(t, p)), duration+"_count", series); got != "1" {
@@ -185,4 +206,59 @@ func TestHTTPRecordsTheStatusSent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMetricsServesFourScrapesAtOnce(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		p := newProviders(t, config.Telemetry{})
+		mux := http.NewServeMux()
+		route(mux, "GET /p/{id}", ok)
+		serve(t, httpx.Chain(mux, p.HTTP(steppingClock(time.Millisecond), nil)), http.MethodGet, "/p/1")
+
+		// Four scrapes stall as they write, as slow clients' would, each
+		// keeping its place.
+		release := make(chan struct{})
+		var stalled sync.WaitGroup
+		for range 4 {
+			stalled.Go(func() {
+				req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody)
+				p.Metrics().ServeHTTP(&stalledWriter{header: http.Header{}, release: release}, req)
+			})
+		}
+		synctest.Wait()
+
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody)
+		rec := httptest.NewRecorder()
+		p.Metrics().ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("a fifth scrape at once: status %d, want 503", rec.Code)
+		}
+
+		close(release)
+		stalled.Wait()
+		// Once they are done, a scrape is served again.
+		scrape(t, p)
+	})
+}
+
+// stalledWriter is a ResponseWriter whose first Write waits until release
+// is closed.
+type stalledWriter struct {
+	header  http.Header
+	release <-chan struct{}
+	waited  bool
+}
+
+func (w *stalledWriter) Header() http.Header { return w.header }
+
+func (*stalledWriter) WriteHeader(int) {}
+
+func (w *stalledWriter) Write(b []byte) (int, error) {
+	if !w.waited {
+		<-w.release
+		w.waited = true
+	}
+	return len(b), nil
 }
