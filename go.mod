@@ -12,6 +12,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/pressly/goose/v3 v3.30.1
 	go.uber.org/goleak v1.3.0
+	golang.org/x/crypto v0.59.0
 )
 
 require (

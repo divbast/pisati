@@ -63,6 +63,7 @@ linters:
         - generic
         - 'github\.com/divbast/pisati/internal/config\.SecretSource$'
         - 'github\.com/divbast/pisati/internal/jobs\.Outcome$'
+        - 'github\.com/divbast/pisati/internal/core/auth\.(Verdict|SessionState)$'
     iface:
       enable:
         - identical
@@ -81,6 +82,19 @@ linters:
           msg: read the environment in main and pass values down
         - pattern: '^(fmt\.Print(|f|ln)|print|println)$'
           msg: write to an injected io.Writer or logger
+        # These return as soon as two values differ, so a comparison of
+        # secrets with them takes time that depends on the secrets. They
+        # are forbidden in internal/core/auth alone: the exclusion rule
+        # that names this msg drops these findings everywhere else.
+        - pattern: '^bytes\.(Equal|Compare)$'
+          pkg: '^bytes$'
+          msg: compare secrets in internal/core/auth in constant time, with crypto/subtle
+        - pattern: '^slices\.(Equal|Compare)$'
+          pkg: '^slices$'
+          msg: compare secrets in internal/core/auth in constant time, with crypto/subtle
+        - pattern: '^reflect\.DeepEqual$'
+          pkg: '^reflect$'
+          msg: compare secrets in internal/core/auth in constant time, with crypto/subtle
     sloglint:
       no-global: all
       context: scope
@@ -104,6 +118,7 @@ linters:
           allow:
             - $gostd
             - github.com/divbast/pisati/internal/core
+            - golang.org/x/crypto/argon2 # pure: bytes in, a key out, and its goroutines end before it returns
           deny:
             - pkg: context
               desc: the core takes no context
@@ -171,6 +186,13 @@ linters:
           - gochecknoglobals
           - gochecknoinits
           - reassign
+      # forbidigo's constant-time rule holds only in internal/core/auth,
+      # where secrets are compared: outside it, its findings, matched by
+      # their msg, are dropped, and every other forbidigo finding is kept.
+      - path-except: '^internal/core/auth/'
+        text: 'compare secrets in internal/core/auth in constant time, with crypto/subtle'
+        linters:
+          - forbidigo
       # The acceptance suite is a module of its own, built against the
       # checkout of divbast/ci that just setup makes: its replace of
       # github.com/divbast/ci, and the go line ci's module forces on it, are
