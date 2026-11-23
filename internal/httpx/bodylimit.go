@@ -8,8 +8,8 @@ import (
 	"net/http"
 )
 
-// ByteLimit is how many bytes of body a request may have. The zero
-// ByteLimit allows none, as does a negative one.
+// ByteLimit is how many bytes of body a request or a response may have.
+// BodyLimit's zero ByteLimit allows none, as does a negative one.
 type ByteLimit int64
 
 // The limits Pisati's routes hold bodies to, by what a route accepts.

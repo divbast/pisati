@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
-// Package httpx serves Pisati over HTTP: a server that bounds every wait
-// on a client, and the middleware a request passes through on its way to
-// a handler. That gives each request an ID, recovers a handler's panic,
-// logs the request without its query or the client's address, sets the
-// security headers and a strict CSP with a nonce of its own, refuses
-// cross-origin requests that change state, and holds each route's body to
-// a limit.
+// Package httpx serves Pisati over HTTP, and sends its requests out. It
+// has a server that bounds every wait on a client, and the middleware a
+// request passes through on its way to a handler. That gives each
+// request an ID, recovers a handler's panic, logs the request without
+// its query or the client's address, sets the security headers and a
+// strict CSP with a nonce of its own, refuses cross-origin requests that
+// change state, holds each route's body to a limit, and limits how often
+// each client is served, finding the client behind trusted proxies.
+// Every request Pisati sends goes through a GuardedClient, an
+// address-checked client that refuses private and reserved addresses
+// and bounds each exchange.
 package httpx
 
 import (
