@@ -88,16 +88,24 @@ func (o GuardedOptions) problems() []error {
 // an error.
 //
 // It sends only http and https URLs, and connects only to addresses
-// outside the ranges it refuses:
+// outside the ranges it refuses: private, shared, loopback, link-local,
+// multicast and reserved ones, and every special-purpose range IANA's
+// registries mark as not globally reachable, with the deprecated ones.
+// Such a range is refused whole, with the few globally reachable service
+// addresses some hold, none of which serves the web:
 //
 //   - IPv4: 0.0.0.0/8, which holds the unspecified address, 10.0.0.0/8,
 //     100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12,
-//     192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24,
-//     203.0.113.0/24, 224.0.0.0/4 and 240.0.0.0/4;
-//   - IPv6: ::/128, ::1/128, 2001:db8::/32, fc00::/7, fe80::/10,
-//     ff00::/8, and 64:ff9b:1::/48, the local-use translation prefix,
-//     which is not globally reachable, and embeds an IPv4 address
-//     wherever the local network chooses;
+//     192.0.0.0/24, 192.0.2.0/24, 192.88.99.0/24, 192.168.0.0/16,
+//     198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4 and
+//     240.0.0.0/4;
+//   - IPv6: ::/96, which holds the unspecified and loopback addresses
+//     and the deprecated IPv4-compatible ones, ::ffff:0:0:0/96,
+//     64:ff9b:1::/48, 100::/64, 100:0:0:1::/64, 2001::/23, which holds
+//     Teredo and 2001:2::/48, 2001:db8::/32, 3fff::/20, 5f00::/16,
+//     fc00::/7, fe80::/10, fec0::/10 and ff00::/8. 64:ff9b:1::/48, the
+//     local-use translation prefix, embeds an IPv4 address wherever the
+//     local network chooses, so it cannot be read as NAT64 is;
 //   - an IPv6 address that embeds an IPv4 address refused above:
 //     IPv4-mapped (::ffff:0:0/96), NAT64 (64:ff9b::/96) or 6to4
 //     (2002::/16).
@@ -108,7 +116,8 @@ func (o GuardedOptions) problems() []error {
 // never answers leaves time for the others. A redirect is checked as the
 // request is, and connects through the same check, so a name whose
 // answer changes between lookups is checked on every connection it
-// makes. No proxy is used, whatever the environment says.
+// makes. No proxy is used, whatever the environment says. A response's
+// header may be up to 64 KiB, as a request's may be to Pisati's server.
 type GuardedClient struct {
 	client  *http.Client
 	check   addressCheck
@@ -153,7 +162,8 @@ func NewGuardedClient(o GuardedOptions) (*GuardedClient, error) {
 			Proxy:       nil,
 			DialContext: c.dial,
 			// The transport bounds a handshake only when told to.
-			TLSHandshakeTimeout: o.Timeout,
+			TLSHandshakeTimeout:    o.Timeout,
+			MaxResponseHeaderBytes: maxResponseHeader,
 			// The rest are http.DefaultTransport's.
 			MaxIdleConns:          100,
 			IdleConnTimeout:       90 * time.Second,
@@ -175,15 +185,24 @@ func NewGuardedClient(o GuardedOptions) (*GuardedClient, error) {
 // response, as http.Client's Do does. Before anything is looked up, it
 // refuses, with an error wrapping ErrAddressRefused, a URL whose scheme
 // is not http or https, or whose host is an address the client refuses.
+//
 // The response's body fails to read past GuardedOptions.MaxBody bytes,
 // with an error wrapping ErrTooLarge, and closing it still works as
-// ever. The caller closes it.
+// ever. The caller closes it. The bytes counted are the ones the caller
+// reads: a body the server gzips, which the transport asks for and
+// decodes itself, counts once decoded. So that no caller is left to
+// decode a body past the limit, Do refuses, with an error wrapping
+// ErrInvalid, a request that sets Accept-Encoding.
 func (c *GuardedClient) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	if c == nil || c.client == nil {
 		return nil, errors.New("httpx: the GuardedClient was not made by NewGuardedClient")
 	}
 	if req == nil || req.URL == nil {
 		return nil, errors.New("httpx: Do needs a request with a URL")
+	}
+	if len(req.Header.Values("Accept-Encoding")) > 0 {
+		return nil, fmt.Errorf("httpx: %w request: it sets Accept-Encoding, and only a body the transport "+
+			"decodes itself is held to MaxBody as read", ErrInvalid)
 	}
 	if err := c.check.url(req.URL); err != nil {
 		return nil, err
@@ -269,6 +288,10 @@ func systemLookup(ctx context.Context, host string) ([]netip.Addr, error) {
 	return r.LookupNetIP(ctx, "ip", host)
 }
 
+// maxResponseHeader bounds a response's header: 64 KiB, the bound
+// DefaultTimeouts puts on a request's.
+const maxResponseHeader = 64 << 10
+
 // addressCheck says which addresses a GuardedClient may connect to.
 type addressCheck struct {
 	// refused4 and refused6 are the ranges refused outright.
@@ -288,28 +311,36 @@ func newAddressCheck() addressCheck {
 	}
 	return addressCheck{
 		refused4: parse(
-			"0.0.0.0/8",       // this network, with the unspecified address
+			"0.0.0.0/8",       // this network, with the unspecified address (RFC 791)
 			"10.0.0.0/8",      // private (RFC 1918)
 			"100.64.0.0/10",   // shared address space (RFC 6598)
-			"127.0.0.0/8",     // loopback
-			"169.254.0.0/16",  // link-local
+			"127.0.0.0/8",     // loopback (RFC 1122)
+			"169.254.0.0/16",  // link-local (RFC 3927)
 			"172.16.0.0/12",   // private (RFC 1918)
-			"192.0.2.0/24",    // documentation, TEST-NET-1
+			"192.0.0.0/24",    // IETF protocol assignments (RFC 6890)
+			"192.0.2.0/24",    // documentation, TEST-NET-1 (RFC 5737)
+			"192.88.99.0/24",  // deprecated 6to4 relay anycast (RFC 7526)
 			"192.168.0.0/16",  // private (RFC 1918)
-			"198.18.0.0/15",   // benchmarking
-			"198.51.100.0/24", // documentation, TEST-NET-2
-			"203.0.113.0/24",  // documentation, TEST-NET-3
-			"224.0.0.0/4",     // multicast
-			"240.0.0.0/4",     // reserved, with the broadcast address
+			"198.18.0.0/15",   // benchmarking (RFC 2544)
+			"198.51.100.0/24", // documentation, TEST-NET-2 (RFC 5737)
+			"203.0.113.0/24",  // documentation, TEST-NET-3 (RFC 5737)
+			"224.0.0.0/4",     // multicast (RFC 5771)
+			"240.0.0.0/4",     // reserved, with the broadcast address (RFC 1112, RFC 919)
 		),
 		refused6: parse(
-			"::/128",         // unspecified
-			"::1/128",        // loopback
-			"64:ff9b:1::/48", // local-use translation (RFC 8215)
-			"2001:db8::/32",  // documentation
-			"fc00::/7",       // unique local
-			"fe80::/10",      // link-local
-			"ff00::/8",       // multicast
+			"::/96",           // unspecified, loopback and IPv4-compatible (RFC 4291)
+			"::ffff:0:0:0/96", // IPv4-translated (RFC 2765)
+			"64:ff9b:1::/48",  // local-use translation (RFC 8215)
+			"100::/64",        // discard-only (RFC 6666)
+			"100:0:0:1::/64",  // dummy prefix (RFC 9780)
+			"2001::/23",       // IETF protocol assignments, with Teredo and benchmarking (RFC 2928)
+			"2001:db8::/32",   // documentation (RFC 3849)
+			"3fff::/20",       // documentation (RFC 9637)
+			"5f00::/16",       // segment routing SIDs (RFC 9602)
+			"fc00::/7",        // unique local (RFC 4193)
+			"fe80::/10",       // link-local (RFC 4291)
+			"fec0::/10",       // deprecated site-local (RFC 3879)
+			"ff00::/8",        // multicast (RFC 4291)
 		),
 		nat64:     netip.MustParsePrefix("64:ff9b::/96"),
 		sixToFour: netip.MustParsePrefix("2002::/16"),
@@ -352,7 +383,10 @@ func (k addressCheck) url(u *url.URL) error {
 
 // control is the net.Dialer's Control: it refuses to connect a socket to
 // an address the check refuses. The dialer calls it with the address
-// about to be connected to, once any name has been resolved.
+// about to be connected to. dial has already checked that address, so
+// control never refuses one today, and no test can make it: it is a
+// second guard on the socket itself, should a change to dial ever hand
+// the dialer an address unchecked.
 func (k addressCheck) control(_, address string, _ syscall.RawConn) error {
 	ap, err := netip.ParseAddrPort(address)
 	if err != nil {
@@ -382,8 +416,9 @@ func (b *cappedBody) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	// One byte more than may be read tells a body of exactly the limit
-	// from a longer one.
-	if int64(len(p)) > b.left+1 {
+	// from a longer one. The comparison subtracts from len(p), which is
+	// positive here, as adding to a b.left of math.MaxInt64 would wrap.
+	if int64(len(p))-1 > b.left {
 		p = p[:b.left+1]
 	}
 	n, err := b.body.Read(p)

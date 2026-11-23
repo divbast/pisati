@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,9 +66,28 @@ func TestNewLimiter(t *testing.T) {
 		{name: "NaN rate", o: with(func(o *httpx.LimiterOptions) { o.Rate = httpx.Rate(math.NaN()) }), names: []string{"Rate"}},
 		{name: "infinite rate", o: with(func(o *httpx.LimiterOptions) { o.Rate = httpx.Rate(math.Inf(1)) }), names: []string{"Rate"}},
 		{name: "a rate over one a nanosecond", o: with(func(o *httpx.LimiterOptions) { o.Rate = 2e9 }), names: []string{"Rate"}},
+		{
+			name: "a rate a /48's bucket cannot keep",
+			o:    with(func(o *httpx.LimiterOptions) { o.Rate = 2e8 }), names: []string{"Rate"},
+		},
+		{
+			// A /64's token each 12.5 ns rounds to 13, so its bucket fills
+			// in 13 ns; a /48's each 1.5625 ns rounds to 2, and its 8
+			// tokens take 16 ns.
+			name: "idle as long as a /64's bucket takes to fill, but not a /48's",
+			o:    httpx.LimiterOptions{Rate: 8e7, Burst: 1, MaxEntries: 8, Idle: 13}, names: []string{"Idle"},
+		},
+		{
+			name: "a rate whose interval a Duration cannot hold",
+			o: httpx.LimiterOptions{
+				Rate: httpx.Rate(math.Ldexp(1953125, -54)), Burst: 1, MaxEntries: 8, Idle: math.MaxInt64,
+			},
+			names: []string{"Idle"},
+		},
 		{name: "zero burst", o: with(func(o *httpx.LimiterOptions) { o.Burst = 0 }), names: []string{"Burst"}},
 		{name: "negative burst", o: with(func(o *httpx.LimiterOptions) { o.Burst = -1 }), names: []string{"Burst"}},
 		{name: "zero entries", o: with(func(o *httpx.LimiterOptions) { o.MaxEntries = 0 }), names: []string{"MaxEntries"}},
+		{name: "no room for an IPv6 client's two buckets", o: with(func(o *httpx.LimiterOptions) { o.MaxEntries = 1 }), names: []string{"MaxEntries"}},
 		{name: "zero idle", o: with(func(o *httpx.LimiterOptions) { o.Idle = 0 }), names: []string{"Idle"}},
 		{name: "negative idle", o: with(func(o *httpx.LimiterOptions) { o.Idle = -time.Second }), names: []string{"Idle"}},
 		{
@@ -320,37 +340,136 @@ func TestLimiter(t *testing.T) {
 		})
 	})
 
+	t.Run("an IPv6 /48 shares a bucket eight times as large", func(t *testing.T) {
+		t.Parallel()
+
+		inBubble(t, pages, func(lt *limited) {
+			for n := range 8 {
+				lt.burst(fmt.Sprintf("[2001:db8:1:%x::1]:1", n), 40)
+			}
+			// A /64 of its own, but the /48's 320 are spent.
+			lt.refused("[2001:db8:1:ff::1]:1", "1")
+			// Another /48 has its own.
+			lt.burst("[2001:db8:2:1::1]:1", 40)
+			// The /48 gains a token each 12.5 ms.
+			time.Sleep(12500 * time.Microsecond)
+			lt.burst("[2001:db8:1:ff::1]:1", 1)
+			lt.refused("[2001:db8:1:ff::1]:1", "1")
+		})
+	})
+
+	t.Run("a /48's refusal takes nothing from the /64", func(t *testing.T) {
+		t.Parallel()
+
+		inBubble(t, pages, func(lt *limited) {
+			for n := range 8 {
+				lt.burst(fmt.Sprintf("[2001:db8:1:%x::1]:1", n), 40)
+			}
+			for range 40 {
+				lt.refused("[2001:db8:1:ff::1]:1", "1")
+			}
+			// Enough for 40 more from the /48, and 5 from a /64 that the
+			// refusals had emptied.
+			time.Sleep(500 * time.Millisecond)
+			lt.burst("[2001:db8:1:ff::1]:1", 40)
+			lt.refused("[2001:db8:1:ff::1]:1", "1")
+		})
+	})
+
+	t.Run("a /64's refusal takes nothing from the /48", func(t *testing.T) {
+		t.Parallel()
+
+		inBubble(t, pages, func(lt *limited) {
+			lt.burst("[2001:db8:1::1]:1", 40)
+			for range 280 {
+				lt.refused("[2001:db8:1::1]:1", "1")
+			}
+			for n := 1; n <= 7; n++ {
+				lt.burst(fmt.Sprintf("[2001:db8:1:%x::1]:1", n), 40)
+			}
+			lt.refused("[2001:db8:1:8::1]:1", "1")
+		})
+	})
+
+	t.Run("Retry-After is the longer wait of the buckets that refuse", func(t *testing.T) {
+		t.Parallel()
+
+		// A /64 gains a token each 4 s, and its /48 one each 0.5 s.
+		inBubble(t, httpx.LimiterOptions{Rate: 0.25, Burst: 1, MaxEntries: 64, Idle: time.Minute}, func(lt *limited) {
+			for n := range 8 {
+				lt.burst(fmt.Sprintf("[2001:db8:1:%x::1]:1", n), 1)
+			}
+			// Refused by the /48 alone.
+			lt.refused("[2001:db8:1:ff::1]:1", "1")
+			// Refused by both.
+			lt.refused("[2001:db8:1:0::1]:1", "4")
+		})
+	})
+
 	t.Run("a clock that goes back takes no token", func(t *testing.T) {
 		t.Parallel()
 
-		var mu sync.Mutex
-		now := time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
-		clock := func() time.Time {
-			mu.Lock()
-			defer mu.Unlock()
-			return now
-		}
-		l, err := httpx.NewLimiter(pages, clock)
+		clock := newManualClock()
+		l, err := httpx.NewLimiter(pages, clock.now)
 		if err != nil {
 			t.Fatal(err)
 		}
 		lt := newLimited(t, l)
 		lt.burst("192.0.2.1:1", 39)
-		mu.Lock()
-		now = now.Add(-time.Hour)
-		mu.Unlock()
+		clock.add(-time.Hour)
+		lt.burst("192.0.2.1:1", 1)
+		lt.refused("192.0.2.1:1", "1")
+	})
+
+	t.Run("a clock that goes back freezes no bucket", func(t *testing.T) {
+		t.Parallel()
+
+		clock := newManualClock()
+		l, err := httpx.NewLimiter(pages, clock.now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lt := newLimited(t, l)
+		lt.burst("192.0.2.1:1", 40)
+		clock.add(-time.Hour)
+		lt.refused("192.0.2.1:1", "1")
+		// Time counts again from where the clock went back to.
+		clock.add(100 * time.Millisecond)
 		lt.burst("192.0.2.1:1", 1)
 		lt.refused("192.0.2.1:1", "1")
 	})
 }
 
+// manualClock is a clock a test sets, safe for concurrent use.
+type manualClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func newManualClock() *manualClock {
+	return &manualClock{at: time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)}
+}
+
+func (c *manualClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *manualClock) add(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
+}
+
 // addrOf returns the address of the n-th client TestLimiterBounded
-// invents: IPv4 for even n, and an IPv6 /64 of its own for odd n.
+// invents: IPv4 for even n, and for odd n, IPv6 in a /48 of its own, so
+// that it has two buckets, its /64's and its /48's.
 func addrOf(n int) string {
 	if n%2 == 0 {
 		return fmt.Sprintf("198.18.%d.%d:1", n>>8, n&0xff)
 	}
-	return fmt.Sprintf("[2001:db8:0:%x::1]:1", n)
+	return fmt.Sprintf("[2001:db8:%x::1]:1", n)
 }
 
 func TestLimiterBounded(t *testing.T) {
@@ -393,6 +512,26 @@ func TestLimiterBounded(t *testing.T) {
 		})
 	})
 
+	t.Run("an IPv6 client's two buckets both count", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			l, err := httpx.NewLimiter(o, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lt := newLimited(t, l)
+			lt.burst(addrOf(1), 1)
+			if got := l.Len(); got != 2 {
+				t.Errorf("after one IPv6 client, Len() = %d, want 2, its /64's bucket and its /48's", got)
+			}
+			lt.burst(addrOf(0), 1)
+			if got := l.Len(); got != 3 {
+				t.Errorf("after an IPv4 client too, Len() = %d, want 3", got)
+			}
+		})
+	})
+
 	t.Run("idle clients are forgotten", func(t *testing.T) {
 		t.Parallel()
 
@@ -415,10 +554,34 @@ func TestLimiterBounded(t *testing.T) {
 			for range maxEntries {
 				lt.from("192.0.2.1:1")
 			}
-			if got := l.Len(); got != 3 {
-				t.Errorf("after the others went idle, Len() = %d, want 3: the two seen since, and 192.0.2.1", got)
+			if got := l.Len(); got != 4 {
+				t.Errorf("after the others went idle, Len() = %d, want 4: the two clients seen since, one with two "+
+					"buckets, and 192.0.2.1", got)
 			}
 		})
+	})
+
+	t.Run("a clock that goes back stalls no forgetting", func(t *testing.T) {
+		t.Parallel()
+
+		clock := newManualClock()
+		l, err := httpx.NewLimiter(o, clock.now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lt := newLimited(t, l)
+		lt.burst("192.0.2.1:1", 1)
+		clock.add(-time.Hour)
+		lt.burst("192.0.2.2:1", 1)
+		// Idle has passed for both since each was seen, counting from
+		// where the clock went back to.
+		clock.add(o.Idle)
+		for range maxEntries {
+			lt.from("192.0.2.3:1")
+		}
+		if got := l.Len(); got != 1 {
+			t.Errorf("Len() = %d, want 1: 192.0.2.3 alone", got)
+		}
 	})
 
 	t.Run("many clients at once", func(t *testing.T) {
@@ -458,5 +621,57 @@ func TestLimiterBounded(t *testing.T) {
 		if got := l.Len(); got != 0 {
 			t.Errorf("the zero Limiter's Len() = %d, want 0", got)
 		}
+	})
+}
+
+func FuzzLimiterOptions(f *testing.F) {
+	for _, o := range []httpx.LimiterOptions{
+		httpx.PageLimiterOptions(), httpx.CSPReportLimiterOptions(),
+		{Rate: 0.25, Burst: 1, MaxEntries: 16, Idle: 4 * time.Second},
+		{Rate: httpx.Rate(math.Ldexp(1953125, -54)), Burst: 1, MaxEntries: 16, Idle: math.MaxInt64},
+		{Rate: 1.25e8, Burst: 3, MaxEntries: 16, Idle: time.Second},
+		{Rate: 3, Burst: 7, MaxEntries: 16, Idle: 2334 * time.Millisecond},
+	} {
+		f.Add(float64(o.Rate), o.Burst, int64(o.Idle))
+	}
+	start := time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
+	f.Fuzz(func(t *testing.T, rate float64, burst int, idle int64) {
+		o := httpx.LimiterOptions{Rate: httpx.Rate(rate), Burst: burst, MaxEntries: 16, Idle: time.Duration(idle)}
+		l, err := httpx.NewLimiter(o, func() time.Time { return start })
+		if err != nil {
+			if !errors.Is(err, httpx.ErrInvalid) || l != nil {
+				t.Fatalf("NewLimiter(%+v) = %v, %v; want nil and an error wrapping ErrInvalid", o, l, err)
+			}
+			return
+		}
+		// Accepted, so a token takes at least a nanosecond and a bucket
+		// fills within Idle: at one instant, a client has exactly Burst
+		// requests, and is then told to wait no longer than Idle / Burst.
+		lt := newLimited(t, l)
+		check := func(spend func(), refused string, buckets int) {
+			spend()
+			w := lt.from(refused)
+			if w.Code != http.StatusTooManyRequests {
+				t.Fatalf("with %+v, the request past the burst = %d, want 429", o, w.Code)
+			}
+			after, err := strconv.ParseInt(w.Header().Get("Retry-After"), 10, 64)
+			limit := int64(math.Ceil(float64(o.Idle) / float64(buckets*o.Burst) / float64(time.Second)))
+			if err != nil || after < 1 || after > limit {
+				t.Fatalf("with %+v, Retry-After = %q, want 1 to %d", o, w.Header().Get("Retry-After"), limit)
+			}
+		}
+		if burst > 32 {
+			if w := lt.from("192.0.2.1:1"); w.Code != http.StatusOK {
+				t.Fatalf("with %+v, a first request = %d, want 200", o, w.Code)
+			}
+			return
+		}
+		check(func() { lt.burst("192.0.2.1:1", burst) }, "192.0.2.1:1", 1)
+		// A /48 holds eight bursts, spent by eight /64s in it.
+		check(func() {
+			for n := range 8 {
+				lt.burst(fmt.Sprintf("[2001:db8:1:%x::1]:1", n), burst)
+			}
+		}, "[2001:db8:1:ff::1]:1", 8)
 	})
 }

@@ -59,8 +59,12 @@ func TestClientIP(t *testing.T) {
 		{name: "an unparsable line stops the walk", remote: "10.0.0.1:4000", lines: []string{"198.51.100.1", "unknown", "10.0.0.2"}, want: "10.0.0.2"},
 		{name: "an empty hop is unparsable", remote: "10.0.0.1:4000", lines: []string{"198.51.100.1,,10.0.0.2"}, want: "10.0.0.2"},
 		{name: "an empty line is unparsable", remote: "10.0.0.1:4000", lines: []string{"198.51.100.1", ""}, want: "10.0.0.1"},
-		{name: "a hop with a port is unparsable", remote: "10.0.0.1:4000", lines: []string{"198.51.100.1:80"}, want: "10.0.0.1"},
-		{name: "a bracketed hop is unparsable", remote: "10.0.0.1:4000", lines: []string{"[2001:db8:2::9]"}, want: "10.0.0.1"},
+		{name: "a hop with a port is its address", remote: "10.0.0.1:4000", lines: []string{"198.51.100.1:80"}, want: "198.51.100.1"},
+		{name: "an IPv6 hop with a port is its address", remote: "10.0.0.1:4000", lines: []string{"[2001:db8:2::9]:443"}, want: "2001:db8:2::9"},
+		{name: "a forged left-most hop with a port is ignored", remote: "10.0.0.1:4000", lines: []string{"203.0.113.66:1, 198.51.100.1:2"}, want: "198.51.100.1"},
+		{name: "a trusted hop with a port is skipped", remote: "10.0.0.1:4000", lines: []string{"198.51.100.1, 10.0.0.2:80"}, want: "198.51.100.1"},
+		{name: "a hop with an empty port is unparsable", remote: "10.0.0.1:4000", lines: []string{"198.51.100.1:"}, want: "10.0.0.1"},
+		{name: "a bracketed hop without a port is unparsable", remote: "10.0.0.1:4000", lines: []string{"[2001:db8:2::9]"}, want: "10.0.0.1"},
 		{name: "an IPv6 peer and hops", remote: "[2001:db8:1::5]:4000", lines: []string{"2001:db8:2::9, 2001:db8:1::7"}, want: "2001:db8:2::9"},
 		{name: "an IPv4-mapped peer matches an IPv4 prefix", remote: "[::ffff:10.0.0.1]:4000", lines: []string{"198.51.100.1"}, want: "198.51.100.1"},
 		{name: "an IPv4-mapped untrusted peer is unmapped", remote: "[::ffff:192.0.2.7]:4000", want: "192.0.2.7"},
@@ -126,12 +130,46 @@ func hops(lines ...string) []string {
 	return out
 }
 
+// parseHop reads one hop as ClientIP is to: an address, or an address
+// and port, without a zone and unmapped.
+func parseHop(h string) (netip.Addr, bool) {
+	if a, err := netip.ParseAddr(h); err == nil {
+		return a.WithZone("").Unmap(), true
+	}
+	if ap, err := netip.ParseAddrPort(h); err == nil {
+		return ap.Addr().WithZone("").Unmap(), true
+	}
+	return netip.Addr{}, false
+}
+
+// referenceClient is ClientIP's rule written as plainly as it reads: a
+// trusted peer's hops are walked from the right, past trusted ones, and a
+// hop that is not an address stops the walk at the one to its right.
+func referenceClient(peer netip.Addr, all []string, isTrusted func(netip.Addr) bool) netip.Addr {
+	if !isTrusted(peer) {
+		return peer
+	}
+	client := peer
+	for _, h := range slices.Backward(all) {
+		a, ok := parseHop(h)
+		if !ok {
+			return client
+		}
+		client = a
+		if !isTrusted(a) {
+			return a
+		}
+	}
+	return client
+}
+
 func FuzzForwardedFor(f *testing.F) {
 	for _, seed := range [][3]string{
 		{"10.0.0.1:4000", "203.0.113.66, 198.51.100.1", "10.0.0.2"},
 		{"10.0.0.1:4000", "198.51.100.1, unknown", "10.0.0.2"},
 		{"[2001:db8:1::5]:4000", "2001:db8:2::9, 2001:db8:1::7", ""},
 		{"[::ffff:10.0.0.1]:4000", "::ffff:198.51.100.1,,", "fe80::1%en0"},
+		{"10.0.0.1:4000", "203.0.113.66:1, [2001:db8:2::9]:443", "10.0.0.2:80"},
 		{"172.16.0.9:4000", "10.0.0.3, 10.0.0.2", "::ffff:10.9.9.9"},
 		{"192.0.2.7:4000", "198.51.100.1", ""},
 		{"pipe", "198.51.100.1", ""},
@@ -172,17 +210,22 @@ func FuzzForwardedFor(f *testing.F) {
 		all := hops(line1, line2)
 		start := 0
 		for i, h := range all {
-			if _, err := netip.ParseAddr(h); err != nil {
+			if _, ok := parseHop(h); !ok {
 				start = i + 1
 			}
 		}
 		candidates := []netip.Addr{from}
 		for _, h := range all[start:] {
-			candidates = append(candidates, netip.MustParseAddr(h).WithZone("").Unmap())
+			a, _ := parseHop(h)
+			candidates = append(candidates, a)
 		}
 		if !slices.Contains(candidates, got) {
 			t.Fatalf("ClientIP(%q, %q, %q) = %v, which is not the peer or a hop right of every unparsable one: %v",
 				remote, line1, line2, got, candidates)
+		}
+		if want := referenceClient(from, all, isTrusted); got != want {
+			t.Fatalf("ClientIP(%q, %q, %q) = %v, want %v, the right-most hop that is not trusted",
+				remote, line1, line2, got, want)
 		}
 	})
 }

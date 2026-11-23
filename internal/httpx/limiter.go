@@ -15,12 +15,20 @@ import (
 )
 
 // ErrInvalid is a value its rule refuses: options given to NewLimiter or
-// NewGuardedClient. Every error the package returns for one wraps it and
-// says which rule.
+// NewGuardedClient, or a request GuardedClient.Do will not send as it is.
+// Every error the package returns for one wraps it and says which rule.
 var ErrInvalid = errors.New("invalid")
 
 // Rate is how many events happen in a second.
 type Rate float64
+
+// networkFactor is how many times as many tokens an IPv6 /48's bucket
+// holds, and how many times as fast it refills, as a client's.
+const networkFactor = 8
+
+// maxRate is the fastest Rate a Limiter takes: one at which even a /48's
+// bucket gains at most one token a nanosecond.
+const maxRate = Rate(time.Second) / networkFactor
 
 // LimiterOptions are how a Limiter limits. NewLimiter refuses options with
 // any field outside its range, the zero LimiterOptions included.
@@ -28,63 +36,84 @@ type Rate float64
 // limits with.
 type LimiterOptions struct {
 	// Rate is how fast a client's bucket refills, in requests a second.
-	// Positive, and at most one a nanosecond.
+	// Positive, and at most 125,000,000 a second, so that a /48's bucket,
+	// 8 times as fast, gains at most one token a nanosecond.
 	Rate Rate
-	// Burst is how many requests a full bucket holds: how many a client
-	// that has rested may make at once. At least 1.
+	// Burst is how many requests a client's full bucket holds: how many a
+	// client that has rested may make at once. At least 1.
 	Burst int
-	// MaxEntries is how many clients the Limiter keeps a bucket for at
-	// most. At least 1.
+	// MaxEntries is how many buckets the Limiter keeps at most: one for
+	// each IPv4 address, and one for each IPv6 /64 and each IPv6 /48 that
+	// requests come from. At least 2, room for an IPv6 client's two.
 	MaxEntries int
-	// Idle is how long a client goes unseen before the Limiter forgets
-	// it. At least Burst / Rate, how long an empty bucket takes to fill,
-	// so that a client is only forgotten once its bucket is full again.
+	// Idle is how long a bucket goes unused before the Limiter forgets it.
+	// At least Burst / Rate, how long an empty bucket takes to fill, so
+	// that a bucket is only forgotten once it is full again.
 	Idle time.Duration
 }
 
 // PageLimiterOptions returns the LimiterOptions Pisati limits its pages
-// with: 10 requests a second, in bursts of up to 40, for up to 65,536
-// clients, each forgotten after 10 minutes unseen.
+// with: 10 requests a second, in bursts of up to 40, in up to 65,536
+// buckets, each forgotten after 10 minutes unused.
 func PageLimiterOptions() LimiterOptions {
 	return LimiterOptions{Rate: 10, Burst: 40, MaxEntries: 1 << 16, Idle: 10 * time.Minute}
 }
 
 // CSPReportLimiterOptions returns the LimiterOptions Pisati limits CSP
-// violation reports with: 1 a second, in bursts of up to 5, for up to
-// 65,536 clients, each forgotten after 10 minutes unseen.
+// violation reports with: 1 a second, in bursts of up to 5, in up to
+// 65,536 buckets, each forgotten after 10 minutes unused.
 func CSPReportLimiterOptions() LimiterOptions {
 	return LimiterOptions{Rate: 1, Burst: 5, MaxEntries: 1 << 16, Idle: 10 * time.Minute}
 }
 
-// perToken returns how many nanoseconds a bucket filling at r takes to
-// gain one token.
-func perToken(r Rate) float64 {
-	return float64(time.Second) / float64(r)
+// rule is how one kind of bucket fills: a token each interval, to as many
+// as depth holds.
+type rule struct {
+	interval, depth time.Duration
+}
+
+// newRule returns the rule of a bucket that holds factor times burst
+// tokens and gains factor times rate of them a second, and whether a
+// Duration can hold it with the bucket filling within idle. rate, burst
+// and idle are positive, and rate at most maxRate.
+func newRule(rate Rate, burst, factor int, idle time.Duration) (rule, bool) {
+	per := float64(time.Second) / (float64(rate) * float64(factor))
+	// float64(math.MaxInt64) is 2⁶³, which no Duration holds, and which
+	// a conversion would wrap or saturate.
+	if per >= float64(math.MaxInt64) {
+		return rule{}, false
+	}
+	interval := time.Duration(math.Round(per))
+	// Dividing, rather than multiplying, cannot overflow.
+	if interval < 1 || interval > idle/time.Duration(burst)/time.Duration(factor) {
+		return rule{}, false
+	}
+	return rule{interval: interval, depth: interval * time.Duration(burst) * time.Duration(factor)}, true
 }
 
 // problems returns an error for each field of o outside its range.
 func (o LimiterOptions) problems() []error {
 	var errs []error
 	// NaN fails both comparisons, and +Inf the second.
-	rateOK := o.Rate > 0 && o.Rate <= Rate(time.Second)
+	rateOK := o.Rate > 0 && o.Rate <= maxRate
 	if !rateOK {
-		errs = append(errs, fmt.Errorf("httpx: %w limiter options: Rate is %v, want it positive and at most one a nanosecond",
-			ErrInvalid, o.Rate))
+		errs = append(errs, fmt.Errorf("httpx: %w limiter options: Rate is %v, want it positive and at most %v",
+			ErrInvalid, o.Rate, maxRate))
 	}
 	if o.Burst < 1 {
 		errs = append(errs, fmt.Errorf("httpx: %w limiter options: Burst is %d, want at least 1", ErrInvalid, o.Burst))
 	}
-	if o.MaxEntries < 1 {
-		errs = append(errs, fmt.Errorf("httpx: %w limiter options: MaxEntries is %d, want at least 1", ErrInvalid, o.MaxEntries))
+	if o.MaxEntries < 2 {
+		errs = append(errs, fmt.Errorf("httpx: %w limiter options: MaxEntries is %d, want at least 2, "+
+			"room for an IPv6 client's two buckets", ErrInvalid, o.MaxEntries))
 	}
 	switch {
 	case o.Idle <= 0:
 		errs = append(errs, fmt.Errorf("httpx: %w limiter options: Idle is %v, want it positive", ErrInvalid, o.Idle))
 	case rateOK && o.Burst >= 1:
-		// Compared first in floating point, where a slow rate cannot
-		// overflow, then exactly, as NewLimiter will round the interval.
-		per := perToken(o.Rate)
-		if per > float64(o.Idle) || time.Duration(math.Round(per)) > o.Idle/time.Duration(o.Burst) {
+		_, client := newRule(o.Rate, o.Burst, 1, o.Idle)
+		_, network := newRule(o.Rate, o.Burst, networkFactor, o.Idle)
+		if !client || !network {
 			errs = append(errs, fmt.Errorf("httpx: %w limiter options: Idle is %v, shorter than Burst / Rate, "+
 				"the time an empty bucket takes to fill", ErrInvalid, o.Idle))
 		}
@@ -92,51 +121,68 @@ func (o LimiterOptions) problems() []error {
 	return errs
 }
 
-// Limiter limits how often each client is served. Each client has a
-// token bucket that holds LimiterOptions.Burst tokens and refills at
-// Rate: a request takes a token, and one that finds the bucket empty is
-// refused. Clients are told apart by address: an IPv4 client by its own,
-// and an IPv6 client by its /64, as a client can move freely within its
-// /64. Requests with no client address share one bucket. Make one with
+// Limiter limits how often each client is served, with token buckets: a
+// request takes a token from each of its client's buckets, and one that
+// finds any of them empty is refused. An IPv4 client has one bucket, its
+// address's, which holds LimiterOptions.Burst tokens and refills at Rate.
+// An IPv6 client has two. Its /64's bucket is like an IPv4 address's,
+// as a client can move freely within its /64. Its /48's, which every /64
+// in the /48 shares, holds and refills 8 times as many, so that one
+// holder of a /48 cannot spend a burst for each of its /64s. Requests
+// with no client address share one bucket. Make a Limiter with
 // NewLimiter. The zero Limiter limits nothing: its Middleware is a bug,
 // and panics.
 //
 // The table of buckets is bounded, and starts no goroutine to keep it
-// so. It holds at most MaxEntries clients. A client unseen for Idle is
-// forgotten, which costs it nothing, as its bucket is full by then: each
-// request forgets up to 64 such clients, those seen longest ago first. A
-// new client that finds the table full of clients seen within Idle takes
-// the place of the one seen longest ago, whose bucket is full again if it
-// returns, so that new clients are never all refused.
+// so. It holds at most MaxEntries buckets, of both kinds. A bucket unused
+// for Idle is forgotten, which costs its client nothing, as it is full by
+// then: each request forgets up to 64 such buckets, those used longest
+// ago first. A new bucket that finds the table full of buckets used
+// within Idle takes the place of the one used longest ago, which is full
+// again if its client returns, so that new clients are never all
+// refused.
 type Limiter struct {
-	// interval is how long a bucket takes to gain one token, and depth
-	// how long it takes to fill: interval times Burst.
-	interval, depth time.Duration
+	// client is how a bucket of an IPv4 address or an IPv6 /64 fills, and
+	// network how an IPv6 /48's does.
+	client, network rule
 	idle            time.Duration
 	maxEntries      int
 	clock           func() time.Time
 
-	mu      sync.Mutex
-	buckets map[netip.Prefix]*bucket
-	// newest and oldest end the list of buckets in the order their
-	// clients were last seen.
+	mu sync.Mutex
+	// now is the Limiter's own time, which moves on as far as the clock
+	// has moved forward since read, its last reading, and never goes back.
+	// ticked is whether the clock has been read yet.
+	read, now time.Time
+	ticked    bool
+	buckets   map[netip.Prefix]*bucket
+	// newest and oldest end the list of buckets in the order they were
+	// last used, which is also the order of their seen times.
 	newest, oldest *bucket
 }
 
-// bucket is one client's token bucket, kept as the time it is full
-// again. A request moves that time an interval later, and is refused
-// when that would put it more than the Limiter's depth from now. A whole
-// number of nanoseconds, it never drifts as a count of tokens would.
+// bucket is one token bucket, kept as the time it is full again. A
+// request moves that time an interval later, and is refused when that
+// would put it more than the rule's depth from now. A whole number of
+// nanoseconds, it never drifts as a count of tokens would.
 type bucket struct {
 	key          netip.Prefix
 	full, seen   time.Time
 	newer, older *bucket
 }
 
+// claim is a bucket a request needs a token from, and how it fills.
+type claim struct {
+	key  netip.Prefix
+	rule rule
+}
+
 // NewLimiter returns a Limiter that limits by o, reading the time from
-// clock. The Limiter calls clock from each request's goroutine, so it
-// must be safe for concurrent use, as time.Now is. A clock that goes back
-// is taken, for each bucket, as standing still.
+// clock. The Limiter reads clock once for each request, from the
+// request's goroutine, so it must be safe for concurrent use, as time.Now
+// is. The Limiter's own time moves on as far as clock moves forward: a
+// clock that goes back hands out no token, and from where it went back
+// to, time counts again.
 //
 // NewLimiter returns an error wrapping ErrInvalid, naming every problem
 // at once, when clock is nil or o has a field outside its range.
@@ -148,10 +194,12 @@ func NewLimiter(o LimiterOptions, clock func() time.Time) (*Limiter, error) {
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
-	interval := time.Duration(math.Round(perToken(o.Rate)))
+	// problems has checked that both rules hold.
+	client, _ := newRule(o.Rate, o.Burst, 1, o.Idle)
+	network, _ := newRule(o.Rate, o.Burst, networkFactor, o.Idle)
 	return &Limiter{
-		interval:   interval,
-		depth:      interval * time.Duration(o.Burst),
+		client:     client,
+		network:    network,
 		idle:       o.Idle,
 		maxEntries: o.MaxEntries,
 		clock:      clock,
@@ -159,12 +207,13 @@ func NewLimiter(o LimiterOptions, clock func() time.Time) (*Limiter, error) {
 	}, nil
 }
 
-// Middleware returns the middleware that serves a request only when its
-// client, as ip finds it, has a token to spend. A request refused gets
-// 429 with a generic body, and a Retry-After of the whole seconds,
-// rounded up, until its client's next token, and never reaches the
-// handler. A nil ip, or a Limiter not made by NewLimiter, is a bug, and
-// Middleware panics on it.
+// Middleware returns the middleware that serves a request only when each
+// of its client's buckets, as ip finds the client, has a token to spend.
+// A request refused gets 429 with a generic body, and a Retry-After of
+// the whole seconds, rounded up, until every bucket that refused it has
+// a token again, and never reaches the handler. A refused request takes
+// no token from any bucket. A nil ip, or a Limiter not made by
+// NewLimiter, is a bug, and Middleware panics on it.
 func (l *Limiter) Middleware(ip ClientIP) Middleware {
 	if l == nil || l.buckets == nil {
 		panic("httpx: Middleware on a Limiter not made by NewLimiter")
@@ -174,11 +223,7 @@ func (l *Limiter) Middleware(ip ClientIP) Middleware {
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var key netip.Prefix
-			if a, ok := ip(r); ok {
-				key = keyOf(a)
-			}
-			if wait, ok := l.take(key); !ok {
+			if wait, ok := l.admit(r, ip); !ok {
 				w.Header().Set("Retry-After", strconv.FormatInt(wholeSeconds(wait), 10))
 				http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 				return
@@ -188,7 +233,7 @@ func (l *Limiter) Middleware(ip ClientIP) Middleware {
 	}
 }
 
-// Len returns how many clients l keeps a bucket for: never more than
+// Len returns how many buckets l keeps: never more than
 // LimiterOptions.MaxEntries. The zero Limiter keeps none.
 func (l *Limiter) Len() int {
 	if l == nil {
@@ -199,21 +244,78 @@ func (l *Limiter) Len() int {
 	return len(l.buckets)
 }
 
-// sweepBatch bounds how many idle clients one request forgets, so that no
+// admit takes a token from each bucket of r's client, as ip finds it, and
+// reports whether each had one. When one did not, it returns how long
+// until all do.
+func (l *Limiter) admit(r *http.Request, ip ClientIP) (time.Duration, bool) {
+	a, ok := ip(r)
+	a = plain(a)
+	switch {
+	case !ok:
+		return l.take(claim{rule: l.client})
+	case a.Is4():
+		return l.take(claim{key: netip.PrefixFrom(a, 32), rule: l.client})
+	default:
+		return l.take(
+			claim{key: netip.PrefixFrom(a, 64).Masked(), rule: l.client},
+			claim{key: netip.PrefixFrom(a, 48).Masked(), rule: l.network},
+		)
+	}
+}
+
+// sweepBatch bounds how many idle buckets one request forgets, so that no
 // request pays for a long quiet spell at once.
 const sweepBatch = 64
 
-// take spends a token from key's bucket, and reports whether there was
-// one. When there was not, it returns how long until there is.
-func (l *Limiter) take(key netip.Prefix) (time.Duration, bool) {
-	now := l.clock()
+// take spends a token from the bucket of each claim, when every one has
+// a token, and reports whether they did. When one did not, it takes none,
+// and returns how long until every one has a token.
+func (l *Limiter) take(claims ...claim) (time.Duration, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	now := l.tick()
 	l.sweep(now)
+	var wait time.Duration
+	for _, c := range claims {
+		b := l.touch(c.key, now)
+		wait = max(wait, later(b.full, now).Add(c.rule.interval).Sub(now)-c.rule.depth)
+	}
+	if wait > 0 {
+		return wait, false
+	}
+	for _, c := range claims {
+		// Every bucket just touched is still held: MaxEntries leaves room
+		// for two, and touching one evicts only a bucket used before.
+		if b, ok := l.buckets[c.key]; ok {
+			b.full = later(b.full, now).Add(c.rule.interval)
+		}
+	}
+	return 0, true
+}
+
+// tick reads the clock, and returns the Limiter's time: moved on as far as
+// the clock has moved forward since its last reading, if it has. It is
+// called with l.mu held, so that readings are ordered as the requests
+// that make them.
+func (l *Limiter) tick() time.Time {
+	c := l.clock()
+	if !l.ticked {
+		l.read, l.now, l.ticked = c, c, true
+		return c
+	}
+	if d := c.Sub(l.read); d > 0 {
+		l.now = l.now.Add(d)
+	}
+	l.read = c
+	return l.now
+}
+
+// touch returns key's bucket, made full if l holds none, as the one used
+// last.
+func (l *Limiter) touch(key netip.Prefix, now time.Time) *bucket {
 	b, ok := l.buckets[key]
 	if ok {
 		l.unlink(b)
-		now = later(now, b.seen)
 	} else {
 		if len(l.buckets) >= l.maxEntries {
 			l.remove(l.oldest)
@@ -223,16 +325,11 @@ func (l *Limiter) take(key netip.Prefix) (time.Duration, bool) {
 	}
 	b.seen = now
 	l.pushNewest(b)
-	next := later(b.full, now).Add(l.interval)
-	if wait := next.Sub(now) - l.depth; wait > 0 {
-		return wait, false
-	}
-	b.full = next
-	return 0, true
+	return b
 }
 
-// sweep forgets up to sweepBatch of the clients unseen for l.idle by now,
-// those seen longest ago first.
+// sweep forgets up to sweepBatch of the buckets unused for l.idle by now,
+// those used longest ago first.
 func (l *Limiter) sweep(now time.Time) {
 	for range sweepBatch {
 		b := l.oldest
@@ -243,7 +340,7 @@ func (l *Limiter) sweep(now time.Time) {
 	}
 }
 
-// remove forgets b's client.
+// remove forgets b.
 func (l *Limiter) remove(b *bucket) {
 	l.unlink(b)
 	delete(l.buckets, b.key)
@@ -274,17 +371,6 @@ func (l *Limiter) pushNewest(b *bucket) {
 	if l.oldest == nil {
 		l.oldest = b
 	}
-}
-
-// keyOf returns the key of the bucket of the client at a: its /64 for an
-// IPv6 address, and the address itself for an IPv4 one, however it is
-// spelt.
-func keyOf(a netip.Addr) netip.Prefix {
-	a = plain(a)
-	if a.Is4() {
-		return netip.PrefixFrom(a, 32)
-	}
-	return netip.PrefixFrom(a, 64).Masked()
 }
 
 // later returns the later of a and b.

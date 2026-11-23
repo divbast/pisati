@@ -4,9 +4,11 @@
 package httpx_test
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -159,18 +161,34 @@ func refusedRanges() []struct {
 		{name: "2001:db8::/32", addrs: []string{"2001:db8::", "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"}},
 		{name: "198.18.0.0/15", addrs: []string{"198.18.0.0", "198.19.255.255"}},
 		{name: "local-use NAT64 64:ff9b:1::/48", addrs: []string{"64:ff9b:1::", "64:ff9b:1::102:304", "64:ff9b:1:ffff:ffff:ffff:ffff:ffff"}},
+		{name: "192.0.0.0/24", addrs: []string{"192.0.0.0", "192.0.0.9", "192.0.0.170", "192.0.0.255"}},
+		{name: "192.88.99.0/24", addrs: []string{"192.88.99.0", "192.88.99.2", "192.88.99.255"}},
+		{name: "IPv4-compatible ::/96", addrs: []string{"::2", "::102:304", "::ffff:ffff"}},
+		{name: "IPv4-translated ::ffff:0:0:0/96", addrs: []string{"::ffff:0:0:0", "::ffff:0:102:304", "::ffff:0:ffff:ffff"}},
+		{name: "discard-only 100::/64", addrs: []string{"100::", "100::ffff:ffff:ffff:ffff"}},
+		{name: "dummy 100:0:0:1::/64", addrs: []string{"100:0:0:1::", "100::1:ffff:ffff:ffff:ffff"}},
+		{name: "2001::/23", addrs: []string{"2001::", "2001:1::1", "2001:3::1", "2001:20::1", "2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff"}},
+		{name: "Teredo 2001::/32", addrs: []string{"2001::1", "2001:0:ffff:ffff:ffff:ffff:ffff:ffff"}},
+		{name: "benchmarking 2001:2::/48", addrs: []string{"2001:2::", "2001:2:0:ffff:ffff:ffff:ffff:ffff"}},
+		{name: "3fff::/20", addrs: []string{"3fff::", "3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff"}},
+		{name: "SRv6 SIDs 5f00::/16", addrs: []string{"5f00::", "5f00:ffff:ffff:ffff:ffff:ffff:ffff:ffff"}},
+		{name: "site-local fec0::/10", addrs: []string{"fec0::", "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"}},
 	}
 }
 
-// allowedAddrs are public addresses, many just outside a refused range.
+// allowedAddrs are addresses outside every refused range, many just
+// outside one.
 func allowedAddrs() []string {
 	return []string{
 		"1.0.0.0", "9.255.255.255", "11.0.0.0", "100.63.255.255", "100.128.0.0",
 		"126.255.255.255", "128.0.0.0", "169.253.255.255", "169.255.0.0", "172.15.255.255",
-		"172.32.0.0", "192.0.1.255", "192.0.3.0", "192.167.255.255", "192.169.0.0",
+		"172.32.0.0", "191.255.255.255", "192.0.1.0", "192.0.1.255", "192.0.3.0",
+		"192.88.98.255", "192.88.100.0", "192.167.255.255", "192.169.0.0",
 		"198.17.255.255", "198.20.0.0", "198.51.99.255", "198.51.101.0", "203.0.112.255",
 		"203.0.114.0", "223.255.255.255",
-		"2001:db7:ffff:ffff:ffff:ffff:ffff:ffff", "2001:db9::", "2a00:1450:4001::1", "2606:4700::1111",
+		"2001:db7:ffff:ffff:ffff:ffff:ffff:ffff", "2001:db9::", "2001:200::1", "2a00:1450:4001::1", "2606:4700::1111",
+		"3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "3fff:1000::", "5eff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "5f01::",
+		"::1:0:0", "::fffe:ffff:ffff:ffff", "::ffff:1:0:0", "100:0:0:2::",
 	}
 }
 
@@ -260,11 +278,11 @@ func TestGuardedClientRefuses(t *testing.T) {
 		}
 	})
 
-	t.Run("without test hooks", func(t *testing.T) {
+	t.Run("a refused literal never reaches the system's resolver or dialler", func(t *testing.T) {
 		t.Parallel()
 
-		// Literals only: no name is looked up, and nothing is connected
-		// to, as every address is refused before any dial.
+		// Pisati's own Lookup and Connect, with literals only: each is
+		// refused before anything is looked up or connected to.
 		c, err := httpx.NewGuardedClient(opts)
 		if err != nil {
 			t.Fatal(err)
@@ -286,8 +304,8 @@ func refusedV4(a netip.Addr) bool {
 		return true
 	}
 	for _, p := range []string{
-		"0.0.0.0/8", "100.64.0.0/10", "240.0.0.0/4", "192.0.2.0/24",
-		"198.51.100.0/24", "203.0.113.0/24", "198.18.0.0/15",
+		"0.0.0.0/8", "100.64.0.0/10", "240.0.0.0/4", "192.0.0.0/24", "192.0.2.0/24",
+		"192.88.99.0/24", "198.51.100.0/24", "203.0.113.0/24", "198.18.0.0/15",
 	} {
 		if netip.MustParsePrefix(p).Contains(a) {
 			return true
@@ -398,6 +416,9 @@ func TestNewGuardedClient(t *testing.T) {
 //
 //   - /bytes/{n}: n bytes, with their Content-Length;
 //   - /chunked/{n}: n bytes, chunked;
+//   - /gzip/{n}: n bytes, gzipped, to a client that accepts gzip, and
+//     406 to one that does not;
+//   - /header/{n}: a header of n bytes;
 //   - /hop/{n}: a redirect to /hop/{n-1}, or "done" when n is 0;
 //   - /to/{i}: a redirect to redirects[i].
 func origin(t *testing.T, redirects ...string) http.Handler {
@@ -429,6 +450,30 @@ func origin(t *testing.T, redirects ...string) http.Handler {
 				t.Errorf("flushing: %v", err)
 			}
 			write(w, strings.Repeat("x", n-n/2))
+		}
+	})
+	mux.HandleFunc("GET /gzip/{n}", func(w http.ResponseWriter, r *http.Request) {
+		n, ok := size(w, r)
+		if !ok {
+			return
+		}
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			http.Error(w, "gzip only", http.StatusNotAcceptable)
+			return
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		zw := gzip.NewWriter(w)
+		if _, err := io.WriteString(zw, strings.Repeat("x", n)); err != nil {
+			t.Errorf("writing gzip: %v", err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Errorf("closing gzip: %v", err)
+		}
+	})
+	mux.HandleFunc("GET /header/{n}", func(w http.ResponseWriter, r *http.Request) {
+		if n, ok := size(w, r); ok {
+			w.Header().Set("X-Fill", strings.Repeat("x", n))
+			write(w, "done")
 		}
 	})
 	mux.HandleFunc("GET /hop/{n}", func(w http.ResponseWriter, r *http.Request) {
@@ -533,6 +578,77 @@ func TestGuardedClientLimits(t *testing.T) {
 					t.Errorf("%s read %d bytes, %v; want %d and an error wrapping ErrTooLarge", url, len(body), err, limit)
 				}
 			}
+		}
+	})
+
+	t.Run("a gzipped body is held to MaxBody once decoded", func(t *testing.T) {
+		t.Parallel()
+
+		c, _ := over(t, opts)
+		for _, tt := range []struct {
+			size int
+			ok   bool
+		}{{limit, true}, {limit + 1, false}, {1 << 20, false}} {
+			url := "http://public.example/gzip/" + strconv.Itoa(tt.size)
+			status, body, err := fetch(t.Context(), t, c, url)
+			switch {
+			case status != http.StatusOK:
+				t.Errorf("%s = %d, %v; want 200, gzipped", url, status, err)
+			case tt.ok && (err != nil || len(body) != tt.size):
+				t.Errorf("%s read %d bytes, %v; want all %d", url, len(body), err, tt.size)
+			case !tt.ok && (!errors.Is(err, httpx.ErrTooLarge) || len(body) != limit):
+				t.Errorf("%s read %d bytes, %v; want %d and an error wrapping ErrTooLarge", url, len(body), err, limit)
+			}
+		}
+	})
+
+	t.Run("a caller's Accept-Encoding is refused", func(t *testing.T) {
+		t.Parallel()
+
+		c, n := over(t, opts)
+		for _, value := range []string{"gzip", "identity", "br, gzip"} {
+			req := getRequest(t.Context(), t, "http://public.example/gzip/16")
+			req.Header.Set("Accept-Encoding", value)
+			resp, err := c.Do(t.Context(), req)
+			if err == nil {
+				if cerr := resp.Body.Close(); cerr != nil {
+					t.Error(cerr)
+				}
+			}
+			if !errors.Is(err, httpx.ErrInvalid) {
+				t.Errorf("Accept-Encoding: %s: %v, want an error wrapping ErrInvalid", value, err)
+			}
+		}
+		if lookups, dialled := n.seen(); len(lookups) != 0 || len(dialled) != 0 {
+			t.Errorf("looked up %q and connected to %v, want nothing", lookups, dialled)
+		}
+	})
+
+	t.Run("a MaxBody as large as an int64", func(t *testing.T) {
+		t.Parallel()
+
+		o := opts
+		o.MaxBody = math.MaxInt64
+		c, _ := over(t, o)
+		for _, kind := range []string{"bytes", "chunked"} {
+			url := "http://public.example/" + kind + "/100"
+			if status, body, err := fetch(t.Context(), t, c, url); err != nil || status != http.StatusOK || len(body) != 100 {
+				t.Errorf("%s = %d, %d bytes, %v; want 200 and 100 bytes", url, status, len(body), err)
+			}
+		}
+	})
+
+	t.Run("a response header is held to 64 KiB", func(t *testing.T) {
+		t.Parallel()
+
+		c, _ := over(t, opts)
+		url := "http://public.example/header/" + strconv.Itoa(60<<10)
+		if status, body, err := fetch(t.Context(), t, c, url); err != nil || status != http.StatusOK || body != "done" {
+			t.Errorf("a 60 KiB header: %d %q, %v; want 200 done", status, body, err)
+		}
+		url = "http://public.example/header/" + strconv.Itoa(64<<10)
+		if _, _, err := fetch(t.Context(), t, c, url); err == nil || !strings.Contains(err.Error(), "exceeded 65536 bytes") {
+			t.Errorf("a 64 KiB header: %v, want an error that the headers exceeded 65536 bytes", err)
 		}
 	})
 
@@ -706,4 +822,29 @@ func TestGuardedClientLimits(t *testing.T) {
 			}
 		})
 	})
+}
+
+// TestGuardedClientIgnoresProxyEnvironment cannot run in parallel, as it
+// sets the environment. net/http reads the proxy variables once a
+// process, the first time a transport asks for them, and as a test that
+// is not parallel, this runs before any test that is.
+func TestGuardedClientIgnoresProxyEnvironment(t *testing.T) {
+	for _, name := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"} {
+		t.Setenv(name, "http://proxy.example:3128")
+	}
+	n := &fakeNet{names: map[string][]netip.Addr{
+		"public.example": {netip.MustParseAddr("1.2.3.4")},
+		"proxy.example":  {netip.MustParseAddr("1.2.3.9")},
+	}}
+	c := guarded(t, httpx.DefaultGuardedOptions(), n)
+	for _, url := range []string{"http://public.example/", "https://public.example/"} {
+		if _, _, err := fetch(t.Context(), t, c, url); !errors.Is(err, errNoConnection) {
+			t.Errorf("%s: %v, want it connected to", url, err)
+		}
+	}
+	lookups, dialled := n.seen()
+	want := []netip.AddrPort{netip.MustParseAddrPort("1.2.3.4:80"), netip.MustParseAddrPort("1.2.3.4:443")}
+	if !slices.Equal(lookups, []string{"public.example", "public.example"}) || !slices.Equal(dialled, want) {
+		t.Errorf("looked up %q and connected to %v, want public.example and %v, never the proxy", lookups, dialled, want)
+	}
 }

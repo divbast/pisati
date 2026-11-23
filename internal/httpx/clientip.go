@@ -29,9 +29,10 @@ type ClientIP func(*http.Request) (netip.Addr, bool)
 // are walked from the right: each trusted proxy appends the address it
 // heard from, so the client is the right-most hop that is not trusted.
 // Hops further left were written by the client itself, and are never the
-// answer. A hop that is not a bare address stops the walk, which gives
-// the hop to its right, the trusted proxy that appended it, or the peer.
-// When every hop is trusted, the client is the left-most.
+// answer. A hop is an address, or an address and port, as some proxies
+// append. A hop that is neither stops the walk, which gives the hop to
+// its right, the trusted proxy that appended it, or the peer. When every
+// hop is trusted, the client is the left-most.
 func NewClientIP(trusted []netip.Prefix) ClientIP {
 	own := make([]netip.Prefix, 0, len(trusted))
 	for _, p := range trusted {
@@ -56,11 +57,11 @@ func NewClientIP(trusted []netip.Prefix) ClientIP {
 		for _, line := range slices.Backward(lines) {
 			for {
 				i := strings.LastIndexByte(line, ',')
-				hop, err := netip.ParseAddr(strings.Trim(line[i+1:], " \t"))
-				if err != nil {
+				hop, ok := parseHop(strings.Trim(line[i+1:], " \t"))
+				if !ok {
 					return client, true
 				}
-				client = plain(hop)
+				client = hop
 				if !isTrusted(client) {
 					return client, true
 				}
@@ -72,6 +73,19 @@ func NewClientIP(trusted []netip.Prefix) ClientIP {
 		}
 		return client, true
 	}
+}
+
+// parseHop reads one X-Forwarded-For hop: an address, or an address and
+// port. Without the port, every client behind a proxy that appends one
+// would be taken for the proxy.
+func parseHop(s string) (netip.Addr, bool) {
+	if a, err := netip.ParseAddr(s); err == nil {
+		return plain(a), true
+	}
+	if ap, err := netip.ParseAddrPort(s); err == nil {
+		return plain(ap.Addr()), true
+	}
+	return netip.Addr{}, false
 }
 
 // plain returns a without its zone, and unmapped from IPv6 when it is an
