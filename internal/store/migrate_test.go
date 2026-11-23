@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -17,7 +18,7 @@ import (
 )
 
 // newestVersion is the version of Pisati's newest migration.
-const newestVersion = 1
+const newestVersion store.SchemaVersion = 1
 
 // migration is a goose migration that runs up.
 func migration(up string) *fstest.MapFile {
@@ -75,11 +76,23 @@ func tables(t *testing.T, s *store.Store) map[string]string {
 	return got
 }
 
+// schemaSize counts every table and index in s, goose's own included.
+func schemaSize(t *testing.T, s *store.Store) int {
+	t.Helper()
+	var n int
+	if err := s.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM sqlite_schema").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func TestMigrateFreshThenNoop(t *testing.T) {
-	s := openStore(t, dbPath(t))
+	path := dbPath(t)
+	s := openStore(t, path)
+	lock := lockOn(t, filepath.Dir(path))
 	ctx := t.Context()
 
-	from, to, err := s.Migrate(ctx)
+	from, to, err := s.Migrate(ctx, lock)
 	if err != nil || from != 0 || to != newestVersion {
 		t.Fatalf("first Migrate = %d, %d, %v; want 0, %d, nil", from, to, err, newestVersion)
 	}
@@ -95,7 +108,7 @@ func TestMigrateFreshThenNoop(t *testing.T) {
 		t.Errorf("schema = %v, want %v", got, want)
 	}
 
-	from, to, err = s.Migrate(ctx)
+	from, to, err = s.Migrate(ctx, lock)
 	if err != nil || from != newestVersion || to != newestVersion {
 		t.Fatalf("second Migrate = %d, %d, %v; want %d, %d, nil", from, to, err, newestVersion, newestVersion)
 	}
@@ -103,13 +116,14 @@ func TestMigrateFreshThenNoop(t *testing.T) {
 
 func TestMigrateRefusesNewerSchema(t *testing.T) {
 	path := dbPath(t)
+	lock := lockOn(t, filepath.Dir(path))
 	ctx := t.Context()
 
 	newer, err := store.Open(ctx, path, store.WithMigrations(newerMigrations(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, newerVersion, err := newer.Migrate(ctx)
+	_, newerVersion, err := newer.Migrate(ctx, lock)
 	if err := errors.Join(err, newer.Close()); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +133,7 @@ func TestMigrateRefusesNewerSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	from, to, err := s.Migrate(ctx)
+	from, to, err := s.Migrate(ctx, lock)
 	if cerr := s.Close(); cerr != nil {
 		t.Fatal(cerr)
 	}
@@ -138,7 +152,9 @@ func TestMigrateRefusesNewerSchema(t *testing.T) {
 }
 
 func TestMigrateRollsBackAFailedStep(t *testing.T) {
-	s := openStore(t, dbPath(t), store.WithMigrations(fstest.MapFS{
+	path := dbPath(t)
+	lock := lockOn(t, filepath.Dir(path))
+	s := openStore(t, path, store.WithMigrations(fstest.MapFS{
 		"00001_first.sql": migration("CREATE TABLE first (id INTEGER PRIMARY KEY) STRICT;\n"),
 		// The table is created, then the INSERT fails: a STRICT table
 		// refuses text in an INTEGER column.
@@ -147,8 +163,8 @@ func TestMigrateRollsBackAFailedStep(t *testing.T) {
 	}))
 	ctx := t.Context()
 
-	for _, wantFrom := range []int64{0, 1} {
-		from, to, err := s.Migrate(ctx)
+	for _, wantFrom := range []store.SchemaVersion{0, 1} {
+		from, to, err := s.Migrate(ctx, lock)
 		if err == nil {
 			t.Fatal("Migrate succeeded over a failing step")
 		}
@@ -159,5 +175,51 @@ func TestMigrateRollsBackAFailedStep(t *testing.T) {
 		if !slices.Equal(got, []string{"first"}) {
 			t.Errorf("tables after the failure = %v, want only [first]: the failed step rolled back", got)
 		}
+	}
+}
+
+func TestMigrateRefusesWithoutTheLock(t *testing.T) {
+	state := t.TempDir()
+	path := store.DatabasePath(state)
+	s := openStore(t, path)
+	ctx := t.Context()
+
+	released, err := store.AcquireLock(ctx, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := released.Release(); err != nil {
+		t.Fatal(err)
+	}
+	for name, lock := range map[string]store.Lock{
+		"the zero Lock":                 {},
+		"a released lock":               released,
+		"the lock on another directory": lockOn(t, t.TempDir()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := s.Migrate(ctx, lock); !errors.Is(err, store.ErrLockNotHeld) {
+				t.Errorf("Migrate: %v, want ErrLockNotHeld", err)
+			}
+			if n := schemaSize(t, s); n != 0 {
+				t.Errorf("Migrate without the lock wrote %d schema entries", n)
+			}
+		})
+	}
+
+	// The lock covers the state directory's database, not another file
+	// that happens to be in the directory.
+	other := openStore(t, filepath.Join(state, "other.db"))
+	held := lockOn(t, state)
+	if _, _, err := other.Migrate(ctx, held); !errors.Is(err, store.ErrLockNotHeld) {
+		t.Errorf("Migrate of %s under the lock on %s: %v, want ErrLockNotHeld", "other.db", state, err)
+	}
+	if n := schemaSize(t, other); n != 0 {
+		t.Errorf("Migrate under another file's lock wrote %d schema entries", n)
+	}
+}
+
+func TestDatabasePath(t *testing.T) {
+	if got, want := store.DatabasePath("/var/lib/pisati"), "/var/lib/pisati/pisati.db"; got != want {
+		t.Errorf("DatabasePath = %s, want %s", got, want)
 	}
 }

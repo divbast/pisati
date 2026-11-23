@@ -19,10 +19,40 @@ import (
 )
 
 // dbPath returns where a test's database lives: pisati.db in a new
-// directory of its own.
+// state directory of its own.
 func dbPath(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(t.TempDir(), "pisati.db")
+	return store.DatabasePath(t.TempDir())
+}
+
+// lockOn takes the lock on the state directory dir until the test ends.
+func lockOn(t *testing.T, dir string) store.Lock {
+	t.Helper()
+	l, err := store.AcquireLock(t.Context(), dir)
+	if err != nil {
+		t.Fatalf("AcquireLock(%s): %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := l.Release(); err != nil {
+			t.Error(err)
+		}
+	})
+	return l
+}
+
+// migrate migrates s, the database at path, under the lock on path's
+// directory, which it takes for the call alone.
+func migrate(t *testing.T, s *store.Store, path string) (from, to store.SchemaVersion, err error) {
+	t.Helper()
+	l, err := store.AcquireLock(t.Context(), filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("AcquireLock(%s): %v", filepath.Dir(path), err)
+	}
+	from, to, err = s.Migrate(t.Context(), l)
+	if rerr := l.Release(); rerr != nil {
+		t.Fatal(rerr)
+	}
+	return from, to, err
 }
 
 // openStore opens the database at path, failing the test if it cannot,
@@ -46,7 +76,7 @@ func openStore(t *testing.T, path string, opts ...store.Option) *store.Store {
 func migratedStore(t *testing.T, path string) *store.Store {
 	t.Helper()
 	s := openStore(t, path)
-	if _, _, err := s.Migrate(t.Context()); err != nil {
+	if _, _, err := migrate(t, s, path); err != nil {
 		t.Fatalf("Migrate(%s): %v", path, err)
 	}
 	return s
@@ -105,15 +135,21 @@ func listDir(t *testing.T, dir string) []string {
 	return names
 }
 
-// checksum returns the SHA-256 of the file at path, read through a
-// directory FS as gosec prefers.
-func checksum(t *testing.T, path string) [sha256.Size]byte {
+// readFile returns what the file at path holds, read through a directory
+// FS as gosec prefers.
+func readFile(t *testing.T, path string) []byte {
 	t.Helper()
 	data, err := fs.ReadFile(os.DirFS(filepath.Dir(path)), filepath.Base(path))
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	return sha256.Sum256(data)
+	return data
+}
+
+// checksum returns the SHA-256 of the file at path.
+func checksum(t *testing.T, path string) [sha256.Size]byte {
+	t.Helper()
+	return sha256.Sum256(readFile(t, path))
 }
 
 func TestOpenSetsPragmas(t *testing.T) {

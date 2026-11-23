@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,39 +24,40 @@ var ErrCorrupt = errors.New("store: database failed its integrity check")
 // to replace.
 const restoreSuffix = ".restore"
 
-// Restore replaces the database at path with a copy of the database at
-// src. It first checks the copy, and refuses it, changing nothing at path,
+// Restore replaces the database in the state directory that lock locks,
+// DatabasePath of it, with a copy of the database at src. It first checks
+// the copy, and refuses it, changing nothing in the state directory,
 // unless PRAGMA integrity_check finds nothing wrong with it (ErrCorrupt)
 // and its schema is one this Pisati knows: at least version 1, and no
 // newer than Pisati's newest migration (ErrSchemaNewer).
 //
-// lock must hold the lock on path's directory, the state directory, as
-// proof that no Pisati serves from it; otherwise Restore returns
-// ErrLockNotHeld. The directory is compared as written, after
-// filepath.Clean: the same path AcquireLock was given, not another that
-// reaches it through a symbolic link. lock cannot be released until Restore returns. No Store
-// may have path open meanwhile.
+// lock must hold its lock, as proof that no Pisati serves from the state
+// directory; otherwise Restore returns ErrLockNotHeld. Migrate and Restore
+// run one at a time under one Lock, and the lock cannot be released until
+// Restore returns. No Store may have the database open meanwhile.
 //
-// The copy is built beside path, flushed to stable storage and renamed
-// over path, so that path holds the old database or the whole of the new
-// one, never part of either. The old database's write-ahead log, its
-// index and any rollback journal are removed first: SQLite would read
-// them as the new database's own. The restored file has mode 0600. src
-// and path must be absolute; Restore stops, failing, when ctx ends.
-func Restore(ctx context.Context, src, path string, lock Lock) (err error) {
+// Restore refuses, before it changes anything, a src that is one of the
+// files it removes or replaces in the state directory, named by its path
+// or reached through a link: the database, its write-ahead log, the log's
+// index, its rollback journal, the copy Restore builds and their like. It
+// would delete such a source before it had copied it.
+//
+// The copy is built beside the database, flushed to stable storage and
+// renamed over it, so that the state directory holds the old database or
+// the whole of the new one, never part of either. The old database's
+// write-ahead log, its index and any rollback journal are removed first:
+// SQLite would read them as the new database's own. The restored file has
+// mode 0600. src must be absolute; Restore stops, failing, when ctx ends.
+func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("store: restore %s from %s: %w", path, src, err)
+			err = fmt.Errorf("store: restore from %s: %w", src, err)
 		}
 	}()
 	if err := absolute(src); err != nil {
 		return err
 	}
-	dir, name, err := splitPath(path)
-	if err != nil {
-		return err
-	}
-	unhold, err := lock.hold(dir)
+	dir, unhold, err := lock.hold()
 	if err != nil {
 		return err
 	}
@@ -71,10 +73,15 @@ func Restore(ctx context.Context, src, path string, lock Lock) (err error) {
 		err = errors.Join(err, root.Close())
 	}()
 
+	name := databaseFile
 	tmp := name + restoreSuffix
 	copied := append(sidecars(tmp), tmp)
+	if err := refuseOwnFile(root, dir, src, slices.Concat([]string{name}, sidecars(name), copied)); err != nil {
+		return err
+	}
 	// What a restore cut short may have left. The lock keeps any other
-	// restore from building a copy here meanwhile.
+	// Restore from building a copy here meanwhile: one in another process
+	// cannot take it, and one under a copy of the same Lock waits in hold.
 	if err := removeFiles(root, copied...); err != nil {
 		return err
 	}
@@ -109,6 +116,27 @@ func Restore(ctx context.Context, src, path string, lock Lock) (err error) {
 		return err
 	}
 	return syncDir(root)
+}
+
+// refuseOwnFile returns an error when src is one of the files names in
+// root, whose path is dir: when its path, cleaned, is one of theirs, or
+// when it is the same file as one of them, as through a symbolic link.
+// Restore removes or replaces each of them, and would lose src with it.
+func refuseOwnFile(root *os.Root, dir, src string, names []string) error {
+	clean := filepath.Clean(src)
+	// A src that cannot be read is reported when Restore copies it.
+	srcInfo, statErr := os.Stat(src)
+	for _, name := range names {
+		own := filepath.Join(dir, name)
+		if clean == own {
+			return fmt.Errorf("it is %s, which Restore removes or replaces; restore from a copy kept elsewhere", own)
+		}
+		// Lstat, as removing a link to src would leave src itself alone.
+		if info, err := root.Lstat(name); statErr == nil && err == nil && os.SameFile(srcInfo, info) {
+			return fmt.Errorf("it is the same file as %s, which Restore removes or replaces; restore from a copy kept elsewhere", own)
+		}
+	}
+	return nil
 }
 
 // copyFrom copies the database at src into the empty database file at

@@ -20,7 +20,9 @@ func TestBackupRoundTrip(t *testing.T) {
 	s := migratedStore(t, dbPath(t))
 	ctx := t.Context()
 	insertSession(t, s, "committed", 42)
-	dest := filepath.Join(t.TempDir(), "backup.db")
+	// Named as a state directory's database, so that it can be migrated
+	// under that directory's lock.
+	dest := store.DatabasePath(t.TempDir())
 
 	// A transaction open while the backup runs: the backup neither waits
 	// for it nor holds what it has not committed.
@@ -55,11 +57,11 @@ func TestBackupRoundTrip(t *testing.T) {
 	if mode := info.Mode().Perm(); mode != 0o600 {
 		t.Errorf("backup mode = %v, want -rw-------", mode)
 	}
-	if got := listDir(t, filepath.Dir(dest)); !slices.Equal(got, []string{"backup.db"}) {
+	if got := listDir(t, filepath.Dir(dest)); !slices.Equal(got, []string{"pisati.db"}) {
 		t.Errorf("backup directory = %v, want the one file", got)
 	}
 	b := openStore(t, dest)
-	if from, to, err := b.Migrate(ctx); err != nil || from != newestVersion || to != newestVersion {
+	if from, to, err := migrate(t, b, dest); err != nil || from != newestVersion || to != newestVersion {
 		t.Errorf("Migrate on the backup = %d, %d, %v; want the schema at %d", from, to, err, newestVersion)
 	}
 	got, err := b.Queries().GetSession(ctx, sessionID("committed"))

@@ -6,7 +6,7 @@
 // connection needs, migrates its schema with the goose migrations built
 // into Pisati, runs write transactions, and backs the database up and
 // restores it. The lock that keeps one Pisati to a state directory lives
-// here too, since a restore is safe only while it is held.
+// here too, since migrating and restoring are safe only while it is held.
 //
 // Every path the package is given must be absolute: it never resolves one
 // against the working directory.
@@ -27,15 +27,29 @@ import (
 	"github.com/divbast/pisati/internal/store/storedb"
 )
 
+// databaseFile is the name of Pisati's database in its state directory.
+const databaseFile = "pisati.db"
+
+// DatabasePath returns where Pisati keeps its database in the state
+// directory stateDir: stateDir/pisati.db. It is the file to Open, and the
+// one Migrate and Restore act on under the lock AcquireLock takes on
+// stateDir.
+func DatabasePath(stateDir string) string {
+	return filepath.Join(stateDir, databaseFile)
+}
+
 const (
 	// busyTimeoutMillis is how long a connection waits for a lock another
 	// holds before it fails with SQLITE_BUSY.
 	busyTimeoutMillis = 5000
 
-	// maxConns bounds the connections the pool opens. Each runs its own
-	// instance of SQLite, whose memory grows with use, and SQLite runs one
-	// writer at a time however many connections there are.
-	maxConns = 8
+	// maxConns bounds the connections the pool opens. Unbounded,
+	// database/sql would open one for every caller at once, however many
+	// requests arrive, and each runs its own instance of SQLite, whose
+	// memory grows with use. Past a point more connections add nothing:
+	// SQLite runs one writer at a time, and WAL lets the readers share
+	// the file.
+	maxConns = 64
 )
 
 // Store is Pisati's database: a pool of connections to one SQLite file,
@@ -140,8 +154,16 @@ func dataSourceName(path string) string {
 	return u.String()
 }
 
-// Close closes every connection. Closing a Store again, or the zero
-// Store, does nothing.
+// Close stops new queries and transactions from starting, and closes each
+// connection that is idle. It does not wait for a query or transaction in
+// flight: the connection running one closes when it ends. Closing a
+// connection ends its instance of SQLite, and closing the last one
+// checkpoints the write-ahead log into the database file and removes the
+// log. When that last connection is idle, Close waits for the checkpoint;
+// otherwise it runs when the last query or transaction ends. The
+// checkpoint copies what the log holds, which SQLite keeps to about 1000
+// pages (4 MiB) by checkpointing whenever it passes that, and no context
+// bounds it. Closing a Store again, or the zero Store, does nothing.
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil

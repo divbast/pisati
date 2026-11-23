@@ -19,7 +19,8 @@ var (
 	// another Lock in this one.
 	ErrLocked = errors.New("store: the state directory is locked")
 	// ErrLockNotHeld is a Lock that does not hold the lock it must: the
-	// zero Lock, one released, or one on another directory.
+	// zero Lock, one released, or, for Migrate, one on a state directory
+	// other than the Store's.
 	ErrLockNotHeld = errors.New("store: the state directory's lock is not held")
 )
 
@@ -30,9 +31,11 @@ var (
 const lockFile = "pisati.lock"
 
 // Lock is the exclusive lock on a state directory: an flock on
-// <state>/pisati.lock. serve holds it for as long as it runs, and Restore
-// needs it. The zero Lock holds nothing. A Lock and its copies are one
-// lock: releasing any of them releases it.
+// <state>/pisati.lock. serve holds it for as long as it runs, and Migrate
+// and Restore need it, so that neither runs on a database another Pisati
+// is using. The zero Lock holds nothing. A Lock and its copies are one
+// lock: releasing any of them releases it, and Migrate and Restore run one
+// at a time under it.
 type Lock struct {
 	held *heldLock
 }
@@ -40,9 +43,11 @@ type Lock struct {
 type heldLock struct {
 	// dir is the state directory, as filepath.Clean leaves it.
 	dir string
-	// mu guards file. Restore holds it for reading while it runs, so that
-	// the lock cannot be released under it.
-	mu sync.RWMutex
+	// mu guards file. Migrate and Restore hold it while they run, so that
+	// the lock cannot be released under them, and so that two of them
+	// under copies of one Lock never run at once: two Restores would each
+	// build their copy under the same name.
+	mu sync.Mutex
 	// file holds the flock; nil once released.
 	file *os.File
 }
@@ -101,8 +106,10 @@ func flock(f *os.File) error {
 	return lockErr
 }
 
-// Release releases the lock, once any Restore using it has returned.
-// Releasing the zero Lock, or one released already, does nothing.
+// Release releases the lock. It first waits for any Migrate or Restore
+// running under the lock to return, a wait that only their own contexts
+// bound, then closes pisati.lock, which releases the flock. Releasing the
+// zero Lock, or one released already, does nothing.
 func (l Lock) Release() error {
 	if l.held == nil {
 		return nil
@@ -121,16 +128,17 @@ func (l Lock) Release() error {
 	return nil
 }
 
-// hold keeps l from being released until the function it returns is
-// called. It returns ErrLockNotHeld unless l holds the lock on dir.
-func (l Lock) hold(dir string) (func(), error) {
+// hold keeps l from being released, and any other Migrate or Restore from
+// running under it, until the function it returns is called. It returns
+// the state directory l locks, or ErrLockNotHeld unless l holds its lock.
+func (l Lock) hold() (stateDir string, unhold func(), err error) {
 	if l.held == nil {
-		return nil, ErrLockNotHeld
+		return "", nil, ErrLockNotHeld
 	}
-	l.held.mu.RLock()
-	if l.held.file == nil || l.held.dir != filepath.Clean(dir) {
-		l.held.mu.RUnlock()
-		return nil, ErrLockNotHeld
+	l.held.mu.Lock()
+	if l.held.file == nil {
+		l.held.mu.Unlock()
+		return "", nil, ErrLockNotHeld
 	}
-	return l.held.mu.RUnlock, nil
+	return l.held.dir, l.held.mu.Unlock, nil
 }
