@@ -15,7 +15,8 @@ import (
 )
 
 // ErrInvalid is a value its rule refuses: options given to NewLimiter or
-// NewGuardedClient, or a request GuardedClient.Do will not send as it is.
+// NewGuardedClient, a request GuardedClient.Do will not send as it is, or
+// a response it will not return as it came, as its body is still encoded.
 // Every error the package returns for one wraps it and says which rule.
 var ErrInvalid = errors.New("invalid")
 
@@ -129,7 +130,10 @@ func (o LimiterOptions) problems() []error {
 // as a client can move freely within its /64. Its /48's, which every /64
 // in the /48 shares, holds and refills 8 times as many, so that one
 // holder of a /48 cannot spend a burst for each of its /64s. Requests
-// with no client address share one bucket. Make a Limiter with
+// with no client address, or an invalid one, share one bucket. A refused
+// request makes no bucket, so that a client refused cannot crowd others
+// out of the table with buckets for addresses it never had served. Make
+// a Limiter with
 // NewLimiter. The zero Limiter limits nothing: its Middleware is a bug,
 // and panics.
 //
@@ -251,7 +255,7 @@ func (l *Limiter) admit(r *http.Request, ip ClientIP) (time.Duration, bool) {
 	a, ok := ip(r)
 	a = plain(a)
 	switch {
-	case !ok:
+	case !ok || !a.IsValid():
 		return l.take(claim{rule: l.client})
 	case a.Is4():
 		return l.take(claim{key: netip.PrefixFrom(a, 32), rule: l.client})
@@ -269,26 +273,41 @@ const sweepBatch = 64
 
 // take spends a token from the bucket of each claim, when every one has
 // a token, and reports whether they did. When one did not, it takes none,
-// and returns how long until every one has a token.
+// and returns how long until every one has a token. A claim with no
+// bucket yet has a full one, which is made only when the request is let
+// through.
 func (l *Limiter) take(claims ...claim) (time.Duration, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.tick()
 	l.sweep(now)
+	held := make([]*bucket, len(claims))
 	var wait time.Duration
-	for _, c := range claims {
-		b := l.touch(c.key, now)
-		wait = max(wait, later(b.full, now).Add(c.rule.interval).Sub(now)-c.rule.depth)
+	for i, c := range claims {
+		full := now
+		if b, ok := l.buckets[c.key]; ok {
+			held[i] = b
+			full = later(b.full, now)
+		}
+		wait = max(wait, full.Add(c.rule.interval).Sub(now)-c.rule.depth)
+	}
+	// Buckets that exist are used, refused or not, so that a busy
+	// client's are kept, and the list stays in the order of seen.
+	for _, b := range held {
+		if b != nil {
+			l.use(b, now)
+		}
 	}
 	if wait > 0 {
 		return wait, false
 	}
-	for _, c := range claims {
-		// Every bucket just touched is still held: MaxEntries leaves room
-		// for two, and touching one evicts only a bucket used before.
-		if b, ok := l.buckets[c.key]; ok {
-			b.full = later(b.full, now).Add(c.rule.interval)
+	for i, c := range claims {
+		if held[i] == nil {
+			// Every bucket held was just used, so this evicts none of
+			// them: MaxEntries leaves room for two.
+			held[i] = l.add(c.key, now)
 		}
+		held[i].full = later(held[i].full, now).Add(c.rule.interval)
 	}
 	return 0, true
 }
@@ -310,20 +329,21 @@ func (l *Limiter) tick() time.Time {
 	return l.now
 }
 
-// touch returns key's bucket, made full if l holds none, as the one used
-// last.
-func (l *Limiter) touch(key netip.Prefix, now time.Time) *bucket {
-	b, ok := l.buckets[key]
-	if ok {
-		l.unlink(b)
-	} else {
-		if len(l.buckets) >= l.maxEntries {
-			l.remove(l.oldest)
-		}
-		b = &bucket{key: key, full: now}
-		l.buckets[key] = b
-	}
+// use makes b the bucket used last, at now.
+func (l *Limiter) use(b *bucket, now time.Time) {
+	l.unlink(b)
 	b.seen = now
+	l.pushNewest(b)
+}
+
+// add returns a new, full bucket for key, used at now, forgetting the
+// bucket used longest ago when the table is full.
+func (l *Limiter) add(key netip.Prefix, now time.Time) *bucket {
+	if len(l.buckets) >= l.maxEntries {
+		l.remove(l.oldest)
+	}
+	b := &bucket{key: key, full: now, seen: now}
+	l.buckets[key] = b
 	l.pushNewest(b)
 	return b
 }

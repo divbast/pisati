@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -23,9 +24,11 @@ import (
 // no address but ones the client refuses. Do's error for one wraps it.
 var ErrAddressRefused = errors.New("address refused")
 
-// ErrTooLarge is a response body longer than GuardedOptions.MaxBody.
-// Reading the body past the limit returns an error wrapping it.
-var ErrTooLarge = errors.New("response body too large")
+// ErrTooLarge is a response larger than the GuardedClient takes: a body
+// longer than GuardedOptions.MaxBody, which fails to read past the limit
+// with an error wrapping it, or a header over 64 KiB, for which Do's
+// error wraps it.
+var ErrTooLarge = errors.New("response too large")
 
 // ErrTooManyRedirects is a request that is redirected more often than
 // GuardedOptions.MaxRedirects allows. Do's error for one wraps it.
@@ -90,8 +93,10 @@ func (o GuardedOptions) problems() []error {
 // It sends only http and https URLs, and connects only to addresses
 // outside the ranges it refuses: private, shared, loopback, link-local,
 // multicast and reserved ones, and every special-purpose range IANA's
-// registries mark as not globally reachable, with the deprecated ones.
-// Such a range is refused whole, with the few globally reachable service
+// registries mark as not globally reachable, with the deprecated ones,
+// save one: an IPv4-mapped address (::ffff:0:0/96), which is how a
+// dual-stack socket spells IPv4, is checked as the IPv4 address it maps.
+// A range is refused whole, with the few globally reachable service
 // addresses some hold, none of which serves the web:
 //
 //   - IPv4: 0.0.0.0/8, which holds the unspecified address, 10.0.0.0/8,
@@ -99,16 +104,16 @@ func (o GuardedOptions) problems() []error {
 //     192.0.0.0/24, 192.0.2.0/24, 192.88.99.0/24, 192.168.0.0/16,
 //     198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4 and
 //     240.0.0.0/4;
-//   - IPv6: ::/96, which holds the unspecified and loopback addresses
-//     and the deprecated IPv4-compatible ones, ::ffff:0:0:0/96,
-//     64:ff9b:1::/48, 100::/64, 100:0:0:1::/64, 2001::/23, which holds
-//     Teredo and 2001:2::/48, 2001:db8::/32, 3fff::/20, 5f00::/16,
-//     fc00::/7, fe80::/10, fec0::/10 and ff00::/8. 64:ff9b:1::/48, the
-//     local-use translation prefix, embeds an IPv4 address wherever the
-//     local network chooses, so it cannot be read as NAT64 is;
-//   - an IPv6 address that embeds an IPv4 address refused above:
-//     IPv4-mapped (::ffff:0:0/96), NAT64 (64:ff9b::/96) or 6to4
-//     (2002::/16).
+//   - IPv6: every address outside 2000::/3, the global unicast space,
+//     and within it 2001::/23, which holds Teredo and 2001:2::/48,
+//     2001:db8::/32 and 3fff::/20. Outside 2000::/3 lie, among others,
+//     the unspecified, loopback, IPv4-compatible and IPv4-translated
+//     addresses, the unique local, link-local, site-local and multicast
+//     ranges, 100::/64, 100:0:0:1::/64 and 5f00::/16, and both NAT64
+//     prefixes, 64:ff9b::/96 and 64:ff9b:1::/48, so a host reached only
+//     through NAT64 is refused, whatever IPv4 address it embeds;
+//   - a 6to4 address (2002::/16) whose embedded IPv4 address is refused
+//     above.
 //
 // The check is made as each connection is: a host's addresses are looked
 // up, the refused ones are skipped, and the rest are tried in turn, each
@@ -200,19 +205,66 @@ func (c *GuardedClient) Do(ctx context.Context, req *http.Request) (*http.Respon
 	if req == nil || req.URL == nil {
 		return nil, errors.New("httpx: Do needs a request with a URL")
 	}
-	if len(req.Header.Values("Accept-Encoding")) > 0 {
-		return nil, fmt.Errorf("httpx: %w request: it sets Accept-Encoding, and only a body the transport "+
-			"decodes itself is held to MaxBody as read", ErrInvalid)
+	for key := range req.Header {
+		// Under any key the transport would send: a caller may write to
+		// the map without canonicalising.
+		if strings.EqualFold(key, "Accept-Encoding") {
+			return nil, fmt.Errorf("httpx: %w request: it sets Accept-Encoding, and only a body the transport "+
+				"decodes itself is held to MaxBody as read", ErrInvalid)
+		}
 	}
 	if err := c.check.url(req.URL); err != nil {
 		return nil, err
 	}
 	resp, err := c.client.Do(req.WithContext(ctx)) //nolint:gosec // G704: this is the address-checked client; the check above, CheckRedirect and dial check every URL and address
 	if err != nil {
+		if headerTooLarge(err) {
+			return nil, fmt.Errorf("httpx: %w: a header over %d bytes: %w", ErrTooLarge, maxResponseHeader, err)
+		}
 		return nil, err
+	}
+	if !resp.Uncompressed && mayHaveBody(resp) && encoded(resp.Header) {
+		return nil, errors.Join(fmt.Errorf("httpx: %w response: its body is %s, which the transport did not decode, "+
+			"so MaxBody would not count what is read", ErrInvalid, resp.Header.Values("Content-Encoding")), resp.Body.Close())
 	}
 	resp.Body = &cappedBody{body: resp.Body, left: c.maxBody, limit: c.maxBody}
 	return resp, nil
+}
+
+// headerTooLarge reports whether err is the transport's for a response
+// header over its MaxResponseHeaderBytes. net/http has no error type or
+// value for that, so this reads its message, HTTP/1's or HTTP/2's; the
+// test of the cap fails should the message change.
+func headerTooLarge(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "net/http: server response headers exceeded ") ||
+		strings.Contains(msg, "http2: response header list larger than advertised limit")
+}
+
+// mayHaveBody reports whether resp can carry a body: it does not answer
+// a HEAD, and its status is not one that has none. http.Client wraps
+// even an empty body, so the body itself cannot tell.
+func mayHaveBody(resp *http.Response) bool {
+	switch {
+	case resp.Request != nil && resp.Request.Method == http.MethodHead:
+		return false
+	case resp.StatusCode < http.StatusOK, resp.StatusCode == http.StatusNoContent, resp.StatusCode == http.StatusNotModified:
+		return false
+	}
+	return resp.ContentLength != 0
+}
+
+// encoded reports whether h gives the body a content coding other than
+// identity.
+func encoded(h http.Header) bool {
+	for _, v := range h.Values("Content-Encoding") {
+		for coding := range strings.SplitSeq(v, ",") {
+			if coding = strings.TrimSpace(coding); coding != "" && !strings.EqualFold(coding, "identity") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CloseIdleConnections closes the connections c keeps open between
@@ -294,10 +346,12 @@ const maxResponseHeader = 64 << 10
 
 // addressCheck says which addresses a GuardedClient may connect to.
 type addressCheck struct {
-	// refused4 and refused6 are the ranges refused outright.
+	// refused4 is refused outright. Of IPv6, only global6 may be
+	// connected to, less refused6.
 	refused4, refused6 []netip.Prefix
-	// nat64 and sixToFour embed an IPv4 address, which is checked in turn.
-	nat64, sixToFour netip.Prefix
+	global6            netip.Prefix
+	// sixToFour embeds an IPv4 address, which is checked in turn.
+	sixToFour netip.Prefix
 }
 
 // newAddressCheck returns the check GuardedClient's doc describes.
@@ -327,22 +381,14 @@ func newAddressCheck() addressCheck {
 			"224.0.0.0/4",     // multicast (RFC 5771)
 			"240.0.0.0/4",     // reserved, with the broadcast address (RFC 1112, RFC 919)
 		),
+		// The special-purpose ranges inside 2000::/3: every other one,
+		// IPv4-mapped addresses aside, lies outside it.
 		refused6: parse(
-			"::/96",           // unspecified, loopback and IPv4-compatible (RFC 4291)
-			"::ffff:0:0:0/96", // IPv4-translated (RFC 2765)
-			"64:ff9b:1::/48",  // local-use translation (RFC 8215)
-			"100::/64",        // discard-only (RFC 6666)
-			"100:0:0:1::/64",  // dummy prefix (RFC 9780)
-			"2001::/23",       // IETF protocol assignments, with Teredo and benchmarking (RFC 2928)
-			"2001:db8::/32",   // documentation (RFC 3849)
-			"3fff::/20",       // documentation (RFC 9637)
-			"5f00::/16",       // segment routing SIDs (RFC 9602)
-			"fc00::/7",        // unique local (RFC 4193)
-			"fe80::/10",       // link-local (RFC 4291)
-			"fec0::/10",       // deprecated site-local (RFC 3879)
-			"ff00::/8",        // multicast (RFC 4291)
+			"2001::/23",     // IETF protocol assignments, with Teredo and benchmarking (RFC 2928)
+			"2001:db8::/32", // documentation (RFC 3849)
+			"3fff::/20",     // documentation (RFC 9637)
 		),
-		nat64:     netip.MustParsePrefix("64:ff9b::/96"),
+		global6:   netip.MustParsePrefix("2000::/3"), // global unicast (RFC 4291)
 		sixToFour: netip.MustParsePrefix("2002::/16"),
 	}
 }
@@ -352,18 +398,14 @@ func (k addressCheck) allows(a netip.Addr) bool {
 	// Unmapping checks an IPv4-mapped address as the IPv4 address it is.
 	a = plain(a)
 	if a.Is6() {
-		if slices.ContainsFunc(k.refused6, func(p netip.Prefix) bool { return p.Contains(a) }) {
+		if !k.global6.Contains(a) || slices.ContainsFunc(k.refused6, func(p netip.Prefix) bool { return p.Contains(a) }) {
 			return false
 		}
-		b := a.As16()
-		switch {
-		case k.nat64.Contains(a):
-			a = netip.AddrFrom4([4]byte(b[12:16]))
-		case k.sixToFour.Contains(a):
-			a = netip.AddrFrom4([4]byte(b[2:6]))
-		default:
+		if !k.sixToFour.Contains(a) {
 			return true
 		}
+		b := a.As16()
+		a = netip.AddrFrom4([4]byte(b[2:6]))
 	}
 	return a.Is4() && !slices.ContainsFunc(k.refused4, func(p netip.Prefix) bool { return p.Contains(a) })
 }
@@ -428,7 +470,7 @@ func (b *cappedBody) Read(p []byte) (int, error) {
 	}
 	n = int(b.left)
 	b.left = 0
-	b.err = fmt.Errorf("httpx: %w: over %d bytes", ErrTooLarge, b.limit)
+	b.err = fmt.Errorf("httpx: %w: a body over %d bytes", ErrTooLarge, b.limit)
 	return n, b.err
 }
 

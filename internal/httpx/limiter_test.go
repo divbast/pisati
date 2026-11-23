@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -167,16 +168,22 @@ type limited struct {
 	reached atomic.Int64
 }
 
-// newLimited returns a limited for l.
+// newLimited returns a limited for l, whose clients are their peers, with
+// no proxy trusted.
 func newLimited(t *testing.T, l *httpx.Limiter) *limited {
+	t.Helper()
+	return newLimitedBy(t, l, httpx.NewClientIP(nil))
+}
+
+// newLimitedBy returns a limited for l, whose clients ip finds.
+func newLimitedBy(t *testing.T, l *httpx.Limiter, ip httpx.ClientIP) *limited {
 	t.Helper()
 	lt := &limited{t: t}
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		lt.reached.Add(1)
 		w.WriteHeader(http.StatusOK)
 	})
-	// The test's own ClientIP: the peer, with no proxy trusted.
-	lt.h = l.Middleware(httpx.NewClientIP(nil))(ok)
+	lt.h = l.Middleware(ip)(ok)
 	return lt
 }
 
@@ -406,6 +413,27 @@ func TestLimiter(t *testing.T) {
 		})
 	})
 
+	t.Run("a ClientIP that finds an invalid address is taken to find none", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			l, err := httpx.NewLimiter(pages, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			invalid := newLimitedBy(t, l, func(*http.Request) (netip.Addr, bool) { return netip.Addr{}, true })
+			none := newLimitedBy(t, l, func(*http.Request) (netip.Addr, bool) { return netip.Addr{}, false })
+			// One bucket, charged once a request.
+			invalid.burst("192.0.2.1:1", 20)
+			none.burst("192.0.2.2:1", 20)
+			invalid.refused("192.0.2.1:1", "1")
+			none.refused("192.0.2.2:1", "1")
+			if got := l.Len(); got != 1 {
+				t.Errorf("Len() = %d, want 1: the bucket of requests with no address", got)
+			}
+		})
+	})
+
 	t.Run("a clock that goes back takes no token", func(t *testing.T) {
 		t.Parallel()
 
@@ -558,6 +586,58 @@ func TestLimiterBounded(t *testing.T) {
 				t.Errorf("after the others went idle, Len() = %d, want 4: the two clients seen since, one with two "+
 					"buckets, and 192.0.2.1", got)
 			}
+		})
+	})
+
+	t.Run("a /48 that is refused makes no buckets", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			pages := httpx.LimiterOptions{Rate: 10, Burst: 40, MaxEntries: 16, Idle: time.Minute}
+			l, err := httpx.NewLimiter(pages, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lt := newLimited(t, l)
+			// A client that has spent its burst, and must not get it back
+			// by being pushed out.
+			lt.burst("192.0.2.1:1", 40)
+			lt.refused("192.0.2.1:1", "1")
+			// One /48 spends its own burst through eight /64s, then
+			// floods fresh /64s, each refused by the /48's bucket.
+			for n := range 8 {
+				lt.burst(fmt.Sprintf("[2001:db8:1:%x::1]:1", n), 40)
+			}
+			before := l.Len()
+			for n := range 1000 {
+				lt.refused(fmt.Sprintf("[2001:db8:1:%x:1::1]:1", n), "1")
+			}
+			if got := l.Len(); got != before {
+				t.Errorf("after the flood, Len() = %d, want %d: no bucket for a refused /64", got, before)
+			}
+			lt.refused("192.0.2.1:1", "1")
+		})
+	})
+
+	t.Run("a refused client's bucket is used, and kept", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			l, err := httpx.NewLimiter(httpx.LimiterOptions{Rate: 10, Burst: 40, MaxEntries: 4, Idle: time.Minute}, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lt := newLimited(t, l)
+			lt.burst("192.0.2.1:1", 40)
+			lt.burst("192.0.2.2:1", 1)
+			lt.burst("192.0.2.3:1", 1)
+			// Refused, and so used last: the next new clients push out
+			// 192.0.2.2 and 192.0.2.3 before it.
+			lt.refused("192.0.2.1:1", "1")
+			for _, a := range []string{"192.0.2.4:1", "192.0.2.5:1", "192.0.2.6:1"} {
+				lt.burst(a, 1)
+			}
+			lt.refused("192.0.2.1:1", "1")
 		})
 	})
 

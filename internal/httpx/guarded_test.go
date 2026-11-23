@@ -121,17 +121,22 @@ func urlOf(a netip.Addr) string {
 }
 
 // spellings returns a and, when a is an IPv4 address, the IPv6 addresses
-// that embed it: IPv4-mapped, under the NAT64 well-known prefix, and as
-// 6to4.
+// that embed it and are checked as it is: IPv4-mapped, and as 6to4.
 func spellings(a netip.Addr) []netip.Addr {
 	if !a.Is4() {
 		return []netip.Addr{a}
 	}
 	v4 := a.As4()
 	mapped := netip.AddrFrom16(a.As16())
-	nat64 := [16]byte{0x00, 0x64, 0xff, 0x9b, 12: v4[0], 13: v4[1], 14: v4[2], 15: v4[3]}
 	sixToFour := [16]byte{0x20, 0x02, v4[0], v4[1], v4[2], v4[3], 15: 1}
-	return []netip.Addr{a, mapped, netip.AddrFrom16(nat64), netip.AddrFrom16(sixToFour)}
+	return []netip.Addr{a, mapped, netip.AddrFrom16(sixToFour)}
+}
+
+// nat64 returns a, an IPv4 address, under the NAT64 well-known prefix,
+// which lies outside 2000::/3 and so is refused whatever it embeds.
+func nat64(a netip.Addr) netip.Addr {
+	v4 := a.As4()
+	return netip.AddrFrom16([16]byte{0x00, 0x64, 0xff, 0x9b, 12: v4[0], 13: v4[1], 14: v4[2], 15: v4[3]})
 }
 
 // refusedRanges are the ranges the GuardedClient refuses, each with
@@ -173,6 +178,11 @@ func refusedRanges() []struct {
 		{name: "3fff::/20", addrs: []string{"3fff::", "3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff"}},
 		{name: "SRv6 SIDs 5f00::/16", addrs: []string{"5f00::", "5f00:ffff:ffff:ffff:ffff:ffff:ffff:ffff"}},
 		{name: "site-local fec0::/10", addrs: []string{"fec0::", "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"}},
+		{name: "outside 2000::/3", addrs: []string{
+			"1fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "4000::", "::1:0:0", "::fffe:ffff:ffff:ffff", "::ffff:1:0:0",
+			"100:0:0:2::", "5eff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "5f01::", "e000::",
+		}},
+		{name: "NAT64 64:ff9b::/96, whatever it embeds", addrs: []string{"64:ff9b::", "64:ff9b::102:304", "64:ff9b::808:808", "64:ff9b::ffff:ffff"}},
 	}
 }
 
@@ -186,9 +196,9 @@ func allowedAddrs() []string {
 		"192.88.98.255", "192.88.100.0", "192.167.255.255", "192.169.0.0",
 		"198.17.255.255", "198.20.0.0", "198.51.99.255", "198.51.101.0", "203.0.112.255",
 		"203.0.114.0", "223.255.255.255",
-		"2001:db7:ffff:ffff:ffff:ffff:ffff:ffff", "2001:db9::", "2001:200::1", "2a00:1450:4001::1", "2606:4700::1111",
-		"3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "3fff:1000::", "5eff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "5f01::",
-		"::1:0:0", "::fffe:ffff:ffff:ffff", "::ffff:1:0:0", "100:0:0:2::",
+		"2000::", "2001:db7:ffff:ffff:ffff:ffff:ffff:ffff", "2001:db9::", "2001:200::1", "2a00:1450:4001::1",
+		"2606:4700::1111", "3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "3fff:1000::",
+		"3fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
 	}
 }
 
@@ -332,6 +342,9 @@ func FuzzAddressSpellings(f *testing.F) {
 				t.Fatalf("%v, a spelling of %v, refused: %t, want %t", a, v4, got, want)
 			}
 		}
+		if _, _, err := fetch(t.Context(), t, c, urlOf(nat64(v4))); !errors.Is(err, httpx.ErrAddressRefused) {
+			t.Fatalf("%v, outside 2000::/3: %v, want it refused", nat64(v4), err)
+		}
 	})
 }
 
@@ -418,6 +431,8 @@ func TestNewGuardedClient(t *testing.T) {
 //   - /chunked/{n}: n bytes, chunked;
 //   - /gzip/{n}: n bytes, gzipped, to a client that accepts gzip, and
 //     406 to one that does not;
+//   - /encoded/{coding}: 16 bytes, said to have Content-Encoding coding,
+//     whatever the client accepts;
 //   - /header/{n}: a header of n bytes;
 //   - /hop/{n}: a redirect to /hop/{n-1}, or "done" when n is 0;
 //   - /to/{i}: a redirect to redirects[i].
@@ -469,6 +484,10 @@ func origin(t *testing.T, redirects ...string) http.Handler {
 		if err := zw.Close(); err != nil {
 			t.Errorf("closing gzip: %v", err)
 		}
+	})
+	mux.HandleFunc("GET /encoded/{coding}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", r.PathValue("coding"))
+		write(w, strings.Repeat("x", 16))
 	})
 	mux.HandleFunc("GET /header/{n}", func(w http.ResponseWriter, r *http.Request) {
 		if n, ok := size(w, r); ok {
@@ -619,8 +638,60 @@ func TestGuardedClientLimits(t *testing.T) {
 				t.Errorf("Accept-Encoding: %s: %v, want an error wrapping ErrInvalid", value, err)
 			}
 		}
+		for _, key := range []string{"accept-encoding", "ACCEPT-ENCODING", "Accept-encoding"} {
+			req := getRequest(t.Context(), t, "http://public.example/gzip/16")
+			// Set under the key as given, as a caller writing to the map
+			// might, rather than canonicalised as Header.Set would.
+			req.Header[key] = []string{"gzip"}
+			resp, err := c.Do(t.Context(), req)
+			if err == nil {
+				if cerr := resp.Body.Close(); cerr != nil {
+					t.Error(cerr)
+				}
+			}
+			if !errors.Is(err, httpx.ErrInvalid) {
+				t.Errorf("%s: gzip, under that key: %v, want an error wrapping ErrInvalid", key, err)
+			}
+		}
 		if lookups, dialled := n.seen(); len(lookups) != 0 || len(dialled) != 0 {
 			t.Errorf("looked up %q and connected to %v, want nothing", lookups, dialled)
+		}
+	})
+
+	t.Run("a body the transport did not decode is refused", func(t *testing.T) {
+		t.Parallel()
+
+		c, _ := over(t, opts)
+		for _, tt := range []struct {
+			name    string
+			method  string
+			coding  string
+			ranged  bool
+			refused bool
+		}{
+			{name: "an encoding the transport does not decode", method: http.MethodGet, coding: "br", refused: true},
+			{name: "a list with one", method: http.MethodGet, coding: "identity, br", refused: true},
+			{name: "gzip for a Range request, which asks for none", method: http.MethodGet, coding: "gzip", ranged: true, refused: true},
+			{name: "identity", method: http.MethodGet, coding: "identity"},
+			{name: "identity, in capitals", method: http.MethodGet, coding: "IDENTITY"},
+			{name: "a HEAD, which has no body", method: http.MethodHead, coding: "br"},
+		} {
+			req, err := http.NewRequestWithContext(t.Context(), tt.method, "http://public.example/encoded/"+tt.coding, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.ranged {
+				req.Header.Set("Range", "bytes=0-7")
+			}
+			resp, err := c.Do(t.Context(), req)
+			if err == nil {
+				if cerr := resp.Body.Close(); cerr != nil {
+					t.Error(cerr)
+				}
+			}
+			if refused := errors.Is(err, httpx.ErrInvalid); refused != tt.refused || (!refused && err != nil) {
+				t.Errorf("%s: %v; want refused: %t", tt.name, err, tt.refused)
+			}
 		}
 	})
 
@@ -647,8 +718,8 @@ func TestGuardedClientLimits(t *testing.T) {
 			t.Errorf("a 60 KiB header: %d %q, %v; want 200 done", status, body, err)
 		}
 		url = "http://public.example/header/" + strconv.Itoa(64<<10)
-		if _, _, err := fetch(t.Context(), t, c, url); err == nil || !strings.Contains(err.Error(), "exceeded 65536 bytes") {
-			t.Errorf("a 64 KiB header: %v, want an error that the headers exceeded 65536 bytes", err)
+		if _, _, err := fetch(t.Context(), t, c, url); !errors.Is(err, httpx.ErrTooLarge) {
+			t.Errorf("a 64 KiB header: %v, want an error wrapping ErrTooLarge", err)
 		}
 	})
 
