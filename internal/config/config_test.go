@@ -5,6 +5,7 @@ package config_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -72,13 +73,13 @@ type setup struct {
 	state string
 }
 
-func (s setup) load() (config.Config, error) {
+func (s setup) load(ctx context.Context) (config.Config, error) {
 	src := s.env.sources()
 	if s.files != nil {
 		src.Files = s.files
 	}
 	src.Credentials = s.creds
-	return config.Load(src, s.state)
+	return config.Load(ctx, src, s.state)
 }
 
 func tomlFile(s string) *fstest.MapFile {
@@ -156,7 +157,7 @@ func refused(t *testing.T, err, want error, names ...string) {
 func TestLoadDefaults(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": baseURL}}.load()
+	cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": baseURL}}.load(t.Context())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -204,7 +205,7 @@ func TestLoadRequiresBaseURL(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := config.Load(src, "")
+			_, err := config.Load(t.Context(), src, "")
 			refused(t, err, config.ErrMissing, "server.base_url", "PISATI_SERVER_BASE_URL", "https")
 		})
 	}
@@ -230,7 +231,7 @@ level = "debug"
 		"pisati.toml.d/30-old.toml.bak": tomlFile("not TOML ["),
 		"pisati.toml.d/README":          tomlFile("not TOML either ["),
 	}
-	cfg, err := setup{files: files}.load()
+	cfg, err := setup{files: files}.load(t.Context())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -254,7 +255,7 @@ level = "debug"
 	cfg, err = setup{files: fstest.MapFS{
 		"pisati.toml.d/9-last.toml":   tomlFile("[server]\nbase_url = \"https://nine.example.org\"\n"),
 		"pisati.toml.d/10-first.toml": tomlFile("[server]\nbase_url = \"https://ten.example.org\"\n"),
-	}}.load()
+	}}.load(t.Context())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -267,7 +268,7 @@ func TestEnvWinsOverFiles(t *testing.T) {
 	t.Parallel()
 
 	files := fstest.MapFS{"pisati.toml": tomlFile(everyKey)}
-	cfg, err := setup{files: files}.load()
+	cfg, err := setup{files: files}.load(t.Context())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -299,7 +300,7 @@ func TestEnvWinsOverFiles(t *testing.T) {
 		"PISATI_TELEMETRY_PPROF":         "off",
 		"PISATI_KEYS_MASTER_KEY_FILE":    "/run/env/key",
 		"PISATI_DEV_VITE_URL":            "http://localhost:5173",
-	}}.load()
+	}}.load(t.Context())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -327,7 +328,7 @@ func TestFileVariable(t *testing.T) {
 	cfg, err := setup{env: env{
 		"PISATI_SERVER_BASE_URL":      baseURL,
 		"PISATI_KEYS_MASTER_KEY_FILE": "/run/secrets/pisati-master-key",
-	}}.load()
+	}}.load(t.Context())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -354,7 +355,7 @@ func TestFileVariable(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := s.load()
+			_, err := s.load(t.Context())
 			refused(t, err, config.ErrInvalid, "(PISATI_KEYS_MASTER_KEY)", "(PISATI_KEYS_MASTER_KEY_FILE)")
 			if strings.Contains(err.Error(), secret) {
 				t.Errorf("error %q holds the secret", err)
@@ -368,7 +369,7 @@ func TestFileVariable(t *testing.T) {
 		_, err := setup{
 			files: fstest.MapFS{"pisati.toml": tomlFile("[keys]\nmaster_key = \"" + secret + "\"\n")},
 			env:   env{"PISATI_SERVER_BASE_URL": baseURL},
-		}.load()
+		}.load(t.Context())
 		refused(t, err, config.ErrInvalid, "keys.master_key ", "keys.master_key_file", "PISATI_KEYS_MASTER_KEY_FILE")
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("error %q holds the secret", err)
@@ -381,9 +382,33 @@ func TestFileVariable(t *testing.T) {
 		_, err := setup{env: env{
 			"PISATI_SERVER_BASE_URL":      baseURL,
 			"PISATI_KEYS_MASTER_KEY_FILE": "secrets/key",
-		}}.load()
+		}}.load(t.Context())
 		refused(t, err, config.ErrInvalid, "PISATI_KEYS_MASTER_KEY_FILE", "absolute")
 	})
+
+	// The key itself, given by mistake where its file's path belongs, is
+	// never repeated. Built here, so the source holds no key-like text.
+	key := strings.Repeat("q7Zx+9kP", 4) + "=="
+	for name, s := range map[string]setup{
+		"the key in the variable": {env: env{
+			"PISATI_SERVER_BASE_URL":      baseURL,
+			"PISATI_KEYS_MASTER_KEY_FILE": key,
+		}},
+		"the key in a file": {
+			files: fstest.MapFS{"pisati.toml": tomlFile("[keys]\nmaster_key_file = \"" + key + "\"\n")},
+			env:   env{"PISATI_SERVER_BASE_URL": baseURL},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := s.load(t.Context())
+			refused(t, err, config.ErrInvalid, "keys.master_key_file (PISATI_KEYS_MASTER_KEY_FILE)", "absolute")
+			if strings.Contains(err.Error(), key[:8]) {
+				t.Errorf("error %q repeats the value", err)
+			}
+		})
+	}
 }
 
 func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
@@ -399,7 +424,7 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 			"PISATI_SERVER_LISTEN":   ":9000",
 			"HOME":                   "/home/someone",
 		},
-	}.load()
+	}.load(t.Context())
 	refused(t, err, config.ErrUnknown,
 		"pisati.toml:3:1: server.bsae_url",
 		"nope",
@@ -417,7 +442,7 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 
 		_, err := setup{
 			files: fstest.MapFS{"pisati.toml": tomlFile("[server]\nbsae_url = 1\nbase_url = \"https://blog.example.org\"\nlisten = \"nope\"\n")},
-		}.load()
+		}.load(t.Context())
 		refused(t, err, config.ErrUnknown, "server.bsae_url")
 		refused(t, err, config.ErrInvalid, "server.listen (PISATI_SERVER_LISTEN)", `"nope"`)
 		if errors.Is(err, config.ErrMissing) {
@@ -425,15 +450,23 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 		}
 	})
 
+	// A file that fails to decode gives no values, and says so. It may
+	// hold the base URL, so the base URL is not reported missing.
+	brokenFile := func(t *testing.T, err error, at string) {
+		t.Helper()
+		refused(t, err, config.ErrInvalid, at, "none of the file's settings are used")
+		if errors.Is(err, config.ErrMissing) {
+			t.Errorf("error %q reports a setting missing, though the file that failed may hold it", err)
+		}
+	}
+
 	t.Run("a value of the wrong type", func(t *testing.T) {
 		t.Parallel()
 
 		_, err := setup{
 			files: fstest.MapFS{"pisati.toml": tomlFile("[server]\nbase_url = \"https://blog.example.org\"\nlisten = 8080\n")},
-		}.load()
-		refused(t, err, config.ErrInvalid, "pisati.toml:3:", "server.listen")
-		// The file gives no values once it fails to decode, so nothing
-		// else is reported about the one that failed.
+		}.load(t.Context())
+		brokenFile(t, err, "pisati.toml:3:10: server.listen")
 		if strings.Contains(err.Error(), "(PISATI_SERVER_LISTEN)") {
 			t.Errorf("error %q reports server.listen twice", err)
 		}
@@ -443,11 +476,38 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 		t.Parallel()
 
 		_, err := setup{
-			files: fstest.MapFS{"pisati.toml.d/10-broken.toml": tomlFile("[server\n")},
-			env:   env{"PISATI_SERVER_BASE_URL": baseURL},
-		}.load()
-		refused(t, err, config.ErrInvalid, "pisati.toml.d/10-broken.toml:1:")
+			files: fstest.MapFS{"pisati.toml.d/10-broken.toml": tomlFile("[server]\nbase_url = \"https://blog.example.org\"\n[log\n")},
+		}.load(t.Context())
+		brokenFile(t, err, "pisati.toml.d/10-broken.toml:3:")
 	})
+
+	t.Run("a secret in a file that fails to decode", func(t *testing.T) {
+		t.Parallel()
+
+		const secret = "correct-horse-battery-staple"
+		for name, file := range map[string]string{
+			"before the failure": "[keys]\nmaster_key = \"" + secret + "\"\n[server\n",
+			"the failure itself": "[keys]\nmaster_key = [\"" + secret + "\"]\n",
+		} {
+			_, err := setup{
+				files: fstest.MapFS{"pisati.toml": tomlFile(file)},
+				env:   env{"PISATI_SERVER_BASE_URL": baseURL},
+			}.load(t.Context())
+			refused(t, err, config.ErrInvalid, "pisati.toml: keys.master_key (PISATI_KEYS_MASTER_KEY)", "keys.master_key_file (PISATI_KEYS_MASTER_KEY_FILE)")
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("%s: error %q holds the secret", name, err)
+			}
+		}
+	})
+}
+
+// knownEnv is every variable Pisati reads, in the table's order.
+var knownEnv = []string{
+	"PISATI_SERVER_BASE_URL", "PISATI_SERVER_LISTEN", "PISATI_SERVER_INTERNAL_LISTEN",
+	"PISATI_SERVER_TRUSTED_PROXIES", "PISATI_SERVER_HSTS", "PISATI_STORAGE_STATE_DIR",
+	"PISATI_LOG_LEVEL", "PISATI_LOG_FORMAT", "PISATI_TELEMETRY_OTLP_ENDPOINT",
+	"PISATI_TELEMETRY_PPROF", "PISATI_KEYS_MASTER_KEY", "PISATI_KEYS_MASTER_KEY_FILE",
+	"PISATI_DEV_VITE_URL",
 }
 
 func TestUnknownEnv(t *testing.T) {
@@ -467,15 +527,63 @@ func TestUnknownEnv(t *testing.T) {
 		t.Errorf("UnknownEnv changed its argument to %q", names)
 	}
 
-	known := []string{
-		"PISATI_SERVER_BASE_URL", "PISATI_SERVER_LISTEN", "PISATI_SERVER_INTERNAL_LISTEN",
-		"PISATI_SERVER_TRUSTED_PROXIES", "PISATI_SERVER_HSTS", "PISATI_STORAGE_STATE_DIR",
-		"PISATI_LOG_LEVEL", "PISATI_LOG_FORMAT", "PISATI_TELEMETRY_OTLP_ENDPOINT",
-		"PISATI_TELEMETRY_PPROF", "PISATI_KEYS_MASTER_KEY", "PISATI_KEYS_MASTER_KEY_FILE",
-		"PISATI_DEV_VITE_URL",
-	}
-	if got := config.UnknownEnv(known); len(got) != 0 {
+	if got := config.UnknownEnv(knownEnv); len(got) != 0 {
 		t.Errorf("UnknownEnv(every known name) = %q, want none", got)
+	}
+}
+
+func TestSettingsTable(t *testing.T) {
+	t.Parallel()
+
+	table := config.Table()
+	keys := make([]string, 0, len(table))
+	envs := make([]string, 0, len(table))
+	for _, r := range table {
+		keys = append(keys, r.Key)
+		envs = append(envs, r.Env)
+		if want := "PISATI_" + strings.ToUpper(strings.ReplaceAll(r.Key, ".", "_")); r.Env != want {
+			t.Errorf("%s: variable %s, want %s", r.Key, r.Env, want)
+		}
+		if r.Value == "" {
+			t.Errorf("%s: no spelling of its value", r.Key)
+		}
+	}
+
+	// A field with a tag but no row would be decoded and then ignored,
+	// and a row reaching the wrong field would set another setting.
+	if got := config.LayerKeys(); !slices.Equal(got, keys) {
+		t.Errorf("the TOML fields are %q, but the table has %q", got, keys)
+	}
+	if got := config.SlotKeys(); !slices.Equal(got, keys) {
+		t.Errorf("the table's rows reach the fields %q, want %q", got, keys)
+	}
+	if !slices.Equal(envs, knownEnv) {
+		t.Errorf("the table's variables are %q, want %q", envs, knownEnv)
+	}
+	if got := config.UnknownEnv(envs); len(got) != 0 {
+		t.Errorf("UnknownEnv does not know %q", got)
+	}
+
+	// What the table gives as each default is what Load applies when no
+	// source gives the setting.
+	defaults, err := setup{env: env{"PISATI_SERVER_BASE_URL": baseURL}}.load(t.Context())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, r := range table {
+		switch r.Absent {
+		case "default":
+			cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": baseURL, r.Env: r.Default}}.load(t.Context())
+			if err != nil || !reflect.DeepEqual(cfg, defaults) {
+				t.Errorf("%s=%q, its default, gives %+v, %v; want what giving nothing gives, %+v", r.Env, r.Default, cfg, err, defaults)
+			}
+		case "missing":
+			_, err := setup{}.load(t.Context())
+			refused(t, err, config.ErrMissing, r.Key, r.Env)
+		case "rules", "refused":
+		default:
+			t.Errorf("%s: absent %q", r.Key, r.Absent)
+		}
 	}
 }
 
@@ -485,7 +593,7 @@ func TestLoadListsEveryError(t *testing.T) {
 	_, err := setup{
 		files: fstest.MapFS{"pisati.toml": tomlFile("[server]\nbase_url = \"https://blog.example.org\"\nlisten = \"nope\"\n")},
 		env:   env{"PISATI_LOG_LEVEL": "loud", "PISATI_SERVER_HSTS": "always"},
-	}.load()
+	}.load(t.Context())
 	refused(t, err, config.ErrInvalid,
 		"server.listen (PISATI_SERVER_LISTEN)", `"nope"`,
 		"log.level (PISATI_LOG_LEVEL)", `"loud"`, "debug, info, warn or error",
@@ -527,7 +635,7 @@ func TestLoadRefusesPlainHTTPBaseURL(t *testing.T) {
 		t.Run(tt.in, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": tt.in}}.load()
+			cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": tt.in}}.load(t.Context())
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
@@ -581,7 +689,7 @@ func TestLoadRefusesPlainHTTPBaseURL(t *testing.T) {
 		t.Run(in, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := setup{env: env{"PISATI_SERVER_BASE_URL": in}}.load()
+			_, err := setup{env: env{"PISATI_SERVER_BASE_URL": in}}.load(t.Context())
 			refused(t, err, config.ErrInvalid, "server.base_url (PISATI_SERVER_BASE_URL)", "https")
 			if _, err := config.ParseBaseURL(in); !errors.Is(err, config.ErrInvalid) {
 				t.Errorf("ParseBaseURL(%q) = %v, want ErrInvalid", in, err)
@@ -651,7 +759,7 @@ func TestSettingRules(t *testing.T) {
 		t.Run(tt.env+"="+tt.value, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": baseURL, tt.env: tt.value}}.load()
+			cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": baseURL, tt.env: tt.value}}.load(t.Context())
 			if tt.want == "" {
 				refused(t, err, config.ErrInvalid, tt.env)
 				return
@@ -690,7 +798,7 @@ func TestStateDirFromSystemd(t *testing.T) {
 				tt.s.env = env{}
 			}
 			tt.s.env["PISATI_SERVER_BASE_URL"] = baseURL
-			cfg, err := tt.s.load()
+			cfg, err := tt.s.load(t.Context())
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
@@ -724,7 +832,7 @@ func TestStateDirFromSystemd(t *testing.T) {
 				tt.s.env = env{}
 			}
 			tt.s.env["PISATI_SERVER_BASE_URL"] = baseURL
-			_, err := tt.s.load()
+			_, err := tt.s.load(t.Context())
 			refused(t, err, config.ErrInvalid, tt.name)
 		})
 	}
@@ -758,7 +866,7 @@ func TestMasterKeySourceOrder(t *testing.T) {
 				tt.s.env = env{}
 			}
 			tt.s.env["PISATI_SERVER_BASE_URL"] = baseURL
-			cfg, err := tt.s.load()
+			cfg, err := tt.s.load(t.Context())
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
@@ -787,7 +895,7 @@ func TestDevViteURLOnlyWithLocalhost(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": tt.base, "PISATI_DEV_VITE_URL": tt.vite}}.load()
+			cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": tt.base, "PISATI_DEV_VITE_URL": tt.vite}}.load(t.Context())
 			if tt.want == "" {
 				refused(t, err, config.ErrInvalid, "dev.vite_url (PISATI_DEV_VITE_URL)", "localhost")
 				return
@@ -814,13 +922,18 @@ func TestSourcesThatCannotBeRead(t *testing.T) {
 
 	base := env{"PISATI_SERVER_BASE_URL": baseURL}
 
+	// None of these is told the base URL: a file that cannot be read may
+	// hold it, so it is not reported missing.
 	t.Run("files", func(t *testing.T) {
 		t.Parallel()
 
-		src := base.sources()
+		src := env{}.sources()
 		src.Files = brokenFS{err: fs.ErrPermission}
-		_, err := config.Load(src, "")
+		_, err := config.Load(t.Context(), src, "")
 		refused(t, err, fs.ErrPermission, "pisati.toml")
+		if errors.Is(err, config.ErrMissing) {
+			t.Errorf("error %q reports a setting missing", err)
+		}
 	})
 
 	t.Run("credentials", func(t *testing.T) {
@@ -828,7 +941,7 @@ func TestSourcesThatCannotBeRead(t *testing.T) {
 
 		src := base.sources()
 		src.Credentials = brokenFS{err: fs.ErrPermission}
-		_, err := config.Load(src, "")
+		_, err := config.Load(t.Context(), src, "")
 		refused(t, err, fs.ErrPermission, "pisati-master-key")
 	})
 
@@ -841,15 +954,105 @@ func TestSourcesThatCannotBeRead(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := setup{files: files, env: base}.load()
+			_, err := setup{files: files}.load(t.Context())
 			if err == nil {
 				t.Fatal("Load succeeded")
 			}
 			if !strings.Contains(err.Error(), "pisati.toml") {
 				t.Errorf("error %q does not name the file", err)
 			}
+			if errors.Is(err, config.ErrMissing) {
+				t.Errorf("error %q reports a setting missing", err)
+			}
 		})
 	}
+}
+
+// watchedFS records each name opened from fs, after calling before with
+// it.
+type watchedFS struct {
+	fs     fstest.MapFS
+	before func(name string)
+	opened []string
+}
+
+func (w *watchedFS) Open(name string) (fs.File, error) {
+	w.before(name)
+	w.opened = append(w.opened, name)
+	return w.fs.Open(name)
+}
+
+func TestLoadStopsWhenCancelled(t *testing.T) {
+	t.Parallel()
+
+	files := fstest.MapFS{
+		"pisati.toml":              tomlFile("[server]\nbase_url = \"https://blog.example.org\"\n"),
+		"pisati.toml.d/10-a.toml":  tomlFile("[log]\nlevel = \"debug\"\n"),
+		"pisati.toml.d/20-b.toml":  tomlFile("[log]\nformat = \"text\"\n"),
+		"pisati.toml.d/README.txt": tomlFile("not read"),
+	}
+	key := fstest.MapFS{"pisati-master-key": tomlFile("key")}
+
+	// Each case cancels when Load opens the file named, and must stop
+	// before reading anything after it.
+	tests := map[string]struct {
+		cancelAt  string // "" cancels before Load starts
+		wantFiles []string
+	}{
+		"before it starts":      {cancelAt: "", wantFiles: nil},
+		"after pisati.toml":     {cancelAt: "pisati.toml", wantFiles: []string{"pisati.toml"}},
+		"after the first entry": {cancelAt: "pisati.toml.d/10-a.toml", wantFiles: []string{"pisati.toml", "pisati.toml.d", "pisati.toml.d/10-a.toml"}},
+		"after the last file":   {cancelAt: "pisati.toml.d/20-b.toml", wantFiles: []string{"pisati.toml", "pisati.toml.d", "pisati.toml.d/10-a.toml", "pisati.toml.d/20-b.toml"}},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tt.cancelAt == "" {
+				cancel()
+			}
+			cancelAt := func(name string) {
+				if name == tt.cancelAt {
+					cancel()
+				}
+			}
+			watched := &watchedFS{fs: files, before: cancelAt}
+			creds := &watchedFS{fs: key, before: cancelAt}
+			src := env{}.sources()
+			src.Files, src.Credentials = watched, creds
+
+			cfg, err := config.Load(ctx, src, "")
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Load = %v, want an error wrapping context.Canceled", err)
+			}
+			if !reflect.DeepEqual(cfg, config.Config{}) {
+				t.Errorf("Load was cancelled but returned %+v", cfg)
+			}
+			if !slices.Equal(watched.opened, tt.wantFiles) {
+				t.Errorf("Load opened %q, want %q", watched.opened, tt.wantFiles)
+			}
+			if len(creds.opened) != 0 {
+				t.Errorf("Load looked up credentials %q after it was cancelled", creds.opened)
+			}
+		})
+	}
+
+	t.Run("not cancelled", func(t *testing.T) {
+		t.Parallel()
+
+		src := env{}.sources()
+		src.Files = &watchedFS{fs: files, before: func(string) {}}
+		src.Credentials = &watchedFS{fs: key, before: func(string) {}}
+		cfg, err := config.Load(t.Context(), src, "")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Log.Level != slog.LevelDebug || cfg.Log.Format != config.LogText || source(cfg.Keys.MasterKey) != "credential pisati-master-key" {
+			t.Errorf("Load read %v, %v and %s, want every file and the credential", cfg.Log.Level, cfg.Log.Format, source(cfg.Keys.MasterKey))
+		}
+	})
 }
 
 func TestSecretRedacts(t *testing.T) {
@@ -930,8 +1133,8 @@ func FuzzLoad(f *testing.F) {
 			s.creds = fstest.MapFS{"pisati-master-key": tomlFile("key")}
 		}
 
-		cfg, err := s.load()
-		again, errAgain := s.load()
+		cfg, err := s.load(t.Context())
+		again, errAgain := s.load(t.Context())
 		if fmt.Sprint(err) != fmt.Sprint(errAgain) || !reflect.DeepEqual(cfg, again) {
 			t.Fatalf("Load is not deterministic: %v, %v", err, errAgain)
 		}

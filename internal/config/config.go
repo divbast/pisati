@@ -3,8 +3,12 @@
 
 // Package config loads Pisati's configuration once, at start: built-in
 // defaults, then pisati.toml, then the drop-ins in pisati.toml.d, then
-// PISATI_* variables. Load checks every value as it reads it and reports
-// every problem at once.
+// PISATI_* variables. One table of settings drives every step.
+//
+// Load checks every value it reads and reports, in one error, every
+// unknown key in each file, every unknown PISATI_ variable and every value
+// refused. A file with a syntax or type error is reported at that error
+// alone, since decoding stops there, and gives none of its settings.
 //
 // The package reads nothing by itself: files reach it through fs.FS and
 // the environment through a lookup function, both built in main.
@@ -413,17 +417,38 @@ func loopback(host string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-// parseChoice returns the one of all that spell spells as s, or an error
-// wrapping ErrInvalid that lists them.
-func parseChoice[T comparable](s string, spell func(T) string, all ...T) (T, error) {
-	names := make([]string, len(all))
-	for i, v := range all {
-		if spell(v) == s {
+// choices is a closed set of values, at least one, each spelt as spell
+// gives it.
+type choices[T comparable] struct {
+	spell func(T) string
+	all   []T
+}
+
+// oneOf returns the closed set of first and the rest.
+func oneOf[T comparable](spell func(T) string, first T, rest ...T) choices[T] {
+	return choices[T]{spell: spell, all: append([]T{first}, rest...)}
+}
+
+// spelling lists the spellings, as "a, b or c".
+func (c choices[T]) spelling() string {
+	names := make([]string, len(c.all))
+	for i, v := range c.all {
+		names[i] = c.spell(v)
+	}
+	if len(names) == 1 {
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
+}
+
+// parse returns the value spelt s, or an error wrapping ErrInvalid that
+// lists the spellings.
+func (c choices[T]) parse(s string) (T, error) {
+	for _, v := range c.all {
+		if c.spell(v) == s {
 			return v, nil
 		}
-		names[i] = spell(v)
 	}
 	var zero T
-	want := strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
-	return zero, fmt.Errorf("%w value %q: want %s", ErrInvalid, s, want)
+	return zero, fmt.Errorf("%w value %q: want %s", ErrInvalid, s, c.spelling())
 }

@@ -5,6 +5,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +13,6 @@ import (
 	"log/slog"
 	"net/netip"
 	"path"
-	"path/filepath"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -29,9 +29,7 @@ const (
 	// masterKeyCredential is the credential the master key is read from.
 	masterKeyCredential = "pisati-master-key"
 
-	defaultListen         = ":8080"
-	defaultInternalListen = ":8081"
-	defaultStateDir       = "/var/lib/pisati"
+	defaultStateDir = "/var/lib/pisati"
 )
 
 // Sources is where Load reads the configuration from. Its zero value
@@ -49,7 +47,7 @@ type Sources struct {
 	Credentials fs.FS
 }
 
-// Load returns the configuration src gives, or an error that joins every
+// Load returns the configuration src gives, or an error joining every
 // problem it found, each naming the setting, file or variable at fault.
 //
 // Each source overrides the ones before it: the built-in defaults, then
@@ -59,75 +57,142 @@ type Sources struct {
 // stateDirEnv is $STATE_DIRECTORY, or empty when it is not set: when set,
 // it replaces the default state directory.
 //
+// The error reports every unknown key in each file, every unknown
+// PISATI_ variable, and every value read that its rule refuses. Decoding a
+// file stops at its first syntax or type error, so a file with one is
+// reported once, at that error, and none of its settings are used; no
+// setting is then reported missing, as that file may hold it. A refused
+// secret it holds before the error is still reported.
+//
 // A secret is never given in place: keys.master_key in any source is an
 // error. The master key comes from the file keys.master_key_file names,
 // else the credential pisati-master-key when Credentials holds it, else
 // it is Generated.
 //
-// On an error, the Config is the zero Config.
-func Load(src Sources, stateDirEnv string) (Config, error) {
-	merged, errs := readFiles(src.Files)
+// Load checks ctx before each file it reads, and stops with ctx's error
+// once it is done. On any error, the Config is the zero Config.
+func Load(ctx context.Context, src Sources, stateDirEnv string) (Config, error) {
+	files, err := readFiles(ctx, src.Files)
+	if err != nil {
+		return Config{}, err
+	}
+	merged := files.values
 	env := fromEnv(src.Env)
 	overlay(&merged, &env)
+
+	errs := files.errs
 	for _, name := range UnknownEnv(src.EnvNames) {
 		errs = append(errs, fmt.Errorf("%s: %w", name, ErrUnknown))
 	}
-	cfg, buildErrs := build(merged, src.Credentials, stateDirEnv)
-	errs = append(errs, buildErrs...)
+	cfg, refusedValues, missing := build(merged)
+	errs = append(errs, refusedValues...)
+	if len(files.unread) == 0 {
+		errs = append(errs, missing...)
+	}
+
+	// systemd's $STATE_DIRECTORY replaces the default, but not a value a
+	// source gives.
+	if merged.Storage.StateDir == nil && stateDirEnv != "" {
+		if dir, err := stateDirectory(stateDirEnv); err != nil {
+			errs = append(errs, fmt.Errorf("STATE_DIRECTORY: %w", err))
+		} else {
+			cfg.Storage.StateDir = dir
+		}
+	}
+	if merged.Keys.MasterKeyFile == nil {
+		if err := stopped(ctx); err != nil {
+			return Config{}, err
+		}
+		if cfg.Keys.MasterKey, err = credentialSource(src.Credentials); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
 	}
 	return cfg, nil
 }
 
-// readFiles merges pisati.toml and pisati.toml.d/*.toml from fsys, in
-// that order and the drop-ins in name order.
-func readFiles(fsys fs.FS) (layer, []error) {
-	var merged layer
-	if fsys == nil {
-		return merged, nil
+// stopped returns ctx's error, said to have stopped Load, or nil while
+// ctx is live.
+func stopped(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("configuration not loaded: %w", err)
 	}
-	names := []string{mainFile}
+	return nil
+}
+
+// configFiles is what the configuration files gave.
+type configFiles struct {
+	// values merges the settings of every file read in full.
+	values layer
+	// errs holds each problem found reading them.
+	errs []error
+	// unread names each file or directory that could not be read in
+	// full, none of whose settings are used.
+	unread []string
+}
+
+// readFiles reads pisati.toml, then each pisati.toml.d/*.toml in name
+// order, from fsys, checking ctx before each read. Its error is ctx's
+// alone: every other problem is in the configFiles.
+func readFiles(ctx context.Context, fsys fs.FS) (configFiles, error) {
+	var files configFiles
+	if fsys == nil {
+		return files, nil
+	}
+	if err := stopped(ctx); err != nil {
+		return configFiles{}, err
+	}
+	files.read(fsys, mainFile)
+
+	if err := stopped(ctx); err != nil {
+		return configFiles{}, err
+	}
 	entries, err := fs.ReadDir(fsys, dropInDir)
-	var errs []error
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-	case err != nil:
-		errs = append(errs, err)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		files.errs = append(files.errs, err)
+		files.unread = append(files.unread, dropInDir)
 	}
 	// fs.ReadDir returns the entries sorted by name.
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".toml") {
-			names = append(names, path.Join(dropInDir, e.Name()))
+		if !strings.HasSuffix(e.Name(), ".toml") {
+			continue
 		}
+		if err := stopped(ctx); err != nil {
+			return configFiles{}, err
+		}
+		files.read(fsys, path.Join(dropInDir, e.Name()))
 	}
-	for _, name := range names {
-		l, fileErrs := readFile(fsys, name)
-		errs = append(errs, fileErrs...)
-		overlay(&merged, &l)
-	}
-	return merged, errs
+	return files, nil
 }
 
-// readFile decodes the file name in fsys strictly into a layer. A file
-// that does not exist gives an empty layer, and so does one that fails
-// to decode: go-toml stops at the failure, and may leave the field it
-// was filling set to nothing. Unknown keys alone fail nothing: go-toml
-// decodes the rest of the file, and the layer keeps it.
-func readFile(fsys fs.FS, name string) (layer, []error) {
+// read decodes the file name in fsys strictly and merges its settings
+// into the values. A file that does not exist gives none. Unknown keys
+// alone spoil nothing: go-toml decodes the rest of the file. But go-toml
+// stops at any other failure, and may leave the field it was filling set
+// to nothing, so such a file gives none of its settings, though a refused
+// secret decoded before the failure is still reported.
+func (f *configFiles) read(fsys fs.FS, name string) {
 	data, err := readBounded(fsys, name)
 	if errors.Is(err, fs.ErrNotExist) {
-		return layer{}, nil
+		return
 	}
 	if err != nil {
-		return layer{}, []error{err}
+		f.errs = append(f.errs, err)
+		f.unread = append(f.unread, name)
+		return
 	}
 	var l layer
 	err = toml.NewDecoder(bytes.NewReader(data)).DisallowUnknownFields().Decode(&l)
+	f.errs = append(f.errs, decodeErrors(name, err)...)
 	if _, unknownOnly := errors.AsType[*toml.StrictMissingError](err); err != nil && !unknownOnly {
-		return layer{}, decodeErrors(name, err)
+		f.errs = append(f.errs, refusals(name, &l)...)
+		f.unread = append(f.unread, name)
+		return
 	}
-	return l, decodeErrors(name, err)
+	overlay(&f.values, &l)
 }
 
 // readBounded reads the regular file name from fsys, refusing one larger
@@ -173,118 +238,109 @@ func decodeErrors(name string, err error) []error {
 		}
 		return errs
 	}
+	const unused = "none of the file's settings are used until it decodes"
 	if de, ok := errors.AsType[*toml.DecodeError](err); ok {
 		row, col := de.Position()
 		where := fmt.Sprintf("%s:%d:%d", name, row, col)
 		if key := de.Key(); len(key) > 0 {
 			where += ": " + strings.Join(key, ".")
 		}
-		return []error{fmt.Errorf("%s: %w: %s", where, ErrInvalid, strings.TrimPrefix(de.Error(), "toml: "))}
+		return []error{fmt.Errorf("%s: %w: %s; %s", where, ErrInvalid, strings.TrimPrefix(de.Error(), "toml: "), unused)}
 	}
-	return []error{fmt.Errorf("%s: %w: %w", name, ErrInvalid, err)}
+	return []error{fmt.Errorf("%s: %w: %w; %s", name, ErrInvalid, err, unused)}
 }
 
-// build turns the merged layer into a Config, putting each value through
-// its type's constructor, with the defaults for what no source set.
-func build(l layer, creds fs.FS, stateDirEnv string) (Config, []error) {
-	var c Config
+// refusals reports each refused setting l holds, found in the file name.
+func refusals(name string, l *layer) []error {
 	var errs []error
-	check := func(key string, err error) {
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", label(key), err))
+	for _, s := range settings() {
+		if k, ok := s.kind.(refused); ok && *k.field(l) != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, refusal(s, k)))
 		}
 	}
-	var err error
-
-	baseOK := false
-	if l.Server.BaseURL == nil || *l.Server.BaseURL == "" {
-		errs = append(errs, fmt.Errorf("%s: %w: give the https URL the site is served at", label("server.base_url"), ErrMissing))
-	} else {
-		c.Server.BaseURL, err = ParseBaseURL(*l.Server.BaseURL)
-		check("server.base_url", err)
-		baseOK = err == nil
-	}
-	c.Server.Listen, err = ParseListenAddr(or(l.Server.Listen, defaultListen))
-	check("server.listen", err)
-	c.Server.InternalListen, err = ParseListenAddr(or(l.Server.InternalListen, defaultInternalListen))
-	check("server.internal_listen", err)
-	var proxies []string
-	if l.Server.TrustedProxies != nil {
-		proxies = *l.Server.TrustedProxies
-	}
-	c.Server.TrustedProxies = make([]netip.Prefix, 0, len(proxies))
-	for _, p := range proxies {
-		if prefix, err := parsePrefix(p); err != nil {
-			check("server.trusted_proxies", err)
-		} else {
-			c.Server.TrustedProxies = append(c.Server.TrustedProxies, prefix)
-		}
-	}
-	if v := l.Server.HSTS; v != nil {
-		c.Server.HSTS, err = parseChoice(*v, HSTSScope.String, HSTSHostOnly, HSTSIncludeSubdomains, HSTSPreload)
-		check("server.hsts", err)
-	}
-
-	switch {
-	case l.Storage.StateDir != nil:
-		c.Storage.StateDir, err = parsePath(*l.Storage.StateDir)
-		check("storage.state_dir", err)
-	case strings.Contains(stateDirEnv, ":"):
-		errs = append(errs, fmt.Errorf("STATE_DIRECTORY: %w value %q: it lists more than one directory; give Pisati one", ErrInvalid, stateDirEnv))
-	case stateDirEnv != "":
-		c.Storage.StateDir, err = parsePath(stateDirEnv)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("STATE_DIRECTORY: %w", err))
-		}
-	default:
-		c.Storage.StateDir = defaultStateDir
-	}
-
-	if v := l.Log.Level; v != nil {
-		c.Log.Level, err = parseChoice(*v, levelName, slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError)
-		check("log.level", err)
-	}
-	if v := l.Log.Format; v != nil {
-		c.Log.Format, err = parseChoice(*v, LogFormat.String, LogJSON, LogText)
-		check("log.format", err)
-	}
-
-	c.Telemetry.OTLPEndpoint, err = ParseOptionalURL(or(l.Telemetry.OTLPEndpoint, ""))
-	check("telemetry.otlp_endpoint", err)
-	if v := l.Telemetry.Pprof; v != nil {
-		c.Telemetry.Pprof, err = parseChoice(*v, Switch.String, Off, On)
-		check("telemetry.pprof", err)
-	}
-
-	// The value itself is never repeated: it would put the secret in
-	// the error.
-	if l.Keys.MasterKey != nil {
-		errs = append(errs, fmt.Errorf("%s: %w: a secret is read only from a file; name the file with %s", label("keys.master_key"), ErrInvalid, label("keys.master_key_file")))
-	}
-	c.Keys.MasterKey, err = masterKeySource(l.Keys.MasterKeyFile, creds)
-	if err != nil {
-		errs = append(errs, err)
-	}
-
-	c.Dev.ViteURL, err = ParseOptionalURL(or(l.Dev.ViteURL, ""))
-	check("dev.vite_url", err)
-	if u, ok := c.Dev.ViteURL.Get(); ok && baseOK && (!c.Server.BaseURL.local || !loopback(u.Hostname())) {
-		errs = append(errs, fmt.Errorf("%s: %w value %q: the Vite dev server is for development alone, so it and the base URL must both be on localhost, 127.0.0.1 or [::1]", label("dev.vite_url"), ErrInvalid, u.String()))
-	}
-	return c, errs
+	return errs
 }
 
-// masterKeySource returns where the master key comes from: the file
-// keys.master_key_file names, else the credential when creds holds it,
-// else Generated.
-func masterKeySource(file *string, creds fs.FS) (SecretSource, error) {
-	if file != nil {
-		p, err := parsePath(*file)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", label("keys.master_key_file"), err)
+// refusal is the error for the refused setting s, given. It never
+// repeats the value, which is the secret itself.
+func refusal(s setting, k refused) error {
+	return fmt.Errorf("%s: %w: a secret is read only from a file; name the file with %s", s.label(), ErrInvalid, label(k.instead))
+}
+
+// build turns the merged layer into a Config, going by the settings
+// table: each value given, or each default, goes through its setting's
+// apply. It returns the values refused, and apart from them the settings
+// missing, which Load reports only when it read every file.
+func build(l layer) (c Config, refusedValues, missing []error) {
+	for _, s := range settings() {
+		switch k := s.kind.(type) {
+		case text:
+			v, given := deref(*k.field(&l))
+			if s.absent == reportMissing && v == "" {
+				given = false
+			}
+			if !given {
+				switch s.absent {
+				case applyDefault:
+					v = s.def
+				case reportMissing:
+					missing = append(missing, fmt.Errorf("%s: %w: want %s", s.label(), ErrMissing, s.value))
+					continue
+				case leaveToRules:
+					continue
+				}
+			}
+			if err := k.apply(&c, v); err != nil {
+				refusedValues = append(refusedValues, fmt.Errorf("%s: %w", s.label(), err))
+			}
+		case list:
+			p := *k.field(&l)
+			var items []string
+			if p != nil {
+				items = *p
+			} else {
+				switch s.absent {
+				case applyDefault:
+					items = splitList(s.def)
+				case reportMissing:
+					missing = append(missing, fmt.Errorf("%s: %w: want %s", s.label(), ErrMissing, s.value))
+					continue
+				case leaveToRules:
+					continue
+				}
+			}
+			for _, err := range k.apply(&c, items) {
+				refusedValues = append(refusedValues, fmt.Errorf("%s: %w", s.label(), err))
+			}
+		case refused:
+			if *k.field(&l) != nil {
+				refusedValues = append(refusedValues, refusal(s, k))
+			}
 		}
-		return FromFile{Path: p}, nil
 	}
+	return c, refusedValues, missing
+}
+
+// deref returns *p and true, or "" and false when p is nil.
+func deref(p *string) (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	return *p, true
+}
+
+// stateDirectory returns systemd's $STATE_DIRECTORY, s, as the state
+// directory: one absolute, clean path.
+func stateDirectory(s string) (string, error) {
+	if strings.Contains(s, ":") {
+		return "", fmt.Errorf("%w value %q: it lists more than one directory; give Pisati one", ErrInvalid, s)
+	}
+	return parsePath(s)
+}
+
+// credentialSource returns the credential as the master key's source
+// when creds holds it, else Generated.
+func credentialSource(creds fs.FS) (SecretSource, error) {
 	if creds == nil {
 		return Generated{}, nil
 	}
@@ -297,14 +353,6 @@ func masterKeySource(file *string, creds fs.FS) (SecretSource, error) {
 	default:
 		return nil, fmt.Errorf("CREDENTIALS_DIRECTORY: %w", err)
 	}
-}
-
-// parsePath returns s when it is an absolute, clean path.
-func parsePath(s string) (string, error) {
-	if !filepath.IsAbs(s) || filepath.Clean(s) != s {
-		return "", fmt.Errorf("%w value %q: want an absolute, clean path", ErrInvalid, s)
-	}
-	return s, nil
 }
 
 // parsePrefix returns s, a CIDR prefix with no host bits set or a bare
@@ -331,12 +379,4 @@ func parsePrefix(s string) (netip.Prefix, error) {
 // error.
 func levelName(l slog.Level) string {
 	return strings.ToLower(l.String())
-}
-
-// or returns *p, or def when p is nil.
-func or(p *string, def string) string {
-	if p == nil {
-		return def
-	}
-	return *p
 }
