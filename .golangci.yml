@@ -145,6 +145,7 @@ linters:
             - github.com/ncruces/go-sqlite3
             - github.com/pelletier/go-toml/v2
             - github.com/pressly/goose/v3
+            - golang.org/x/crypto/chacha20poly1305 # XChaCha20-Poly1305, which seals fields and wraps the data keys
           deny:
             - pkg: log$
               desc: use log/slog
@@ -157,6 +158,7 @@ linters:
             - github.com/divbast/pisati
             - go.uber.org/goleak
             - github.com/divbast/ci # the acceptance suite's harness and contract
+            - golang.org/x/crypto/chacha20poly1305 # checks the sealed format against the cipher itself
     gosec:
       excludes:
         - G101 # secrets: betterleaks
