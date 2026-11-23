@@ -105,15 +105,18 @@ func (o GuardedOptions) problems() []error {
 //     198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4 and
 //     240.0.0.0/4;
 //   - IPv6: every address outside 2000::/3, the global unicast space,
-//     and within it 2001::/23, which holds Teredo and 2001:2::/48,
-//     2001:db8::/32 and 3fff::/20. Outside 2000::/3 lie, among others,
-//     the unspecified, loopback, IPv4-compatible and IPv4-translated
-//     addresses, the unique local, link-local, site-local and multicast
-//     ranges, 100::/64, 100:0:0:1::/64 and 5f00::/16, and both NAT64
-//     prefixes, 64:ff9b::/96 and 64:ff9b:1::/48, so a host reached only
-//     through NAT64 is refused, whatever IPv4 address it embeds;
-//   - a 6to4 address (2002::/16) whose embedded IPv4 address is refused
-//     above.
+//     but NAT64's, and within it 2001::/23, which holds Teredo and
+//     2001:2::/48, 2001:db8::/32 and 3fff::/20. Outside 2000::/3 lie,
+//     among others, the unspecified, loopback, IPv4-compatible and
+//     IPv4-translated addresses, the unique local, link-local, site-local
+//     and multicast ranges, 100::/64, 100:0:0:1::/64, 5f00::/16, and
+//     64:ff9b:1::/48, the local-use translation prefix, which embeds an
+//     IPv4 address wherever the local network chooses;
+//   - a NAT64 address (64:ff9b::/96), whose last 32 bits are the IPv4
+//     address it reaches, or a 6to4 address (2002::/16), when the IPv4
+//     address it embeds is refused above. A NAT64 address that embeds a
+//     public IPv4 address is allowed, so that an IPv6-only network can
+//     reach IPv4 hosts through its translator.
 //
 // The check is made as each connection is: a host's addresses are looked
 // up, the refused ones are skipped, and the rest are tried in turn, each
@@ -347,11 +350,12 @@ const maxResponseHeader = 64 << 10
 // addressCheck says which addresses a GuardedClient may connect to.
 type addressCheck struct {
 	// refused4 is refused outright. Of IPv6, only global6 may be
-	// connected to, less refused6.
+	// connected to, less refused6, and NAT64's addresses.
 	refused4, refused6 []netip.Prefix
 	global6            netip.Prefix
-	// sixToFour embeds an IPv4 address, which is checked in turn.
-	sixToFour netip.Prefix
+	// nat64 and sixToFour embed an IPv4 address, which is checked in
+	// turn.
+	nat64, sixToFour netip.Prefix
 }
 
 // newAddressCheck returns the check GuardedClient's doc describes.
@@ -388,8 +392,9 @@ func newAddressCheck() addressCheck {
 			"2001:db8::/32", // documentation (RFC 3849)
 			"3fff::/20",     // documentation (RFC 9637)
 		),
-		global6:   netip.MustParsePrefix("2000::/3"), // global unicast (RFC 4291)
-		sixToFour: netip.MustParsePrefix("2002::/16"),
+		global6:   netip.MustParsePrefix("2000::/3"),     // global unicast (RFC 4291)
+		nat64:     netip.MustParsePrefix("64:ff9b::/96"), // the NAT64 well-known prefix (RFC 6052)
+		sixToFour: netip.MustParsePrefix("2002::/16"),    // 6to4 (RFC 3056)
 	}
 }
 
@@ -398,14 +403,18 @@ func (k addressCheck) allows(a netip.Addr) bool {
 	// Unmapping checks an IPv4-mapped address as the IPv4 address it is.
 	a = plain(a)
 	if a.Is6() {
-		if !k.global6.Contains(a) || slices.ContainsFunc(k.refused6, func(p netip.Prefix) bool { return p.Contains(a) }) {
+		b := a.As16()
+		switch {
+		// Ahead of the rule on 2000::/3, which NAT64's prefix lies outside.
+		case k.nat64.Contains(a):
+			a = netip.AddrFrom4([4]byte(b[12:16]))
+		case !k.global6.Contains(a), slices.ContainsFunc(k.refused6, func(p netip.Prefix) bool { return p.Contains(a) }):
 			return false
-		}
-		if !k.sixToFour.Contains(a) {
+		case k.sixToFour.Contains(a):
+			a = netip.AddrFrom4([4]byte(b[2:6]))
+		default:
 			return true
 		}
-		b := a.As16()
-		a = netip.AddrFrom4([4]byte(b[2:6]))
 	}
 	return a.Is4() && !slices.ContainsFunc(k.refused4, func(p netip.Prefix) bool { return p.Contains(a) })
 }

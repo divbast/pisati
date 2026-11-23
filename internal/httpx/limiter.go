@@ -133,9 +133,8 @@ func (o LimiterOptions) problems() []error {
 // with no client address, or an invalid one, share one bucket. A refused
 // request makes no bucket, so that a client refused cannot crowd others
 // out of the table with buckets for addresses it never had served. Make
-// a Limiter with
-// NewLimiter. The zero Limiter limits nothing: its Middleware is a bug,
-// and panics.
+// a Limiter with NewLimiter. The zero Limiter limits nothing: its
+// Middleware is a bug, and panics.
 //
 // The table of buckets is bounded, and starts no goroutine to keep it
 // so. It holds at most MaxEntries buckets, of both kinds. A bucket unused

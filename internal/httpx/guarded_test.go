@@ -121,22 +121,17 @@ func urlOf(a netip.Addr) string {
 }
 
 // spellings returns a and, when a is an IPv4 address, the IPv6 addresses
-// that embed it and are checked as it is: IPv4-mapped, and as 6to4.
+// that embed it and are checked as it is: IPv4-mapped, under the NAT64
+// well-known prefix, and as 6to4.
 func spellings(a netip.Addr) []netip.Addr {
 	if !a.Is4() {
 		return []netip.Addr{a}
 	}
 	v4 := a.As4()
 	mapped := netip.AddrFrom16(a.As16())
+	nat64 := [16]byte{0x00, 0x64, 0xff, 0x9b, 12: v4[0], 13: v4[1], 14: v4[2], 15: v4[3]}
 	sixToFour := [16]byte{0x20, 0x02, v4[0], v4[1], v4[2], v4[3], 15: 1}
-	return []netip.Addr{a, mapped, netip.AddrFrom16(sixToFour)}
-}
-
-// nat64 returns a, an IPv4 address, under the NAT64 well-known prefix,
-// which lies outside 2000::/3 and so is refused whatever it embeds.
-func nat64(a netip.Addr) netip.Addr {
-	v4 := a.As4()
-	return netip.AddrFrom16([16]byte{0x00, 0x64, 0xff, 0x9b, 12: v4[0], 13: v4[1], 14: v4[2], 15: v4[3]})
+	return []netip.Addr{a, mapped, netip.AddrFrom16(nat64), netip.AddrFrom16(sixToFour)}
 }
 
 // refusedRanges are the ranges the GuardedClient refuses, each with
@@ -181,8 +176,14 @@ func refusedRanges() []struct {
 		{name: "outside 2000::/3", addrs: []string{
 			"1fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "4000::", "::1:0:0", "::fffe:ffff:ffff:ffff", "::ffff:1:0:0",
 			"100:0:0:2::", "5eff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "5f01::", "e000::",
+			// Just outside 64:ff9b::/96, which is read as the IPv4 address
+			// it embeds, with a public one where it would be.
+			"64:ff9a:ffff:ffff:ffff:ffff:102:304", "64:ff9b::1:102:304",
 		}},
-		{name: "NAT64 64:ff9b::/96, whatever it embeds", addrs: []string{"64:ff9b::", "64:ff9b::102:304", "64:ff9b::808:808", "64:ff9b::ffff:ffff"}},
+		// The bounds of 64:ff9b::/96 embed 0.0.0.0 and 255.255.255.255.
+		{name: "NAT64 embedding a refused IPv4 address", addrs: []string{
+			"64:ff9b::", "64:ff9b::a00:1", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "64:ff9b::c0a8:101", "64:ff9b::ffff:ffff",
+		}},
 	}
 }
 
@@ -199,6 +200,8 @@ func allowedAddrs() []string {
 		"2000::", "2001:db7:ffff:ffff:ffff:ffff:ffff:ffff", "2001:db9::", "2001:200::1", "2a00:1450:4001::1",
 		"2606:4700::1111", "3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "3fff:1000::",
 		"3fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+		// NAT64 embedding a public IPv4 address, near both ends.
+		"64:ff9b::100:0", "64:ff9b::102:304", "64:ff9b::808:808", "64:ff9b::dfff:ffff",
 	}
 }
 
@@ -341,9 +344,6 @@ func FuzzAddressSpellings(f *testing.F) {
 			case got != want:
 				t.Fatalf("%v, a spelling of %v, refused: %t, want %t", a, v4, got, want)
 			}
-		}
-		if _, _, err := fetch(t.Context(), t, c, urlOf(nat64(v4))); !errors.Is(err, httpx.ErrAddressRefused) {
-			t.Fatalf("%v, outside 2000::/3: %v, want it refused", nat64(v4), err)
 		}
 	})
 }
