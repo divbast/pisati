@@ -124,6 +124,81 @@ func TestGeneratedMasterAndWarning(t *testing.T) {
 	wantSameMaster(t, first, named)
 }
 
+// TestGeneratedMasterSharedWithGroup loads the generated key from a
+// volume its group shares, as Kubernetes mounts one with fsGroup: each
+// mount, under the default fsGroupChangePolicy, adds read and write for
+// the group to every file, and read, write, search and setgid to every
+// directory.
+func TestGeneratedMasterSharedWithGroup(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		dir, file     fs.FileMode
+		makeDirBefore bool
+	}{
+		{name: "fsGroup", dir: fs.ModeSetgid | 0o770, file: 0o660},
+		{name: "group read", dir: 0o750, file: 0o640},
+		{name: "group write", dir: 0o730, file: 0o620},
+		{name: "setgid alone", dir: fs.ModeSetgid | 0o700, file: 0o600},
+		{name: "generated into a directory the group shares", dir: fs.ModeSetgid | 0o770, file: 0o600, makeDirBefore: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			keysDir := filepath.Join(dir, "keys")
+			if c.makeDirBefore {
+				if err := os.Mkdir(keysDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				chmod(t, keysDir, c.dir)
+			}
+			state, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := state.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			first, err := crypto.LoadMaster(t.Context(), config.Generated{}, nil, state, discard())
+			if err != nil {
+				t.Fatalf("LoadMaster(Generated): %v", err)
+			}
+			keyPath := filepath.Join(keysDir, "master.key")
+			if fi, err := os.Lstat(keyPath); err != nil || fi.Mode() != 0o600 {
+				t.Fatalf("the key file was made with mode %v (%v), want 0600 whatever its directory's", fi.Mode(), err)
+			}
+			chmod(t, keysDir, c.dir)
+			chmod(t, keyPath, c.file)
+
+			log, rec := newLogger()
+			again, err := crypto.LoadMaster(t.Context(), config.Generated{}, nil, state, log)
+			if err != nil {
+				t.Fatalf("LoadMaster(Generated) with the directory %v and the file %v: %v", c.dir, c.file, err)
+			}
+			if n := len(rec.all()); n != 0 {
+				t.Errorf("%d records logged, want none", n)
+			}
+			wantSameMaster(t, first, again)
+		})
+	}
+}
+
+// chmod sets the mode of the file at path to exactly mode, its setgid bit
+// included, failing the test unless the mode it then has is mode.
+func chmod(t *testing.T, path string, mode fs.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode() &^ fs.ModeType; got != mode {
+		t.Fatalf("%s: mode %v after chmod, want %v", path, got, mode)
+	}
+}
+
 // operatorSource is a way an operator names the key file: by its path, or
 // as a systemd credential.
 type operatorSource struct {
@@ -423,9 +498,7 @@ func TestRefusesBadKeyFiles(t *testing.T) {
 			if err := os.Mkdir(dir, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Chmod(dir, mode); err != nil {
-				t.Fatal(err)
-			}
+			chmod(t, dir, mode)
 			return dir
 		}
 		goodKey := func(t *testing.T, dir string, key []byte, mode os.FileMode) {
@@ -445,14 +518,17 @@ func TestRefusesBadKeyFiles(t *testing.T) {
 					t.Fatal(err)
 				}
 			}, "keys/master.key", "symbolic link"},
-			{"the key file readable by the group", func(t *testing.T, state string, key []byte) {
-				goodKey(t, keyDir(t, state, 0o700), key, 0o640)
-			}, "keys/master.key", "chmod 0600"},
 			{"the key file readable by others", func(t *testing.T, state string, key []byte) {
 				goodKey(t, keyDir(t, state, 0o700), key, 0o604)
 			}, "keys/master.key", "chmod 0600"},
-			{"the key file writable by the group", func(t *testing.T, state string, key []byte) {
-				goodKey(t, keyDir(t, state, 0o700), key, 0o620)
+			{"the key file writable by others", func(t *testing.T, state string, key []byte) {
+				goodKey(t, keyDir(t, state, 0o700), key, 0o602)
+			}, "keys/master.key", "chmod 0600"},
+			{"the key file executable by others", func(t *testing.T, state string, key []byte) {
+				goodKey(t, keyDir(t, state, 0o700), key, 0o601)
+			}, "keys/master.key", "chmod 0600"},
+			{"the key file the group shares readable by others", func(t *testing.T, state string, key []byte) {
+				goodKey(t, keyDir(t, state, fs.ModeSetgid|0o770), key, 0o664)
 			}, "keys/master.key", "chmod 0600"},
 			{"the key file a directory", func(t *testing.T, state string, _ []byte) {
 				if err := os.Mkdir(filepath.Join(keyDir(t, state, 0o700), "master.key"), 0o700); err != nil {
@@ -475,8 +551,14 @@ func TestRefusesBadKeyFiles(t *testing.T) {
 					t.Fatal(err)
 				}
 			}, "keys", "symbolic link"},
-			{"the keys directory open to the group", func(t *testing.T, state string, key []byte) {
-				goodKey(t, keyDir(t, state, 0o750), key, 0o600)
+			{"the keys directory the group shares open to others", func(t *testing.T, state string, key []byte) {
+				goodKey(t, keyDir(t, state, fs.ModeSetgid|0o775), key, 0o660)
+			}, "keys", "chmod 0700"},
+			{"the keys directory writable by others", func(t *testing.T, state string, key []byte) {
+				goodKey(t, keyDir(t, state, 0o702), key, 0o600)
+			}, "keys", "chmod 0700"},
+			{"the keys directory readable by others", func(t *testing.T, state string, key []byte) {
+				goodKey(t, keyDir(t, state, 0o704), key, 0o600)
 			}, "keys", "chmod 0700"},
 			{"the keys directory open to others", func(t *testing.T, state string, key []byte) {
 				goodKey(t, keyDir(t, state, 0o701), key, 0o600)

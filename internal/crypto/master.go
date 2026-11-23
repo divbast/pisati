@@ -109,6 +109,7 @@ func (m Master) aead() (cipher.AEAD, error) {
 		return nil, fmt.Errorf("%w master key: the zero Master holds none", ErrInvalid)
 	}
 	key := m.key()
+	defer clear(key[:])
 	return chacha20poly1305.NewX(key[:])
 }
 
@@ -159,12 +160,14 @@ func (m Master) unwrap(id keyID, wrapped []byte) ([keySize]byte, error) {
 	if err != nil {
 		return [keySize]byte{}, errUnwrap
 	}
+	defer clear(dk)
 	return [keySize]byte(dk), nil
 }
 
 // LoadMaster returns the master key from where src says it is. It checks
-// ctx before each file it opens, and each error it returns names the file,
-// unless the name may be the key itself.
+// ctx as it starts, before it touches any file, and again before it opens
+// a key file to read or to write it, and returns ctx's error then. Each
+// error it returns names the file, unless the name may be the key itself.
 //
 // A key file holds the 32-byte key in standard base64, 44 characters,
 // optionally followed by one newline: what openssl rand -base64 32
@@ -191,8 +194,10 @@ func (m Master) unwrap(id keyID, wrapped []byte) ([keySize]byte, error) {
 // alone writes this file, so it is held to stricter rules than a file
 // the operator names: LoadMaster refuses, with ErrKeyFile and an error
 // that says what to do, a keys directory or key file that is a symbolic
-// link or that its group or others may use in any way, a key file that is
-// not a regular file, and one of the wrong size or content. A refusal
+// link or that others may use in any way, a key file that is not a
+// regular file, and one of the wrong size or content. Their group may read
+// and write them, and the directory may be setgid, as a Kubernetes volume
+// mounted with fsGroup makes them each time it is mounted. A refusal
 // changes nothing on disk. state must be the state directory, opened with
 // os.OpenRoot; a nil state gets ErrInvalid.
 //
@@ -233,6 +238,7 @@ func loadFile(ctx context.Context, path string, log *slog.Logger) (Master, error
 		return Master{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
 	}
 	key, othersRead, err := readNamed(f, where)
+	defer clear(key[:])
 	if err := errors.Join(err, f.Close()); err != nil {
 		return Master{}, err
 	}
@@ -264,11 +270,15 @@ func loadCredential(ctx context.Context, creds fs.FS, name string, log *slog.Log
 	if err := checkNamed(fi, where); err != nil {
 		return Master{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return Master{}, fmt.Errorf("crypto: %s: %w", where, err)
+	}
 	f, err := creds.Open(name)
 	if err != nil {
 		return Master{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
 	}
 	key, othersRead, err := readNamed(f, where)
+	defer clear(key[:])
 	if err := errors.Join(err, f.Close()); err != nil {
 		return Master{}, err
 	}
@@ -320,6 +330,9 @@ func readKey(r io.Reader, where string) ([keySize]byte, error) {
 	// One byte more than a key file holds, so a file grown since its
 	// size was checked is refused rather than cut short.
 	text, err := io.ReadAll(io.LimitReader(r, keyChars+2))
+	// Cleared as a best effort: the key's copies in memory are fewer,
+	// though Go may have made others.
+	defer clear(text)
 	if err != nil {
 		return [keySize]byte{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
 	}
@@ -341,6 +354,7 @@ func parseKey(text []byte) ([keySize]byte, bool) {
 		return [keySize]byte{}, false
 	}
 	var decoded [keySize + 1]byte
+	defer clear(decoded[:])
 	n, err := base64.StdEncoding.Strict().Decode(decoded[:], text)
 	if err != nil || n != keySize {
 		return [keySize]byte{}, false
@@ -383,6 +397,9 @@ func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (Maste
 	fi, err := state.Lstat(name)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
+		if err := ctx.Err(); err != nil {
+			return Master{}, fmt.Errorf("crypto: %s: %w", where, err)
+		}
 		return generate(ctx, state, name, keyPath, log)
 	case err != nil:
 		return Master{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
@@ -390,11 +407,15 @@ func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (Maste
 	if err := checkGenerated(fi, keyPath); err != nil {
 		return Master{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return Master{}, fmt.Errorf("crypto: %s: %w", where, err)
+	}
 	f, err := state.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return Master{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
 	}
 	key, err := readGenerated(f, fi, where)
+	defer clear(key[:])
 	if err := errors.Join(err, f.Close()); err != nil {
 		return Master{}, err
 	}
@@ -403,8 +424,8 @@ func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (Maste
 
 // keysDirectory makes the keys directory in state, mode 0700, when there
 // is none, and returns an error wrapping ErrKeyFile unless it is a
-// directory, not a symbolic link, that neither its group nor others can
-// use.
+// directory, not a symbolic link, that others cannot use. Its group may,
+// and it may be setgid, as fsGroup makes it.
 func keysDirectory(state *os.Root, dirPath string) error {
 	fi, err := state.Lstat(keysDir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -423,16 +444,17 @@ func keysDirectory(state *os.Root, dirPath string) error {
 	case !mode.IsDir():
 		return fmt.Errorf("crypto: %s: %w: it is not a directory; Pisati keeps the key it generates in a directory "+
 			"of this name, mode 0700: move what is there away", dirPath, ErrKeyFile)
-	case mode.Perm()&0o077 != 0:
-		return fmt.Errorf("crypto: %s: %w: its mode, %04o, lets others than its owner in; chmod 0700 %s",
+	case mode.Perm()&0o007 != 0:
+		return fmt.Errorf("crypto: %s: %w: its mode, %04o, lets others than its owner and group in; chmod 0700 %s",
 			dirPath, ErrKeyFile, mode.Perm(), dirPath)
 	}
 	return nil
 }
 
 // checkGenerated returns an error wrapping ErrKeyFile unless fi, from
-// Lstat, is a regular file, not a symbolic link, that neither its group
-// nor others can use, of a key file's size.
+// Lstat, is a regular file, not a symbolic link, that others cannot use,
+// of a key file's size. Its group may read and write it, as fsGroup makes
+// it.
 func checkGenerated(fi fs.FileInfo, keyPath string) error {
 	where := "master key file " + keyPath
 	switch mode := fi.Mode(); {
@@ -442,8 +464,8 @@ func checkGenerated(fi fs.FileInfo, keyPath string) error {
 	case !mode.IsRegular():
 		return fmt.Errorf("crypto: %s: %w: it is not a regular file; restore the key file backed up with the database",
 			where, ErrKeyFile)
-	case mode.Perm()&0o077 != 0:
-		return fmt.Errorf("crypto: %s: %w: its mode, %04o, lets others than its owner read or change it; chmod 0600 %s",
+	case mode.Perm()&0o007 != 0:
+		return fmt.Errorf("crypto: %s: %w: its mode, %04o, lets others than its owner and group use it; chmod 0600 %s",
 			where, ErrKeyFile, mode.Perm(), keyPath)
 	}
 	return checkSize(fi.Size(), where)
@@ -470,10 +492,12 @@ func readGenerated(f *os.File, checked fs.FileInfo, where string) ([keySize]byte
 // does not exist, and logs that it did.
 func generate(ctx context.Context, state *os.Root, name, keyPath string, log *slog.Logger) (Master, error) {
 	var key [keySize]byte
+	defer clear(key[:])
 	if _, err := rand.Read(key[:]); err != nil {
 		return Master{}, fmt.Errorf("crypto: generate the master key: %w", err)
 	}
 	text := append(base64.StdEncoding.AppendEncode(nil, key[:]), '\n')
+	defer clear(text)
 	if err := writeKey(state, name, text); err != nil {
 		return Master{}, fmt.Errorf("crypto: generate the master key at %s: %w", keyPath, err)
 	}

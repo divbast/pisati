@@ -76,6 +76,7 @@ func Rewrap(ctx context.Context, s *store.Store, from, to Master) error {
 				return err
 			}
 			wrapped, err := to.wrap(nonce, id, key)
+			clear(key[:])
 			if err != nil {
 				return err
 			}
@@ -188,7 +189,11 @@ var identifier = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 // Field is a column whose values are sealed: Column of table Table, in
 // the row whose integer ID is in IDColumn. A Reencrypter re-seals the
 // fields it is given; each column must hold BLOBs that Seal made, or
-// NULL, which is left as it is.
+// NULL, which is left as it is. IDColumn must be a unique integer key of
+// Table: best its INTEGER PRIMARY KEY, or else a column with a unique
+// index, so that each batch seeks to where the one before it ended rather
+// than reading the table from its start. A batch that would write more
+// than one row of one ID fails, changing nothing.
 type Field struct {
 	Table, IDColumn, Column string
 }
@@ -236,10 +241,13 @@ type Reencrypter struct {
 // registered is a Field, with the statements that re-seal it.
 type registered struct {
 	Field
-	// pending selects the next rows, after an ID or from the first when
-	// it is NULL, whose value is not sealed under the data key a header
-	// names, up to a number of rows; reseal writes one row's value.
-	pending, reseal string
+	// first selects the first rows whose value is not sealed under the
+	// data key a header names, up to a number of rows, and next the same
+	// after an ID. They are two, not one with an optional ID: SQLite seeks
+	// by the ID only when the condition on it is plain, and would read
+	// every row before it in each batch otherwise. reseal writes one
+	// row's value.
+	first, next, reseal string
 }
 
 // NewReencrypter returns the Reencrypter of k, for fields: the registry
@@ -279,12 +287,12 @@ func NewReencrypter(k *Keyring, fields ...Field) (*Reencrypter, error) {
 // check says, so quoting them in double quotes needs no escape.
 func register(f Field) registered {
 	table, id, col := `"`+f.Table+`"`, `"`+f.IDColumn+`"`, `"`+f.Column+`"`
+	selected := "SELECT " + id + ", " + col + " FROM " + table + " WHERE "
+	pending := col + " IS NOT NULL AND substr(" + col + ", 1, " + strconv.Itoa(headerSize) + ") <> ?"
 	return registered{
-		Field: f,
-		pending: "SELECT " + id + ", " + col + " FROM " + table +
-			" WHERE (?1 IS NULL OR " + id + " > ?1) AND " + col + " IS NOT NULL" +
-			" AND substr(" + col + ", 1, " + strconv.Itoa(headerSize) + ") <> ?2" +
-			" ORDER BY " + id + " LIMIT ?3",
+		Field:  f,
+		first:  selected + pending + " ORDER BY " + id + " LIMIT ?",
+		next:   selected + id + " > ? AND " + pending + " ORDER BY " + id + " LIMIT ?",
 		reseal: "UPDATE " + table + " SET " + col + " = ? WHERE " + id + " = ?",
 	}
 }
@@ -305,8 +313,14 @@ func (r *Reencrypter) Kind() jobs.Kind {
 // IMMEDIATE transaction of its own. So it can stop at any point and be
 // run again: what it committed stays done, and what it did not is
 // pending still. It makes passes over each field until one re-seals
-// nothing, which also catches a value written under the old key just as
-// the key rotated, and so it is idempotent too.
+// nothing, so that a value written under the old key while a pass ran is
+// caught by the next, and running it again changes nothing.
+//
+// A job done does not mean that no value is left under a retired key: a
+// writer that sealed a value under the old key before Rotate switched the
+// keyring, and wrote it after the last pass went by its row, leaves it
+// there. Such a value still opens, as no data key is ever deleted, and
+// the job of the next rotation re-seals it.
 //
 // A value that no key in the keyring opens, under its row's Assoc, is
 // left as it is, and once every other is re-sealed Handle fails, naming
@@ -387,7 +401,13 @@ func (r *Reencrypter) batch(ctx context.Context, f registered, after sql.NullInt
 	err := inTx(ctx, r.keyring.store.DB(), func(tx *sql.Tx) error {
 		id, _ := r.keyring.currentKey()
 		header := append([]byte{version}, id.bytes()...)
-		rows, err := tx.QueryContext(ctx, f.pending, after, header, reencryptBatch)
+		var rows *sql.Rows
+		var err error
+		if after.Valid {
+			rows, err = tx.QueryContext(ctx, f.next, after.Int64, header, reencryptBatch)
+		} else {
+			rows, err = tx.QueryContext(ctx, f.first, header, reencryptBatch)
+		}
 		if err != nil {
 			return err
 		}
@@ -419,8 +439,17 @@ func (r *Reencrypter) batch(ctx context.Context, f registered, after sql.NullInt
 			if err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, f.reseal, sealed, v.id); err != nil {
+			result, err := tx.ExecContext(ctx, f.reseal, sealed, v.id)
+			if err != nil {
 				return err
+			}
+			// More than one row with the ID would each get this row's
+			// value: the batch rolls back rather than write over them.
+			if n, err := result.RowsAffected(); err != nil {
+				return err
+			} else if n != 1 {
+				return fmt.Errorf("row %d: %d rows have this %s, want 1: the ID column must be a unique integer key",
+					v.id, n, f.IDColumn)
 			}
 			res.resealed++
 		}

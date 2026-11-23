@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -491,4 +492,146 @@ func TestFieldAssoc(t *testing.T) {
 	if bytes.Equal(a, f.Assoc(1)) {
 		t.Error("Assoc returns a buffer it keeps")
 	}
+}
+
+func TestOneCurrentKey(t *testing.T) {
+	s := newStore(t)
+	m := newMaster(t)
+	// Two keyrings on one database, as two processes would have: the
+	// second's current key is no longer the database's once the first
+	// rotates.
+	first, second := openKeyring(t, s, m), openKeyring(t, s, m)
+	if err := crypto.Rotate(t.Context(), s, first); err != nil {
+		t.Fatalf("Rotate the first keyring: %v", err)
+	}
+	before := dataKeys(t, s)
+	if err := crypto.Rotate(t.Context(), s, second); err == nil {
+		t.Fatal("Rotate of a keyring whose current key is retired: no error")
+	}
+	keys := dataKeys(t, s)
+	if !sameKeys(before, keys) {
+		t.Errorf("the refused Rotate changed the data keys: %+v, was %+v", keys, before)
+	}
+	var current []int64
+	for _, k := range keys {
+		if k.state == "current" {
+			current = append(current, k.id)
+		}
+	}
+	if len(current) != 1 || current[0] != 2 {
+		t.Errorf("current data keys %v, want key 2 alone", current)
+	}
+
+	// The schema holds it too, whatever writes to the table.
+	if _, err := s.DB().ExecContext(t.Context(),
+		`INSERT INTO data_keys (id, wrapped, created_at, state) VALUES (9, x'00', 0, 'current')`); err == nil {
+		t.Error("the schema let a second data key be current")
+	}
+	if _, err := s.DB().ExecContext(t.Context(),
+		`INSERT INTO data_keys (id, wrapped, created_at, state) VALUES (10, x'00', 0, 'retired')`); err != nil {
+		t.Errorf("the schema refused another retired data key: %v", err)
+	}
+}
+
+func TestReencryptCommitsEachBatch(t *testing.T) {
+	s := newStore(t)
+	exec(t, s, secrets)
+	k := openKeyring(t, s, newMaster(t))
+	re, err := crypto.NewReencrypter(k, valueField())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const rows = 250
+	for id := int64(1); id <= rows; id++ {
+		insertSecret(t, s, k, id, plainValue(id), nil)
+	}
+	if err := crypto.Rotate(t.Context(), s, k); err != nil {
+		t.Fatal(err)
+	}
+	payload := jobRows(t, s)[0].payload
+
+	// Stopped in its second batch, the job keeps the first.
+	exec(t, s, `CREATE TRIGGER stop_at_150 BEFORE UPDATE ON secrets WHEN NEW.id = 150
+		BEGIN SELECT RAISE(ABORT, 'stopped at row 150'); END`)
+	if err := re.Handle(t.Context(), payload); err == nil {
+		t.Fatal("Handle stopped at row 150: no error")
+	}
+	for _, r := range secretRows(t, s) {
+		want := uint32(1)
+		if r.id <= 100 {
+			want = 2
+		}
+		if got := keyIDOf(r.value); got != want {
+			t.Errorf("row %d under key %d after the stop, want %d: each batch of 100 commits on its own", r.id, got, want)
+		}
+		wantOpens(t, k, r.value, string(valueField().Assoc(r.id)), string(plainValue(r.id)))
+	}
+
+	// Run again, it takes up where it stopped.
+	exec(t, s, `DROP TRIGGER stop_at_150`)
+	if err := re.Handle(t.Context(), payload); err != nil {
+		t.Fatalf("Handle again: %v", err)
+	}
+	for _, r := range secretRows(t, s) {
+		if got := keyIDOf(r.value); got != 2 {
+			t.Errorf("row %d under key %d, want 2", r.id, got)
+		}
+		wantOpens(t, k, r.value, string(valueField().Assoc(r.id)), string(plainValue(r.id)))
+	}
+}
+
+func TestReencryptRefusesAnIDColumnThatIsNotUnique(t *testing.T) {
+	s := newStore(t)
+	exec(t, s, `CREATE TABLE dupes (rid INTEGER, value BLOB) STRICT`)
+	f := crypto.Field{Table: "dupes", IDColumn: "rid", Column: "value"}
+	k := openKeyring(t, s, newMaster(t))
+	re, err := crypto.NewReencrypter(k, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		id    int64
+		value string
+	}{{1, "one"}, {1, "another one"}, {2, "two"}} {
+		if _, err := s.DB().ExecContext(t.Context(), `INSERT INTO dupes (rid, value) VALUES (?, ?)`,
+			row.id, seal(t, k, row.value, string(f.Assoc(row.id)))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := crypto.Rotate(t.Context(), s, k); err != nil {
+		t.Fatal(err)
+	}
+	before := dupeValues(t, s)
+
+	// Re-sealing row 1 would write both rows of ID 1, the one value over
+	// the other.
+	err = re.Handle(t.Context(), jobRows(t, s)[0].payload)
+	if err == nil || !strings.Contains(err.Error(), "unique") {
+		t.Fatalf("Handle with an ID column that is not unique: %v; want an error saying it must be unique", err)
+	}
+	if after := dupeValues(t, s); !slices.EqualFunc(before, after, bytes.Equal) {
+		t.Error("Handle changed rows of an ID column that is not unique")
+	}
+}
+
+// dupeValues returns the values of the dupes table, in the order of its
+// rows.
+func dupeValues(t *testing.T, s *store.Store) [][]byte {
+	t.Helper()
+	rows, err := s.DB().QueryContext(t.Context(), `SELECT value FROM dupes ORDER BY rowid`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all [][]byte
+	for rows.Next() {
+		var v []byte
+		if err := rows.Scan(&v); err != nil {
+			t.Fatal(errors.Join(err, rows.Close()))
+		}
+		all = append(all, v)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		t.Fatal(err)
+	}
+	return all
 }

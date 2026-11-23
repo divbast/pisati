@@ -63,10 +63,14 @@ var (
 	ErrNotAuthentic = errors.New("sealed value failed authentication")
 )
 
-// The states of a data key, as data_keys spells them.
+// keyState is a data key's state, as data_keys spells it.
+type keyState string
+
+// The states of a data key: current, the one key that seals, or retired,
+// which only opens what it sealed.
 const (
-	stateCurrent = "current"
-	stateRetired = "retired"
+	stateCurrent keyState = "current"
+	stateRetired keyState = "retired"
 )
 
 // dataKey is a data key, unwrapped, ready to seal and open with. The
@@ -188,10 +192,12 @@ func unwrapAll(m Master, rows []storedb.ListDataKeysRow) (map[keyID]dataKey, key
 			return nil, 0, err
 		}
 		unwrapped++
-		if keys[id], err = newDataKey(key); err != nil {
+		keys[id], err = newDataKey(key)
+		clear(key[:])
+		if err != nil {
 			return nil, 0, err
 		}
-		switch row.State {
+		switch keyState(row.State) {
 		case stateCurrent:
 			current = append(current, id)
 		case stateRetired:
@@ -215,6 +221,7 @@ func unwrapAll(m Master, rows []storedb.ListDataKeysRow) (map[keyID]dataKey, key
 // new one in the keyring only once the transaction commits.
 func (k *Keyring) addKey(ctx context.Context, q *storedb.Queries) (keyID, dataKey, error) {
 	var key [keySize]byte
+	defer clear(key[:])
 	var nonce [nonceSize]byte
 	if err := k.read(key[:], nonce[:]); err != nil {
 		return 0, dataKey{}, fmt.Errorf("draw a data key: %w", err)

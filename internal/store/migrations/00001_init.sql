@@ -63,3 +63,9 @@ CREATE TABLE data_keys (
     created_at INTEGER NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('current', 'retired'))
 ) STRICT;
+
+-- At most one data key is current, so that which key seals new data is
+-- never in doubt: a rotation retires the current key before it stores
+-- the next, in one transaction, and anything else that would make a
+-- second current key is refused.
+CREATE UNIQUE INDEX data_keys_one_current ON data_keys (state) WHERE state = 'current';

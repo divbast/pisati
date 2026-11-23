@@ -104,6 +104,7 @@ func TestMigrateFreshThenNoop(t *testing.T) {
 		"jobs_by_state_run_at":      "index",
 		"jobs_by_state_finished_at": "index",
 		"data_keys":                 "strict table",
+		"data_keys_one_current":     "index",
 	}
 	if got := tables(t, s); !maps.Equal(got, want) {
 		t.Errorf("schema = %v, want %v", got, want)

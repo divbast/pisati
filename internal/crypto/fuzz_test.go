@@ -5,9 +5,14 @@ package crypto_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
+	"testing/fstest"
 
+	"github.com/divbast/pisati/internal/config"
 	"github.com/divbast/pisati/internal/crypto"
 )
 
@@ -74,4 +79,66 @@ func FuzzOpen(f *testing.F) {
 			t.Fatalf("a round trip of % x gave % x, %v", data, got, err)
 		}
 	})
+}
+
+// FuzzParseKey holds the reading of a key file to its rules, whatever the
+// file holds: LoadMaster accepts exactly the canonical spelling of a
+// 32-byte key in standard base64, the one that decoding and encoding again
+// gives back, optionally followed by one newline. When it refuses, it never
+// panics and its error tells nothing of what the file holds: it is the
+// error a file of as many zero bytes gets.
+func FuzzParseKey(f *testing.F) {
+	text := keyText(randomKey(f))
+	unused := bytes.Clone(text)
+	unused[42] = base64Alphabet[strings.IndexByte(base64Alphabet, unused[42])|1]
+	for _, seed := range [][]byte{
+		text,
+		text[:44],
+		append(bytes.Clone(text), '\n'),
+		append(bytes.Clone(text[:44]), '\r', '\n'),
+		text[:43],
+		unused,
+		[]byte(base64.StdEncoding.EncodeToString(append(randomKey(f), 7))),
+		slices.Concat(text[:20], []byte("\n"), text[20:43]),
+		{},
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, err := loadKeyFile(t, data)
+		canonical := isCanonical(data)
+		switch {
+		case err == nil && !canonical:
+			t.Fatalf("LoadMaster accepted %q, which is no key's canonical spelling", data)
+		case err != nil && canonical:
+			t.Fatalf("LoadMaster refused the canonical spelling %q: %v", data, err)
+		case err != nil:
+			if !errors.Is(err, crypto.ErrKeyFile) {
+				t.Fatalf("LoadMaster(%q): %v, want ErrKeyFile", data, err)
+			}
+			_, zeros := loadKeyFile(t, make([]byte, len(data)))
+			if zeros == nil || err.Error() != zeros.Error() {
+				t.Fatalf("LoadMaster(%q): %q; a file of %d zero bytes gets %v: the error depends on what the file holds",
+					data, err, len(data), zeros)
+			}
+		}
+	})
+}
+
+// loadKeyFile loads the master key from a credential, kept in memory,
+// that holds data at mode 0400.
+func loadKeyFile(t *testing.T, data []byte) (crypto.Master, error) {
+	t.Helper()
+	const name = "pisati-master-key"
+	creds := fstest.MapFS{name: &fstest.MapFile{Data: data, Mode: 0o400}}
+	return crypto.LoadMaster(t.Context(), config.FromCredential{Name: name}, creds, nil, discard())
+}
+
+// isCanonical reports whether data is a 32-byte key in standard base64,
+// spelt as encoding it gives, then optionally one newline.
+func isCanonical(data []byte) bool {
+	text, _ := bytes.CutSuffix(data, []byte("\n"))
+	key, err := base64.StdEncoding.DecodeString(string(text))
+	return err == nil && len(key) == 32 && base64.StdEncoding.EncodeToString(key) == string(text)
 }
