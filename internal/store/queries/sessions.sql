@@ -27,11 +27,13 @@ DELETE FROM sessions WHERE user_id = ?;
 
 -- name: SweepSessions :execrows
 -- SweepSessions deletes at most batch of the sessions that expire at now
--- or before, and returns how many it deleted.
+-- or before, those that expired first first, and returns how many it
+-- deleted.
 DELETE FROM sessions
 WHERE id_hash IN (
     SELECT old.id_hash FROM sessions AS old
     WHERE old.expires_at <= sqlc.arg(now)
+    ORDER BY old.expires_at
     LIMIT sqlc.arg(batch)
 );
 

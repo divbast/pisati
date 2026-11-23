@@ -8,6 +8,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -24,16 +25,21 @@ type sessionKey struct{}
 // https, a pisati cookie, which another host could have set, is not
 // read. A request without the cookie goes on with no session.
 //
-// A cookie that names no live session, being malformed, unknown,
+// It parses the cookie's value with app.ParseToken, once, here at the
+// edge. A cookie that names no live session, being malformed, unknown,
 // destroyed or expired, is cleared with sessions.Clear's expiring cookie,
-// and the request goes on with no session.
+// and the request goes on with no session. A malformed one never reaches
+// the database.
 //
-// When the session cannot be read, the database failing, the failure is
-// logged to log, once and without the cookie, and the request is answered
-// 500 with Cache-Control: no-store, its handler never called. It is not
-// served as signed out: a signed-in user would then be sent to sign in
-// again for the server's fault, which signing in would not mend, and the
-// cookie is left as it is, since it may well name a live session.
+// When the session cannot be looked up, the database failing, the
+// failure is logged to log, once and without the cookie, and the request
+// is answered 500 with Cache-Control: no-store, its handler never called.
+// It is not served as signed out: a signed-in user would then be sent to
+// sign in again for the server's fault, which signing in would not mend,
+// and the cookie is left as it is, since it may well name a live
+// session. A failed touch fails nothing: sessions.Load serves the session
+// and logs it. A request whose context ends first, its client gone, is
+// answered with nothing and logged nowhere.
 //
 // A nil sessions or log, or the zero Sessions, is a bug, and
 // SessionMiddleware panics on it.
@@ -53,17 +59,30 @@ func SessionMiddleware(sessions *app.Sessions, log *slog.Logger) httpx.Middlewar
 				next.ServeHTTP(w, r)
 				return
 			}
-			sess, ok, err := sessions.Load(r.Context(), c.Value)
+			signedOut := func() {
+				expired := sessions.Clear()
+				http.SetCookie(w, &expired)
+				next.ServeHTTP(w, r)
+			}
+			t, ok := app.ParseToken(c.Value)
+			if !ok {
+				signedOut()
+				return
+			}
+			sess, ok, err := sessions.Load(r.Context(), t)
 			if err != nil {
+				// The client has gone: there is no one to answer, and
+				// nothing went wrong to log.
+				if errors.Is(err, context.Canceled) {
+					return
+				}
 				log.ErrorContext(r.Context(), "session load failed", "error", err)
 				w.Header().Set("Cache-Control", "no-store")
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
 			}
 			if !ok {
-				expired := sessions.Clear()
-				http.SetCookie(w, &expired)
-				next.ServeHTTP(w, r)
+				signedOut()
 				return
 			}
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, sess)))

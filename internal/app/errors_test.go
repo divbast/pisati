@@ -6,6 +6,7 @@ package app_test
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"testing"
@@ -53,9 +54,9 @@ func TestErrorSwitchIsExhaustive(t *testing.T) {
 		{err: &app.Forbidden{}, status: http.StatusForbidden, message: "app: forbidden"},
 		{err: &app.Unauthenticated{}, status: http.StatusUnauthorized, message: "app: not signed in"},
 		{
-			err:     &app.Invalid{Field: "title", Reason: "it is longer than 200 characters"},
+			err:     &app.Invalid{Field: "title", Reason: app.TooLong},
 			status:  http.StatusBadRequest,
-			message: "app: invalid title: it is longer than 200 characters",
+			message: "app: invalid title: too long",
 		},
 		{err: &app.Conflict{}, status: http.StatusConflict, message: "app: conflict"},
 		{
@@ -96,8 +97,9 @@ func TestErrorSwitchIsExhaustive(t *testing.T) {
 		if rl, ok := errors.AsType[*app.RateLimited](err); !ok || rl.RetryAfter != 90*time.Second {
 			t.Errorf("AsType[*RateLimited] = %v, %t; want RetryAfter 1m30s", rl, ok)
 		}
-		err = fmt.Errorf("save: %w", &app.Invalid{Field: "slug", Reason: "it holds a space"})
-		if inv, ok := errors.AsType[*app.Invalid](err); !ok || inv.Field != "slug" || inv.Reason != "it holds a space" {
+		const slug app.Field = "slug"
+		err = fmt.Errorf("save: %w", &app.Invalid{Field: slug, Reason: app.Malformed})
+		if inv, ok := errors.AsType[*app.Invalid](err); !ok || inv.Field != slug || inv.Reason != app.Malformed {
 			t.Errorf("AsType[*Invalid] = %v, %t", inv, ok)
 		}
 	})
@@ -114,4 +116,78 @@ func TestErrorSwitchIsExhaustive(t *testing.T) {
 			}
 		}
 	})
+}
+
+// message maps r to what a user is shown, as a transport's message
+// catalogue does: a switch over every Reason, which the exhaustive linter
+// holds to the whole set.
+func message(t *testing.T, r app.Reason) string {
+	t.Helper()
+	switch r {
+	case app.Required:
+		return "Fill this in."
+	case app.TooShort:
+		return "This is too short."
+	case app.TooLong:
+		return "This is too long."
+	case app.NotAllowed:
+		return "This is not allowed."
+	case app.Malformed:
+		return "This is not in the right form."
+	}
+	t.Errorf("a Reason the catalogue does not know: %d", r)
+	return ""
+}
+
+func TestReasonsAreAClosedSet(t *testing.T) {
+	seen := map[string]app.Reason{}
+	for _, r := range []app.Reason{app.Required, app.TooShort, app.TooLong, app.NotAllowed, app.Malformed} {
+		name := r.String()
+		if name == "" || name == "unspecified" {
+			t.Errorf("Reason %d has the name %q", r, name)
+		}
+		if other, ok := seen[name]; ok {
+			t.Errorf("Reasons %d and %d share the name %q", other, r, name)
+		}
+		seen[name] = r
+		if message(t, r) == "" {
+			t.Errorf("Reason %s has no message", r)
+		}
+		err := &app.Invalid{Field: "title", Reason: r}
+		if want := "app: invalid title: " + name; err.Error() != want {
+			t.Errorf("Error() = %q, want %q", err.Error(), want)
+		}
+	}
+	// The zero Reason, and any outside the set, is unspecified.
+	for _, r := range []app.Reason{0, 6, 255} {
+		if got := r.String(); got != "unspecified" {
+			t.Errorf("Reason(%d).String() = %q, want unspecified", r, got)
+		}
+	}
+	if got := (&app.Invalid{Field: "title"}).Error(); got != "app: invalid title: unspecified" {
+		t.Errorf("Invalid without a Reason: %q", got)
+	}
+}
+
+func TestRetryAfterSeconds(t *testing.T) {
+	for _, tc := range []struct {
+		after time.Duration
+		want  int64
+	}{
+		{after: -5 * time.Second, want: 0},
+		{after: -1, want: 0},
+		{after: 0, want: 0},
+		{after: 1, want: 1},
+		{after: time.Second, want: 1},
+		{after: 1500 * time.Millisecond, want: 2},
+		{after: 90 * time.Second, want: 90},
+		{after: time.Duration(math.MaxInt64), want: math.MaxInt64/int64(time.Second) + 1},
+	} {
+		if got := (&app.RateLimited{RetryAfter: tc.after}).RetryAfterSeconds(); got != tc.want {
+			t.Errorf("RetryAfterSeconds(%v) = %d, want %d", tc.after, got, tc.want)
+		}
+	}
+	if got := (*app.RateLimited)(nil).RetryAfterSeconds(); got != 0 {
+		t.Errorf("nil RetryAfterSeconds() = %d, want 0", got)
+	}
 }

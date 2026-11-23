@@ -9,9 +9,12 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -104,21 +107,24 @@ func TestNewSessionCookie(t *testing.T) {
 func TestNewSessionsRefuses(t *testing.T) {
 	s, _ := newStore(t)
 	base := baseURL(t, httpsBase)
+	discard := slog.New(slog.DiscardHandler)
 	for _, tc := range []struct {
 		name  string
 		store *store.Store
 		clock func() time.Time
 		rnd   io.Reader
 		base  config.BaseURL
+		log   *slog.Logger
 	}{
-		{name: "nil store", clock: time.Now, rnd: rand.Reader, base: base},
-		{name: "zero store", store: &store.Store{}, clock: time.Now, rnd: rand.Reader, base: base},
-		{name: "nil clock", store: s, rnd: rand.Reader, base: base},
-		{name: "nil random source", store: s, clock: time.Now, base: base},
-		{name: "zero base URL", store: s, clock: time.Now, rnd: rand.Reader},
+		{name: "nil store", clock: time.Now, rnd: rand.Reader, base: base, log: discard},
+		{name: "zero store", store: &store.Store{}, clock: time.Now, rnd: rand.Reader, base: base, log: discard},
+		{name: "nil clock", store: s, rnd: rand.Reader, base: base, log: discard},
+		{name: "nil random source", store: s, clock: time.Now, base: base, log: discard},
+		{name: "zero base URL", store: s, clock: time.Now, rnd: rand.Reader, log: discard},
+		{name: "nil logger", store: s, clock: time.Now, rnd: rand.Reader, base: base},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := app.NewSessions(tc.store, tc.clock, tc.rnd, tc.base)
+			got, err := app.NewSessions(tc.store, tc.clock, tc.rnd, tc.base, tc.log)
 			if err == nil || got != nil {
 				t.Errorf("NewSessions = %v, %v; want nil and an error", got, err)
 			}
@@ -128,13 +134,14 @@ func TestNewSessionsRefuses(t *testing.T) {
 	t.Run("the zero Sessions", func(t *testing.T) {
 		var zero app.Sessions
 		ctx := t.Context()
-		if _, _, err := zero.Load(ctx, strings.Repeat("A", 43)); err == nil {
+		someToken := token(t, strings.Repeat("A", 43))
+		if _, _, err := zero.Load(ctx, someToken); err == nil {
 			t.Error("Load on the zero Sessions: no error")
 		}
 		if _, err := zero.Renew(ctx, 1); err == nil {
 			t.Error("Renew on the zero Sessions: no error")
 		}
-		if _, err := zero.Destroy(ctx, strings.Repeat("A", 43)); err == nil {
+		if _, err := zero.Destroy(ctx, someToken); err == nil {
 			t.Error("Destroy on the zero Sessions: no error")
 		}
 		if err := zero.DestroyAllForUser(ctx, 1); err == nil {
@@ -153,7 +160,7 @@ func TestRenewRefusesWithoutRandomness(t *testing.T) {
 		"short":   &shortRand{n: 31},
 	} {
 		t.Run(name, func(t *testing.T) {
-			sessions, err := app.NewSessions(s, time.Now, rnd, baseURL(t, httpsBase))
+			sessions, err := app.NewSessions(s, time.Now, rnd, baseURL(t, httpsBase), slog.New(slog.DiscardHandler))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -167,15 +174,15 @@ func TestRenewRefusesWithoutRandomness(t *testing.T) {
 	}
 }
 
-func TestLoadRefusesMalformedValues(t *testing.T) {
+func TestParseToken(t *testing.T) {
 	s, _ := newStore(t)
 	sessions := newSessions(t, s, time.Now, httpsBase)
 	good := renew(t, sessions, 3).Value
 
 	// One spelling for each ID: the last character's two unused bits are
-	// zero. Setting one spells the same 32 bytes, which Load refuses.
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-	unused := good[:42] + string(alphabet[strings.IndexByte(alphabet, good[42])|1])
+	// zero. Setting one spells the same 32 bytes, which ParseToken
+	// refuses.
+	unused := good[:42] + string(urlAlphabet[strings.IndexByte(urlAlphabet, good[42])|1])
 
 	for name, value := range map[string]string{
 		"empty":                "",
@@ -186,13 +193,135 @@ func TestLoadRefusesMalformedValues(t *testing.T) {
 		"space":                good[:42] + " ",
 		"unused bits set":      unused,
 		"64 bytes in base64":   base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 64)),
-		"the raw ID's SHA-256": base64.RawURLEncoding.EncodeToString(hashOf(t, good)),
+		"a 43-byte multi-byte": strings.Repeat("é", 21) + "A",
 	} {
-		t.Run(name, func(t *testing.T) {
-			wantNoSession(t, sessions, value, name)
-		})
+		if _, ok := app.ParseToken(value); ok {
+			t.Errorf("%s: ParseToken accepted it", name)
+		}
 	}
 	wantUser(t, sessions, good, 3, "the good value")
+	// A well-formed value is a Token whether or not it names a session.
+	if _, ok := app.ParseToken(base64.RawURLEncoding.EncodeToString(hashOf(t, good))); !ok {
+		t.Error("ParseToken refused 32 bytes of unpadded base64url")
+	}
+	wantNoSession(t, sessions, base64.RawURLEncoding.EncodeToString(hashOf(t, good)), "the ID's SHA-256 as an ID")
+
+	// The zero Token names no session, and is refused before the
+	// database.
+	if sess, ok, err := sessions.Load(t.Context(), app.Token{}); ok || err != nil {
+		t.Errorf("Load(zero Token) = %v, %t, %v; want no session", sess, ok, err)
+	}
+}
+
+// FuzzParseToken checks ParseToken accepts exactly the 43-character
+// unpadded base64url spellings of 32 bytes, judged here character by
+// character, and that the value of every cookie Renew makes from 32 bytes,
+// the first of id's, is a Token that loads its session.
+func FuzzParseToken(f *testing.F) {
+	s, _ := newStore(f)
+	base := baseURL(f, httpsBase)
+	discard := slog.New(slog.DiscardHandler)
+	f.Add("", []byte{})
+	f.Add(strings.Repeat("A", 43), bytes.Repeat([]byte{1}, 32))
+	f.Add(strings.Repeat("_", 42)+"w", bytes.Repeat([]byte{0xff}, 32))
+	f.Add(strings.Repeat("_", 43), bytes.Repeat([]byte{0x7f}, 31))
+	f.Add(strings.Repeat("+", 43), bytes.Repeat([]byte{0x80}, 33))
+	f.Fuzz(func(t *testing.T, value string, id []byte) {
+		if _, ok := app.ParseToken(value); ok != oneSpelling(value) {
+			t.Errorf("ParseToken(%q) = %t, want %t", value, ok, !ok)
+		}
+
+		if len(id) < 32 || bytes.Equal(id[:32], make([]byte, 32)) {
+			return
+		}
+		id = id[:32]
+		sessions, err := app.NewSessions(s, time.Now, bytes.NewReader(id), base, discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := sessions.Renew(t.Context(), 1)
+		if err != nil {
+			t.Fatalf("Renew: %v", err)
+		}
+		if want := base64.RawURLEncoding.EncodeToString(id); c.Value != want {
+			t.Fatalf("Renew's cookie value %q, want %q", c.Value, want)
+		}
+		tok, ok := app.ParseToken(c.Value)
+		if !ok {
+			t.Fatalf("ParseToken refused Renew's cookie value %q", c.Value)
+		}
+		if _, found, err := sessions.Load(t.Context(), tok); err != nil || !found {
+			t.Errorf("Load(ParseToken(%q)) = %t, %v; want the session", c.Value, found, err)
+		}
+		if _, err := sessions.Destroy(t.Context(), tok); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// oneSpelling reports whether value is 43 characters of base64url whose
+// last leaves its two unused bits clear: the one spelling of 32 bytes.
+func oneSpelling(value string) bool {
+	if len(value) != 43 {
+		return false
+	}
+	for i := range len(value) {
+		if strings.IndexByte(urlAlphabet, value[i]) < 0 {
+			return false
+		}
+	}
+	return strings.IndexByte(urlAlphabet, value[42])&3 == 0
+}
+
+func TestTokenRedacts(t *testing.T) {
+	s, _ := newStore(t)
+	sessions := newSessions(t, s, time.Now, httpsBase)
+	c := renew(t, sessions, 3)
+	tok := token(t, c.Value)
+	id := idOf(t, c.Value)
+
+	type holder struct {
+		hidden app.Token
+		Shown  app.Token
+	}
+	h := holder{hidden: tok, Shown: tok}
+	var shown []string
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%p"} {
+		shown = append(shown, fmt.Sprintf(verb, tok), fmt.Sprintf(verb, h), fmt.Sprintf(verb, &h))
+	}
+	for _, handler := range []func(io.Writer) slog.Handler{
+		func(w io.Writer) slog.Handler { return slog.NewJSONHandler(w, nil) },
+		func(w io.Writer) slog.Handler { return slog.NewTextHandler(w, nil) },
+	} {
+		var out bytes.Buffer
+		slog.New(handler(&out)).InfoContext(t.Context(), "a token", "token", tok, "holder", h)
+		shown = append(shown, out.String())
+	}
+	encoded, err := json.Marshal(struct {
+		Token app.Token `json:"token"`
+	}{tok})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown = append(shown, string(encoded))
+
+	for _, form := range shown {
+		for name, secret := range map[string]string{
+			"the cookie value":    c.Value,
+			"the ID in hex":       fmt.Sprintf("%x", id),
+			"the ID in HEX":       fmt.Sprintf("%X", id),
+			"the ID's bytes":      string(id),
+			"the ID in base64":    base64.StdEncoding.EncodeToString(id),
+			"the ID's first byte": fmt.Sprintf("[%d ", id[0]),
+		} {
+			if strings.Contains(form, secret) {
+				t.Errorf("%s shows in %q", name, form)
+			}
+		}
+	}
+	if got := fmt.Sprint(tok); got != "[redacted]" {
+		t.Errorf("fmt.Sprint(Token) = %q, want [redacted]", got)
+	}
 }
 
 func TestRenewRotates(t *testing.T) {
@@ -213,7 +342,7 @@ func TestRenewRotates(t *testing.T) {
 		wantUser(t, sessions, v, 5, "each renewed")
 	}
 
-	gone, err := sessions.Destroy(t.Context(), values[0])
+	gone, err := sessions.Destroy(t.Context(), token(t, values[0]))
 	if err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
@@ -234,8 +363,8 @@ func TestRenewRotates(t *testing.T) {
 	}
 
 	// Destroying what is no session still expires the cookie.
-	for _, v := range []string{values[0], "not a session", ""} {
-		c, err := sessions.Destroy(t.Context(), v)
+	for _, tok := range []app.Token{token(t, values[0]), {}} {
+		c, err := sessions.Destroy(t.Context(), tok)
 		if err != nil || c.String() != want {
 			t.Errorf("Destroy(no session) = %s, %v; want %s, nil", c.String(), err, want)
 		}
@@ -322,7 +451,7 @@ func TestIdleAndAbsoluteExpiry(t *testing.T) {
 			time.Sleep(time.Until(start.Add(auth.AbsoluteLimit)) - time.Millisecond)
 			wantUser(t, sessions, c.Value, 9, "a millisecond short of 30 days")
 			time.Sleep(time.Millisecond)
-			wantNoSession(t, sessions, c.Value, "30 days old, though used a day ago")
+			wantNoSession(t, sessions, c.Value, "30 days old, though used a millisecond ago")
 			if _, ok := rowOf(t, s, c.Value); ok {
 				t.Error("Load left the expired session's row")
 			}
@@ -486,8 +615,13 @@ func TestSessionsConcurrent(t *testing.T) {
 				t.Errorf("user %d: Renew: %v", user, err)
 				return
 			}
+			tok, parsed := app.ParseToken(c.Value)
+			if !parsed {
+				t.Errorf("user %d: ParseToken refused Renew's cookie", user)
+				return
+			}
 			for i := range loads {
-				sess, ok, err := sessions.Load(ctx, c.Value)
+				sess, ok, err := sessions.Load(ctx, tok)
 				if err != nil {
 					t.Errorf("user %d: Load %d: %v", user, i, err)
 					return
@@ -505,11 +639,14 @@ func TestSessionsConcurrent(t *testing.T) {
 						t.Errorf("user %d: Renew %d: %v", user, i, err)
 						return
 					}
-					if _, err := sessions.Destroy(ctx, c.Value); err != nil {
+					if _, err := sessions.Destroy(ctx, tok); err != nil {
 						t.Errorf("user %d: Destroy %d: %v", user, i, err)
 						return
 					}
-					c = next
+					if tok, parsed = app.ParseToken(next.Value); !parsed {
+						t.Errorf("user %d: ParseToken refused Renew's cookie", user)
+						return
+					}
 				}
 			}
 		})
@@ -530,20 +667,6 @@ func TestSessionsConcurrent(t *testing.T) {
 	}
 }
 
-// fakeClock is a clock a test sets, safe for concurrent use.
-type fakeClock struct {
-	millis atomic.Int64
-}
-
-func newFakeClock(at time.Time) *fakeClock {
-	c := &fakeClock{}
-	c.set(at)
-	return c
-}
-
-func (c *fakeClock) now() time.Time   { return time.UnixMilli(c.millis.Load()) }
-func (c *fakeClock) set(at time.Time) { c.millis.Store(at.UnixMilli()) }
-
 // holdWriteLock begins a write transaction on s, which takes the
 // database's write lock at once and keeps it until the test commits or
 // rolls it back, or ends.
@@ -561,80 +684,205 @@ func holdWriteLock(t *testing.T, s *store.Store) *sql.Tx {
 	return tx
 }
 
-// TestLoadWithoutTouchDueTakesNoWriteLock checks a load writes only when a
-// touch is due: under WAL a reader never waits for a writer, so a load
-// that does not write is served while another holds the write lock. That
-// is what writing at most once a minute buys. These run on real
+// TestLoadWithTheWriteLockHeld holds the write lock past the busy
+// timeout. A load with no touch due writes nothing, and under WAL a
+// reader never waits for a writer, so it is served at once: that is what
+// writing at most once a minute buys. A load with a touch due waits the
+// busy timeout out, then serves the session all the same and logs the
+// failed touch once: SQLITE_BUSY never reaches the user. It runs on real
 // goroutines, not in a synctest bubble: SQLite waits for its locks in
 // system calls a bubble cannot see.
-func TestLoadWithoutTouchDueTakesNoWriteLock(t *testing.T) {
+func TestLoadWithTheWriteLockHeld(t *testing.T) {
 	s, _ := newStore(t)
 	start := time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
-	sessions := newSessions(t, s, clock.now, httpsBase)
+	sessions, logs := newLoggedSessions(t, s, clock.now, httpsBase)
 	c := renew(t, sessions, 6)
+	tok := token(t, c.Value)
 	holdWriteLock(t, s)
 
 	clock.set(start.Add(time.Minute - time.Millisecond))
-	quick, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	if sess, ok, err := sessions.Load(quick, c.Value); err != nil || !ok {
-		t.Errorf("Load with no touch due, while the write lock is held = %v, %t, %v; want the session", sess, ok, err)
+	began := time.Now()
+	if sess, ok, err := sessions.Load(t.Context(), tok); err != nil || !ok {
+		t.Errorf("Load with no touch due = %v, %t, %v; want the session", sess, ok, err)
 	}
+	if took := time.Since(began); took > time.Second {
+		t.Errorf("Load with no touch due took %s: it waited for the write lock", took)
+	}
+	wantLogged(t, logs, "session touch failed", "WARN", 0, c.Value)
 
-	// The test can see a write: a touch due waits for the lock, until
-	// its context ends.
 	clock.set(start.Add(time.Minute))
-	brief, cancelBrief := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancelBrief()
-	if _, _, err := sessions.Load(brief, c.Value); err == nil {
-		t.Error("Load with a touch due, while the write lock is held: no error, so the test cannot see a write")
+	sess, ok, err := sessions.Load(t.Context(), tok)
+	if user, _ := sess.User(); err != nil || !ok || user != 6 {
+		t.Errorf("Load with a touch due, past the busy timeout = user %d, %t, %v; want user 6's session", user, ok, err)
+	}
+	wantLogged(t, logs, "session touch failed", "WARN", 1, c.Value)
+	if !strings.Contains(logs.String(), "locked") {
+		t.Errorf("the failed touch's record does not say the database was locked:\n%s", logs)
 	}
 }
 
 // TestTouchNeverMovesLastSeenBack checks a touch decided on a row that
-// another touch has since moved on writes nothing: one load reads the
-// row, then waits for the write lock while another, later, touch
-// commits.
+// another touch has moved on since writes nothing. The clock is read
+// between the load's read of the row and its touch, so a later touch
+// committed as it is read lands exactly there.
 func TestTouchNeverMovesLastSeenBack(t *testing.T) {
 	s, _ := newStore(t)
-	ctx := t.Context()
 	start := time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
 	clock := newFakeClock(start)
 	sessions := newSessions(t, s, clock.now, httpsBase)
 	c := renew(t, sessions, 6)
 
-	// The later touch, at 90 s, holds the write lock until it commits.
 	later := start.Add(90 * time.Second)
-	tx := holdWriteLock(t, s)
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id_hash = ?`,
-		ms(later), ms(later.Add(auth.IdleLimit)), hashOf(t, c.Value)); err != nil {
-		t.Fatal(err)
+	touchLater := func() {
+		clock.onRead.Store(nil)
+		exec(t, s, `UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id_hash = ?`,
+			ms(later), ms(later.Add(auth.IdleLimit)), hashOf(t, c.Value))
 	}
-
-	// The earlier one, at 61 s, reads the last committed row, last seen
-	// at the start, finds a touch due and waits for the lock.
+	clock.onRead.Store(&touchLater)
 	clock.set(start.Add(61 * time.Second))
-	loaded := make(chan error, 1)
-	go func() {
-		_, ok, err := sessions.Load(ctx, c.Value)
-		if err == nil && !ok {
-			err = errors.New("no session")
-		}
-		loaded <- err
-	}()
-	// Long enough for it to reach the lock; were it slower, it would
-	// read the later touch, and the test would pass without the race.
-	time.Sleep(200 * time.Millisecond)
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-loaded; err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	wantUser(t, sessions, c.Value, 6, "touched at 61 s, after a touch at 90 s")
 	if r := mustRow(t, s, c.Value, "after both touches"); r.lastSeen != ms(later) || r.expiresAt != ms(later.Add(auth.IdleLimit)) {
 		t.Errorf("row last seen at %+d ms, expiring at %+d ms; want the later touch's %+d and %+d",
 			r.lastSeen-ms(start), r.expiresAt-ms(start), ms(later)-ms(start), ms(later.Add(auth.IdleLimit))-ms(start))
+	}
+}
+
+// TestLoadServesTheSessionWhenTheTouchFails has the database refuse every
+// touch: the touch is bookkeeping, so the session is served, and the
+// failure logged once, without the cookie.
+func TestLoadServesTheSessionWhenTheTouchFails(t *testing.T) {
+	s, _ := newStore(t)
+	start := time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
+	clock := newFakeClock(start)
+	sessions, logs := newLoggedSessions(t, s, clock.now, httpsBase)
+	c := renew(t, sessions, 4)
+	exec(t, s, `CREATE TRIGGER refuse_touch BEFORE UPDATE ON sessions BEGIN SELECT RAISE(ABORT, 'touch refused'); END`)
+
+	clock.set(start.Add(time.Minute))
+	wantUser(t, sessions, c.Value, 4, "a touch due, which fails")
+	wantLogged(t, logs, "session touch failed", "WARN", 1, c.Value)
+	if r := mustRow(t, s, c.Value, "after the failed touch"); r.lastSeen != ms(start) {
+		t.Errorf("row last seen at %+d ms, want unchanged", r.lastSeen-ms(start))
+	}
+}
+
+// TestLoadSignsOutWhenTheExpiredDeleteFails has the database refuse to
+// delete an expired session: it is still no session, and the failure is
+// logged once; the sweep deletes the row later.
+func TestLoadSignsOutWhenTheExpiredDeleteFails(t *testing.T) {
+	s, _ := newStore(t)
+	start := time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
+	clock := newFakeClock(start)
+	sessions, logs := newLoggedSessions(t, s, clock.now, httpsBase)
+	c := renew(t, sessions, 4)
+	exec(t, s, `CREATE TRIGGER refuse_delete BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'delete refused'); END`)
+
+	clock.set(start.Add(auth.IdleLimit))
+	wantNoSession(t, sessions, c.Value, "idle for a week, its delete failing")
+	wantLogged(t, logs, "expired session delete failed", "WARN", 1, c.Value)
+	mustRow(t, s, c.Value, "after the failed delete")
+
+	exec(t, s, `DROP TRIGGER refuse_delete`)
+	if n, err := sessions.Sweep(t.Context()); err != nil || n != 1 {
+		t.Errorf("Sweep = %d, %v; want the expired session", n, err)
+	}
+}
+
+// TestLoadQuietWhenTheContextEnds checks a load whose request has gone
+// logs nothing: one ended before it began returns its context's error,
+// and one ended between the read and the touch serves the session.
+func TestLoadQuietWhenTheContextEnds(t *testing.T) {
+	s, _ := newStore(t)
+	start := time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
+	clock := newFakeClock(start)
+	sessions, logs := newLoggedSessions(t, s, clock.now, httpsBase)
+	c := renew(t, sessions, 4)
+	tok := token(t, c.Value)
+	clock.set(start.Add(time.Minute))
+
+	ended, end := context.WithCancel(t.Context())
+	end()
+	if _, ok, err := sessions.Load(ended, tok); !errors.Is(err, context.Canceled) || ok {
+		t.Errorf("Load with an ended context = %t, %v; want context.Canceled", ok, err)
+	}
+
+	cut, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cutOff := func() {
+		clock.onRead.Store(nil)
+		cancel()
+	}
+	clock.onRead.Store(&cutOff)
+	sess, ok, err := sessions.Load(cut, tok)
+	if user, _ := sess.User(); err != nil || !ok || user != 4 {
+		t.Errorf("Load cut off before its touch = user %d, %t, %v; want user 4's session", user, ok, err)
+	}
+	if got := logs.String(); got != "" {
+		t.Errorf("logged for a request that had gone:\n%s", got)
+	}
+	if r := mustRow(t, s, c.Value, "after the cut-off touch"); r.lastSeen != ms(start) {
+		t.Errorf("row last seen at %+d ms, want unchanged", r.lastSeen-ms(start))
+	}
+}
+
+// TestSweepCommitsEachBatch has the database refuse to delete the 501st
+// session to expire: the first 500 were deleted and committed in a
+// transaction of their own, so they stay deleted when the second fails,
+// and no transaction deleted more.
+func TestSweepCommitsEachBatch(t *testing.T) {
+	s, _ := newStore(t)
+	ctx := t.Context()
+	now := time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
+	sessions := newSessions(t, s, func() time.Time { return now }, httpsBase)
+	const many, refused = 1203, 500
+	if err := s.InTx(ctx, func(q *storedb.Queries) error {
+		for i := range many {
+			id := make([]byte, 32)
+			if _, err := rand.Read(id); err != nil {
+				return err
+			}
+			// Added latest first, so that the order they were added in is
+			// not the order they expire in.
+			rank := many - 1 - i
+			user := int64(3)
+			if rank == refused {
+				user = 999
+			}
+			if err := q.InsertSession(ctx, storedb.InsertSessionParams{
+				IDHash:     id,
+				UserID:     sql.NullInt64{Int64: user, Valid: true},
+				CreatedAt:  ms(now) - 1e9,
+				LastSeenAt: ms(now) - 1e9,
+				ExpiresAt:  ms(now) - many + int64(rank),
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	exec(t, s, `CREATE TRIGGER refuse_one BEFORE DELETE ON sessions WHEN old.user_id = 999 BEGIN SELECT RAISE(ABORT, 'delete refused'); END`)
+
+	n, err := sessions.Sweep(ctx)
+	if err == nil || n != refused {
+		t.Errorf("Sweep = %d, %v; want %d and the refusal", n, err, refused)
+	}
+	if left := countSessions(t, s); left != many-refused {
+		t.Errorf("%d sessions left, want %d: the batches before the refusal stay committed", left, many-refused)
+	}
+	var first int64
+	if err := s.DB().QueryRowContext(ctx, `SELECT min(expires_at) FROM sessions`).Scan(&first); err != nil {
+		t.Fatal(err)
+	}
+	if want := ms(now) - many + refused; first != want {
+		t.Errorf("the first left expires at %d, want %d: the sweep deletes those that expired first", first, want)
+	}
+
+	exec(t, s, `DROP TRIGGER refuse_one`)
+	if n, err := sessions.Sweep(ctx); err != nil || n != many-refused {
+		t.Errorf("Sweep = %d, %v; want the other %d", n, err, many-refused)
 	}
 }
 
@@ -647,19 +895,22 @@ func TestLoadFailsOnAClosedStore(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := sessions.Load(t.Context(), c.Value); err == nil || ok {
+	if _, ok, err := sessions.Load(t.Context(), token(t, c.Value)); err == nil || ok {
 		t.Errorf("Load on a closed store = %t, %v; want an error", ok, err)
 	} else if strings.Contains(err.Error(), c.Value) {
 		t.Errorf("Load's error holds the cookie value: %v", err)
 	}
-	// A value that names no session is refused before the database.
-	if _, ok, err := sessions.Load(t.Context(), "nonsense"); err != nil || ok {
-		t.Errorf("Load(malformed) on a closed store = %t, %v; want false, nil", ok, err)
+	// The zero Token is refused before the database.
+	if _, ok, err := sessions.Load(t.Context(), app.Token{}); err != nil || ok {
+		t.Errorf("Load(zero Token) on a closed store = %t, %v; want false, nil", ok, err)
+	}
+	if _, err := sessions.Destroy(t.Context(), app.Token{}); err != nil {
+		t.Errorf("Destroy(zero Token) on a closed store: %v", err)
 	}
 	if _, err := sessions.Renew(t.Context(), 1); err == nil {
 		t.Error("Renew on a closed store: no error")
 	}
-	if _, err := sessions.Destroy(t.Context(), c.Value); err == nil {
+	if _, err := sessions.Destroy(t.Context(), token(t, c.Value)); err == nil {
 		t.Error("Destroy on a closed store: no error")
 	}
 	if err := sessions.DestroyAllForUser(t.Context(), 1); err == nil {

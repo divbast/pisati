@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -59,15 +60,60 @@ func idEncoding() *base64.Encoding {
 // to the database or a log: the database keys a session by its key.
 type sessionID [idBytes]byte
 
-// parseID returns the ID a cookie value spells, or false unless the value
-// is exactly 43 characters of unpadded base64url.
-func parseID(value string) (sessionID, bool) {
+// redacted stands in for a session ID wherever a Token would show one.
+const redacted = "[redacted]"
+
+// Token is a session cookie's value, parsed: the 256-bit session ID it
+// spells. The edge makes one with ParseToken from the cookie a request
+// carries, once, and Load and Destroy take it. fmt (every verb), slog and
+// encoding/json show a Token as [redacted], also when it sits in another
+// value's unexported field, so that it never reaches a log. The zero
+// Token names no session: Load finds none for it and Destroy deletes
+// none, neither reading the database. Tokens do not compare with ==.
+type Token struct {
+	// A function rather than the ID, as auth.Password holds one: fmt
+	// prints a function as its address, so a Token in another value's
+	// unexported field, where fmt cannot call Format, still does not
+	// print the ID.
+	id func() sessionID
+}
+
+// ParseToken returns the Token a session cookie's value spells, or false
+// unless the value is exactly 43 characters of unpadded base64url whose
+// last leaves the two unused bits clear: the one spelling of 32 bytes,
+// which is what Renew's cookies hold. It reads no database.
+func ParseToken(value string) (Token, bool) {
 	var id sessionID
 	if len(value) != idChars {
-		return id, false
+		return Token{}, false
 	}
-	n, err := idEncoding().Decode(id[:], []byte(value))
-	return id, err == nil && n == idBytes
+	if n, err := idEncoding().Decode(id[:], []byte(value)); err != nil || n != idBytes {
+		return Token{}, false
+	}
+	return Token{id: func() sessionID { return id }}, true
+}
+
+// key returns the SHA-256 of t's ID, or false for the zero Token.
+func (t Token) key() ([]byte, bool) {
+	if t.id == nil {
+		return nil, false
+	}
+	return t.id().key(), true
+}
+
+// Format prints the Token as [redacted], whatever the verb and flags.
+func (Token) Format(f fmt.State, _ rune) {
+	io.WriteString(f, redacted) //nolint:errcheck // fmt.State writes into fmt's own buffer, which cannot fail, and Format has no error to return
+}
+
+// MarshalText returns [redacted], so encoding/json never shows the ID.
+func (Token) MarshalText() ([]byte, error) {
+	return []byte(redacted), nil
+}
+
+// LogValue returns [redacted], so slog never shows the ID.
+func (Token) LogValue() slog.Value {
+	return slog.StringValue(redacted)
 }
 
 // key returns the SHA-256 of id, which the database keys its session by.
@@ -103,16 +149,18 @@ type Sessions struct {
 	store  *store.Store
 	clock  func() time.Time
 	rnd    io.Reader
+	log    *slog.Logger
 	name   string
 	secure bool
 }
 
-// NewSessions returns Sessions kept in s, reading the time from clock and
+// NewSessions returns Sessions kept in s, reading the time from clock,
 // drawing IDs from rnd, which must be safe for concurrent use, as
-// crypto/rand's Reader is. Its cookies are named, and Secure or not, as
-// Sessions describes for base's scheme. It returns an error for a store
-// Open did not return, a nil clock or rnd, or the zero base.
-func NewSessions(s *store.Store, clock func() time.Time, rnd io.Reader, base config.BaseURL) (*Sessions, error) {
+// crypto/rand's Reader is, and logging to log what Load does not return
+// (see Load). Its cookies are named, and Secure or not, as Sessions
+// describes for base's scheme. It returns an error for a store Open did
+// not return, a nil clock, rnd or log, or the zero base.
+func NewSessions(s *store.Store, clock func() time.Time, rnd io.Reader, base config.BaseURL, log *slog.Logger) (*Sessions, error) {
 	var errs []error
 	if s.DB() == nil {
 		errs = append(errs, errors.New("app: sessions need a store made by store.Open"))
@@ -126,6 +174,9 @@ func NewSessions(s *store.Store, clock func() time.Time, rnd io.Reader, base con
 	if base == (config.BaseURL{}) {
 		errs = append(errs, errors.New("app: sessions need the base URL, and the zero BaseURL is none"))
 	}
+	if log == nil {
+		errs = append(errs, errors.New("app: sessions need a logger"))
+	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
@@ -133,7 +184,7 @@ func NewSessions(s *store.Store, clock func() time.Time, rnd io.Reader, base con
 	if base.IsHTTPS() {
 		name, secure = httpsCookieName, true
 	}
-	return &Sessions{store: s, clock: clock, rnd: rnd, name: name, secure: secure}, nil
+	return &Sessions{store: s, clock: clock, rnd: rnd, log: log, name: name, secure: secure}, nil
 }
 
 // CookieName returns the name of the session cookie: __Host-pisati over
@@ -196,24 +247,30 @@ func sessionOf(row storedb.Session) Session {
 	return Session{user: auth.UserID(row.UserID.Int64)}
 }
 
-// Load returns the live session that the cookie value names, or false
-// when it names none: a value that is not 43 characters of unpadded
-// base64url, which it refuses without reading the database, an ID with
-// no session, or a session that has expired, which it deletes. A live
-// session last seen auth.TouchInterval or more ago is touched: its time
-// of last use set to now, and its expiry moved to match. Concurrent loads
-// of one session touch it once. A failure to read, touch or delete the
-// session is an error, never taken for no session, and its errors never
-// hold the value.
-func (s *Sessions) Load(ctx context.Context, value string) (Session, bool, error) {
+// Load returns the live session that t names, or false when it names
+// none: the zero Token, which it refuses without reading the database, an
+// ID with no session, or a session that has expired, which it deletes. A
+// live session last seen auth.TouchInterval or more ago is touched: its
+// time of last use set to now, and its expiry moved to match. Concurrent
+// loads of one session touch it once. A failure to read the session is
+// an error, never taken for no session, and its errors never hold the
+// ID.
+//
+// The touch and the delete are bookkeeping, and never fail the load: a
+// touch that fails, as when another writer holds the database past the
+// busy timeout, leaves the session's last use as it was, and the session
+// is served; an expired session whose delete fails is still no session,
+// and Sweep deletes it later. Each such failure is logged once, as a
+// warning, without the ID, unless ctx has ended, the request gone, which
+// is no failure.
+func (s *Sessions) Load(ctx context.Context, t Token) (Session, bool, error) {
 	if err := s.made(); err != nil {
 		return Session{}, false, err
 	}
-	id, ok := parseID(value)
+	key, ok := t.key()
 	if !ok {
 		return Session{}, false, nil
 	}
-	key := id.key()
 	q := s.store.Queries()
 	row, err := q.GetSession(ctx, key)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -232,19 +289,20 @@ func (s *Sessions) Load(ctx context.Context, value string) (Session, bool, error
 			// load made first, since this one read the row, win: the
 			// session is written once however many requests find a
 			// touch due.
+			// A touch cut off with its request is no failure.
 			if _, err := q.TouchSession(ctx, storedb.TouchSessionParams{
 				LastSeenAt:  now.UnixMilli(),
 				ExpiresAt:   expiresAt(row.CreatedAt, now.UnixMilli()),
 				IDHash:      key,
 				TouchBefore: now.Add(-auth.TouchInterval).UnixMilli(),
-			}); err != nil {
-				return Session{}, false, fmt.Errorf("app: touch a session: %w", err)
+			}); err != nil && ctx.Err() == nil {
+				s.log.WarnContext(ctx, "session touch failed", "error", err)
 			}
 		}
 		return sessionOf(row), true, nil
 	case auth.IdleExpired, auth.AbsoluteExpired:
-		if err := q.DeleteSession(ctx, key); err != nil {
-			return Session{}, false, fmt.Errorf("app: delete an expired session: %w", err)
+		if err := q.DeleteSession(ctx, key); err != nil && ctx.Err() == nil {
+			s.log.WarnContext(ctx, "expired session delete failed", "error", err)
 		}
 		return Session{}, false, nil
 	default:
@@ -289,15 +347,15 @@ func (s *Sessions) Renew(ctx context.Context, user auth.UserID) (http.Cookie, er
 	return s.cookie(idEncoding().EncodeToString(id[:]), liveMaxAge), nil
 }
 
-// Destroy deletes the session the cookie value names, if there is one,
-// and returns Clear's cookie, which expires it in the browser too. A
-// value that names no session is no error.
-func (s *Sessions) Destroy(ctx context.Context, value string) (http.Cookie, error) {
+// Destroy deletes the session t names, if there is one, and returns
+// Clear's cookie, which expires it in the browser too. A Token that names
+// no session, the zero Token included, is no error.
+func (s *Sessions) Destroy(ctx context.Context, t Token) (http.Cookie, error) {
 	if err := s.made(); err != nil {
 		return http.Cookie{}, err
 	}
-	if id, ok := parseID(value); ok {
-		if err := s.store.Queries().DeleteSession(ctx, id.key()); err != nil {
+	if key, ok := t.key(); ok {
+		if err := s.store.Queries().DeleteSession(ctx, key); err != nil {
 			return http.Cookie{}, fmt.Errorf("app: destroy a session: %w", err)
 		}
 	}
@@ -321,9 +379,9 @@ func (s *Sessions) DestroyAllForUser(ctx context.Context, user auth.UserID) erro
 
 // Sweep deletes every session that has expired by now, whether or not its
 // cookie is ever presented again, and returns how many it deleted. It
-// deletes at most 500 in each write transaction, so that other writers
-// get the lock between them. On an error it returns the error and how
-// many it had deleted before it.
+// deletes those that expired first first, at most 500 in each write
+// transaction, so that other writers get the lock between them. On an
+// error it returns the error and how many it had deleted before it.
 func (s *Sessions) Sweep(ctx context.Context) (int, error) {
 	if err := s.made(); err != nil {
 		return 0, err

@@ -83,6 +83,7 @@ DELETE FROM sessions
 WHERE id_hash IN (
     SELECT old.id_hash FROM sessions AS old
     WHERE old.expires_at <= ?1
+    ORDER BY old.expires_at
     LIMIT ?2
 )
 `
@@ -93,7 +94,8 @@ type SweepSessionsParams struct {
 }
 
 // SweepSessions deletes at most batch of the sessions that expire at now
-// or before, and returns how many it deleted.
+// or before, those that expired first first, and returns how many it
+// deleted.
 func (q *Queries) SweepSessions(ctx context.Context, arg SweepSessionsParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, sweepSessions, arg.Now, arg.Batch)
 	if err != nil {

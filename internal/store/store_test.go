@@ -324,3 +324,55 @@ func TestInTxConcurrentReadThenWrite(t *testing.T) {
 		t.Errorf("after %d increments, last_seen_at = %d", want, got.LastSeenAt)
 	}
 }
+
+// TestTouchSessionOnlyWhenDue checks a touch writes only a session last
+// seen at touch_before or earlier: one decided on a row that another
+// touch has moved on since writes nothing, so last_seen_at never goes
+// back.
+func TestTouchSessionOnlyWhenDue(t *testing.T) {
+	s := migratedStore(t, dbPath(t))
+	ctx := t.Context()
+	insertSession(t, s, "touched", 90_000)
+	id := sessionID("touched")
+
+	for _, tc := range []struct {
+		name                       string
+		touchBefore, lastSeen      int64
+		wantRows                   int64
+		wantLastSeen, wantExpiring int64
+	}{
+		{
+			name:        "stale: last seen after touch_before",
+			touchBefore: 89_999, lastSeen: 61_000,
+			wantRows: 0, wantLastSeen: 90_000, wantExpiring: 1_800_000_000_000,
+		},
+		{
+			name:        "due: last seen at touch_before",
+			touchBefore: 90_000, lastSeen: 150_000,
+			wantRows: 1, wantLastSeen: 150_000, wantExpiring: 150_001,
+		},
+		{
+			name:        "due: last seen before touch_before",
+			touchBefore: 200_000, lastSeen: 260_000,
+			wantRows: 1, wantLastSeen: 260_000, wantExpiring: 260_001,
+		},
+	} {
+		n, err := s.Queries().TouchSession(ctx, storedb.TouchSessionParams{
+			LastSeenAt:  tc.lastSeen,
+			ExpiresAt:   tc.lastSeen + 1,
+			IDHash:      id,
+			TouchBefore: tc.touchBefore,
+		})
+		if err != nil {
+			t.Fatalf("%s: TouchSession: %v", tc.name, err)
+		}
+		got, err := s.Queries().GetSession(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != tc.wantRows || got.LastSeenAt != tc.wantLastSeen || got.ExpiresAt != tc.wantExpiring {
+			t.Errorf("%s: touched %d rows, last seen at %d, expiring %d; want %d, %d and %d",
+				tc.name, n, got.LastSeenAt, got.ExpiresAt, tc.wantRows, tc.wantLastSeen, tc.wantExpiring)
+		}
+	}
+}

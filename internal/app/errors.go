@@ -39,12 +39,59 @@ type Forbidden struct{}
 // they are not.
 type Unauthenticated struct{}
 
-// Invalid is an input that a rule refuses. Field names the input, as the
-// form or API names it, and Reason says which rule it breaks. Both are
-// set by the code, never from the input: neither repeats the value given,
-// which may be a password.
+// Invalid is an input that a rule refuses: Field names the input, and
+// Reason the rule it breaks. Neither is built from the input, so neither
+// repeats the value given, which may be a password.
 type Invalid struct {
-	Field, Reason string
+	Field  Field
+	Reason Reason
+}
+
+// Field names an input as the form or API that takes it names it, as in
+// title or slug. Callers declare the names of their fields as constants of
+// it, and never build one from what a request holds.
+type Field string
+
+// Reason is the rule an input breaks: one of the constants below, which a
+// transport maps each to a message of its own. It is a number, so it can
+// carry no text of the input's. The zero Reason is unspecified. The set
+// starts with the rules every form needs, and grows with the rules later
+// use cases bring.
+type Reason uint8
+
+const (
+	// Required is an input that is missing or empty.
+	Required Reason = iota + 1
+	// TooShort is an input shorter than its field allows.
+	TooShort
+	// TooLong is an input longer than its field allows.
+	TooLong
+	// NotAllowed is an input of the right form that its field does not
+	// accept, such as a name already reserved, or a password that holds
+	// the user's name.
+	NotAllowed
+	// Malformed is an input not of the form its field takes, such as a
+	// slug with a space in it, or a date that is no date.
+	Malformed
+)
+
+// String returns the rule's name, for logs: required, too short, too
+// long, not allowed or malformed, and unspecified for the zero Reason or
+// one outside the set.
+func (r Reason) String() string {
+	switch r {
+	case Required:
+		return "required"
+	case TooShort:
+		return "too short"
+	case TooLong:
+		return "too long"
+	case NotAllowed:
+		return "not allowed"
+	case Malformed:
+		return "malformed"
+	}
+	return "unspecified"
 }
 
 // Conflict is a change that the current state refuses, such as a name
@@ -52,9 +99,26 @@ type Invalid struct {
 type Conflict struct{}
 
 // RateLimited is a request refused for coming too often. RetryAfter is how
-// long the caller should wait before trying again: zero or more.
+// long the caller should wait before trying again, and RetryAfterSeconds
+// gives it as a Retry-After header takes it.
 type RateLimited struct {
 	RetryAfter time.Duration
+}
+
+// RetryAfterSeconds returns RetryAfter in whole seconds, rounded up, so
+// that a client that waits that long has waited long enough: 0 when
+// RetryAfter is zero or negative, and for a nil RateLimited.
+func (e *RateLimited) RetryAfterSeconds() int64 {
+	if e == nil || e.RetryAfter <= 0 {
+		return 0
+	}
+	// Rounded up by the remainder, not by adding a second less a
+	// nanosecond, which would overflow the longest Duration.
+	seconds := int64(e.RetryAfter / time.Second)
+	if e.RetryAfter%time.Second != 0 {
+		seconds++
+	}
+	return seconds
 }
 
 func (*NotFound) Error() string        { return "app: not found" }
@@ -66,7 +130,7 @@ func (e *Invalid) Error() string {
 	if e == nil {
 		return "app: invalid"
 	}
-	return "app: invalid " + e.Field + ": " + e.Reason
+	return "app: invalid " + string(e.Field) + ": " + e.Reason.String()
 }
 
 func (e *RateLimited) Error() string {
