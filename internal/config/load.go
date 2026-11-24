@@ -291,6 +291,11 @@ func readBounded(fsys fs.FS, name string) (data []byte, err error) {
 	return data, nil
 }
 
+// notDecoded is why a file that does not decode, or a value in it of the
+// wrong type, is refused: fixed text, which never quotes the file.
+const notDecoded = "it is not TOML, or not a value the setting takes (what the file holds is not shown); " +
+	"none of the file's settings are used until it decodes"
+
 // decodeErrors turns what decoding data, the file name, returned into one
 // error for each problem. An unknown key's gives the file, line and
 // column, and the key. Any other gives the file, and the line, column and
@@ -308,11 +313,9 @@ func decodeErrors(name string, data []byte, err error) []error {
 		}
 		return errs
 	}
-	const why = "it is not TOML, or not a value the setting takes (what the file holds is not shown); " +
-		"none of the file's settings are used until it decodes"
 	de, ok := errors.AsType[*toml.DecodeError](err)
 	if !ok {
-		return []error{fmt.Errorf("%s: %w: %s", name, ErrInvalid, why)}
+		return []error{fmt.Errorf("%s: %w: %s", name, ErrInvalid, notDecoded)}
 	}
 	row, col := de.Position()
 	where := fmt.Sprintf("%s:%d:%d", name, row, col)
@@ -323,7 +326,7 @@ func decodeErrors(name string, data []byte, err error) []error {
 	if len(key) > 0 {
 		where += ": " + strings.Join(key, ".")
 	}
-	return []error{fmt.Errorf("%s: %w: %s", where, ErrInvalid, why)}
+	return []error{fmt.Errorf("%s: %w: %s", where, ErrInvalid, notDecoded)}
 }
 
 // offset returns the offset in data of line row, column col, as go-toml

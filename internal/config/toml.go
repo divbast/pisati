@@ -64,7 +64,7 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 			continue
 		}
 		if !isTable {
-			wrongType = append(wrongType, fmt.Errorf("%s: %s: %w: %s", name, tableName, ErrInvalid, wrongTypeWhy))
+			wrongType = append(wrongType, fmt.Errorf("%s: %s: %w: %s", name, tableName, ErrInvalid, notDecoded))
 			continue
 		}
 		for _, key := range slices.Sorted(maps.Keys(table)) {
@@ -86,16 +86,11 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 			continue
 		}
 		if !fromValue(&l, s, v) {
-			wrongType = append(wrongType, fmt.Errorf("%s: %s: %w: %s", name, s.key, ErrInvalid, wrongTypeWhy))
+			wrongType = append(wrongType, fmt.Errorf("%s: %s: %w: %s", name, s.key, ErrInvalid, notDecoded))
 		}
 	}
 	return l, unknown, wrongType, otherCase
 }
-
-// wrongTypeWhy is why a value of the wrong type is refused, in the same
-// words as a file that does not decode, and as fixed.
-const wrongTypeWhy = "it is not TOML, or not a value the setting takes (what the file holds is not shown); " +
-	"none of the file's settings are used until it decodes"
 
 // fromValue sets s in l to v, a value go-toml decoded into a map, and
 // reports whether v is of s's type: a string, or for a list an array of
