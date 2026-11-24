@@ -55,9 +55,11 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 		if tableName != section || !knownSection(section) {
 			unknown = append(unknown, fmt.Errorf("%s: %s: %w", name, tableName, ErrUnknown))
 			if knownSection(section) {
-				for key := range table {
-					if s := section + "." + strings.ToLower(key); knownSetting(s) {
-						otherCase[s] = true
+				for _, t := range tablesOf(doc[tableName]) {
+					for key := range t {
+						if s := section + "." + strings.ToLower(key); knownSetting(s) {
+							otherCase[s] = true
+						}
 					}
 				}
 			}
@@ -90,6 +92,25 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 		}
 	}
 	return l, unknown, wrongType, otherCase
+}
+
+// tablesOf returns the tables v holds, as go-toml decoded it into a map:
+// v itself when it is a table, the tables among its items when it is an
+// array of them, such as [[SERVER]] makes, and none otherwise.
+func tablesOf(v any) []map[string]any {
+	switch v := v.(type) {
+	case map[string]any:
+		return []map[string]any{v}
+	case []any:
+		var tables []map[string]any
+		for _, item := range v {
+			if t, ok := item.(map[string]any); ok {
+				tables = append(tables, t)
+			}
+		}
+		return tables
+	}
+	return nil
 }
 
 // fromValue sets s in l to v, a value go-toml decoded into a map, and

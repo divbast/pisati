@@ -651,6 +651,12 @@ func TestKeysAreLowerCase(t *testing.T) {
 			text: "[\"\u212aeys\"]\nmain_key_file = \"/run/key\"\n[server]\nbase_url = " + base + "\n",
 			want: []string{"pisati.toml: \u212aeys"},
 		},
+		{name: "an array of tables", text: "[[SERVER]]\nbase_url = " + base + "\n", want: []string{"pisati.toml: SERVER"}},
+		{
+			name: "an inline array of tables",
+			text: "SERVER = [{ listen = \":9000\" }, { base_url = " + base + " }]\n",
+			want: []string{"pisati.toml: SERVER"},
+		},
 		{
 			name: "a table in a drop-in", file: "pisati.toml.d/10-log.toml",
 			text: "[Log]\nlevel = \"debug\"\n[server]\nbase_url = " + base + "\n",
