@@ -5,10 +5,143 @@ package config
 
 import (
 	"bytes"
+	"fmt"
+	"maps"
 	"slices"
+	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 )
+
+// inOtherCase reports whether doc, a file decoded into a map, which keeps
+// keys as written, holds a table or a key that go-toml would match to a
+// section or a setting though it is spelt otherwise: in another case,
+// which strings.ToLower, as go-toml lowers a key to match it, makes the
+// settings table's.
+func inOtherCase(doc map[string]any) bool {
+	for name, v := range doc {
+		section := strings.ToLower(name)
+		if !knownSection(section) {
+			continue
+		}
+		if name != section {
+			return true
+		}
+		table, ok := v.(map[string]any)
+		if !ok {
+			continue // a section that holds no table holds no key either
+		}
+		for key := range table {
+			if lower := strings.ToLower(key); lower != key && knownSetting(section+"."+lower) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// fromMap returns the layer doc, the file name decoded into a map, gives:
+// each section and setting spelt exactly as the settings table spells it.
+// It returns an error wrapping ErrUnknown for each table or key spelt any
+// other way, named as written with the file, a table once for all it
+// holds; an error wrapping ErrInvalid for each value not of its setting's
+// type; and the keys of the settings that a key in another case would
+// set, which, since that key is reported, are not to be reported missing.
+func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []error, otherCase map[string]bool) {
+	otherCase = make(map[string]bool)
+	for _, tableName := range slices.Sorted(maps.Keys(doc)) {
+		table, isTable := doc[tableName].(map[string]any)
+		section := strings.ToLower(tableName)
+		if tableName != section || !knownSection(section) {
+			unknown = append(unknown, fmt.Errorf("%s: %s: %w", name, tableName, ErrUnknown))
+			if knownSection(section) {
+				for key := range table {
+					if s := section + "." + strings.ToLower(key); knownSetting(s) {
+						otherCase[s] = true
+					}
+				}
+			}
+			continue
+		}
+		if !isTable {
+			wrongType = append(wrongType, fmt.Errorf("%s: %s: %w: %s", name, tableName, ErrInvalid, wrongTypeWhy))
+			continue
+		}
+		for _, key := range slices.Sorted(maps.Keys(table)) {
+			if knownSetting(section + "." + key) {
+				continue
+			}
+			unknown = append(unknown, fmt.Errorf("%s: %s.%s: %w", name, tableName, key, ErrUnknown))
+			if s := section + "." + strings.ToLower(key); knownSetting(s) {
+				otherCase[s] = true
+			}
+		}
+	}
+	for _, s := range settings() {
+		section, key, _ := strings.Cut(s.key, ".")
+		// A section that holds no table, refused above, gives no setting.
+		table, ok := doc[section].(map[string]any)
+		v, given := table[key]
+		if !ok || !given {
+			continue
+		}
+		if !fromValue(&l, s, v) {
+			wrongType = append(wrongType, fmt.Errorf("%s: %s: %w: %s", name, s.key, ErrInvalid, wrongTypeWhy))
+		}
+	}
+	return l, unknown, wrongType, otherCase
+}
+
+// wrongTypeWhy is why a value of the wrong type is refused, in the same
+// words as a file that does not decode, and as fixed.
+const wrongTypeWhy = "it is not TOML, or not a value the setting takes (what the file holds is not shown); " +
+	"none of the file's settings are used until it decodes"
+
+// fromValue sets s in l to v, a value go-toml decoded into a map, and
+// reports whether v is of s's type: a string, or for a list an array of
+// strings. A refused setting takes any value, which it never reads.
+func fromValue(l *layer, s setting, v any) bool {
+	switch k := s.kind.(type) {
+	case text:
+		str, ok := v.(string)
+		if ok {
+			*k.field(l) = &str
+		}
+		return ok
+	case list:
+		values, ok := v.([]any)
+		items := make([]string, 0, len(values))
+		for _, value := range values {
+			item, isString := value.(string)
+			ok = ok && isString
+			items = append(items, item)
+		}
+		if ok {
+			*k.field(l) = &items
+		}
+		return ok
+	case refused:
+		given := ""
+		*k.field(l) = &given
+		return true
+	}
+	return false
+}
+
+// knownSection reports whether name is a section the settings table
+// spells, exactly.
+func knownSection(name string) bool {
+	return slices.ContainsFunc(settings(), func(s setting) bool {
+		section, _, _ := strings.Cut(s.key, ".")
+		return section == name
+	})
+}
+
+// knownSetting reports whether key, section.name, is a setting the
+// settings table spells, exactly.
+func knownSetting(key string) bool {
+	return slices.ContainsFunc(settings(), func(s setting) bool { return s.key == key })
+}
 
 // failedKey returns the key of the expression data fails to parse in, as
 // TOML, at offset at, with the table that holds it: as much of the key as

@@ -5,6 +5,7 @@ package config_test
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,8 @@ import (
 	"testing"
 	"testing/fstest"
 	"unicode/utf8"
+
+	"github.com/pelletier/go-toml/v2"
 
 	"github.com/divbast/pisati/internal/config"
 )
@@ -602,6 +605,115 @@ func TestSettingsTable(t *testing.T) {
 	}
 }
 
+// errorParts returns the errors err joins, or err alone.
+func errorParts(err error) []error {
+	if joined, ok := errors.AsType[interface {
+		error
+		Unwrap() []error
+	}](err); ok {
+		return joined.Unwrap()
+	}
+	return []error{err}
+}
+
+// TestKeysAreLowerCase gives files keys spelt otherwise than the settings
+// table spells them, which go-toml alone would match whatever their case:
+// each is an unknown key, named as written with its file. Its value is not
+// used, and the setting it would set is not reported missing as well.
+func TestKeysAreLowerCase(t *testing.T) {
+	t.Parallel()
+
+	const base = "\"https://file.example.org\""
+	tests := []struct {
+		name, file, text string
+		want             []string // the errors, but for ones of a value refused
+		refused          string   // the error of a value refused, if there is one
+	}{
+		{name: "a table", text: "[SERVER]\nbase_url = " + base + "\n", want: []string{"pisati.toml: SERVER"}},
+		{name: "a key", text: "[server]\nBAse_url = " + base + "\n", want: []string{"pisati.toml: server.BAse_url"}},
+		{
+			name: "the same key twice, in two cases",
+			text: "[server]\nbase_url = " + base + "\nBASE_URL = \"http://plain.example.org\"\n",
+			want: []string{"pisati.toml: server.BASE_URL"},
+		},
+		{name: "a dotted key", text: "SERVER.base_url = " + base + "\n", want: []string{"pisati.toml: SERVER"}},
+		{
+			name: "a key in an inline table",
+			text: "server = { listen = \":9000\", BASE_URL = " + base + " }\n",
+			want: []string{"pisati.toml: server.BASE_URL"},
+		},
+		{name: "a quoted key", text: "[server]\n\"Base_Url\" = " + base + "\n", want: []string{"pisati.toml: server.Base_Url"}},
+		// The Kelvin sign, which strings.ToLower makes a k, as go-toml
+		// lowers a key to match it.
+		{
+			name: "a quoted table go-toml lowers",
+			text: "[\"\u212aeys\"]\nmain_key_file = \"/run/key\"\n[server]\nbase_url = " + base + "\n",
+			want: []string{"pisati.toml: \u212aeys"},
+		},
+		{
+			name: "a table in a drop-in", file: "pisati.toml.d/10-log.toml",
+			text: "[Log]\nlevel = \"debug\"\n[server]\nbase_url = " + base + "\n",
+			want: []string{"pisati.toml.d/10-log.toml: Log"},
+		},
+		{
+			name: "an https dev server's certificate in another case",
+			text: "[server]\nbase_url = \"http://localhost:8080\"\n[dev]\nvite_url = \"https://localhost:5173\"\n" +
+				"Vite_Cert_File = \"/certs/localhost.pem\"\nvite_key_file = \"/certs/localhost-key.pem\"\n",
+			want: []string{"pisati.toml: dev.Vite_Cert_File"},
+		},
+		{
+			name: "a key in another case, of another type",
+			text: "[server]\nBAse_url = 1\nbase_url = " + base + "\n",
+			want: []string{"pisati.toml: server.BAse_url"},
+		},
+		{
+			name: "a misspelt key beside one in another case",
+			text: "[server]\nBASE_URL = " + base + "\nbsae_url = " + base + "\n[nope]\n",
+			want: []string{"pisati.toml: nope", "pisati.toml: server.BASE_URL", "pisati.toml: server.bsae_url"},
+		},
+		{
+			name:    "a value of the wrong type beside a key in another case",
+			text:    "[server]\nBASE_URL = " + base + "\nlisten = 8080\n",
+			want:    []string{"pisati.toml: server.BASE_URL"},
+			refused: "pisati.toml: server.listen: invalid: it is not TOML, or not a value the setting takes (what the file holds is not shown); none of the file's settings are used until it decodes",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			name := cmp.Or(tt.file, "pisati.toml")
+			cfg, err := setup{files: fstest.MapFS{name: tomlFile(tt.text)}}.load(t.Context())
+			if err == nil {
+				t.Fatalf("Load succeeded, want %q", tt.want)
+			}
+			// Those keys alone: what was under them is not read as
+			// anything else, and nothing is reported missing.
+			var unknown, other []string
+			for _, part := range errorParts(err) {
+				if errors.Is(part, config.ErrUnknown) {
+					unknown = append(unknown, part.Error())
+				} else {
+					other = append(other, part.Error())
+				}
+			}
+			want := make([]string, 0, len(tt.want))
+			for _, w := range tt.want {
+				want = append(want, w+": unknown setting")
+			}
+			if !slices.Equal(unknown, want) {
+				t.Errorf("unknown keys %q, want %q", unknown, want)
+			}
+			if wantOther := slices.DeleteFunc([]string{tt.refused}, func(s string) bool { return s == "" }); !slices.Equal(other, wantOther) {
+				t.Errorf("other errors %q, want %q", other, wantOther)
+			}
+			if !reflect.DeepEqual(cfg, config.Config{}) {
+				t.Errorf("Load failed but returned %+v", cfg)
+			}
+		})
+	}
+}
+
 // TestDecodeErrorsShowNoneOfTheFile reads files that do not decode, each
 // holding a value in a setting, a secret's among them: the error names the
 // file, line, column and key in fixed text, and holds nothing of the
@@ -709,14 +821,7 @@ func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 				env:   env{"PISATI_SERVER_BASE_URL": baseURL},
 			}.load(t.Context())
 			refused(t, err, config.ErrInvalid, tt.want)
-			parts := []error{err}
-			if joined, ok := errors.AsType[interface {
-				error
-				Unwrap() []error
-			}](err); ok {
-				parts = joined.Unwrap()
-			}
-			if !slices.ContainsFunc(parts, func(e error) bool { return e.Error() == tt.want }) {
+			if !slices.ContainsFunc(errorParts(err), func(e error) bool { return e.Error() == tt.want }) {
 				t.Errorf("error %q has no part that is exactly %q", err, tt.want)
 			}
 			for _, v := range tt.value {
@@ -1673,9 +1778,12 @@ func FuzzLoad(f *testing.F) {
 	f.Add("server.base_url = 'https://[::1]:8443'\nserver.hsts = 'preload'", "[server]\nbase_url = \"http://127.0.0.1\"",
 		"PISATI_SERVER_LISTEN=[::1]:1\nPISATI_TELEMETRY_OTLP_ENDPOINT=https://c/v1", "/", false)
 	// The two inputs that found a path of one space, which no URL holds
-	// unescaped, accepted and then spelt back as %20.
+	// unescaped, accepted and then spelt back as %20. Load refuses them
+	// now for that, and for BAse_url, which is not server.base_url.
 	f.Add("", "[server]\nBAse_url=\"http://127.0.0.1\"", "PISATI_TELEMETRY_OTLP_ENDPOINT=http://A/ ", "/", true)
 	f.Add("", "[server]\nBAse_url=\"http://127.0.0.1\"", "PISATI_TELEMETRY_OTLP_ENDPOINT=http://A/ ", "/", false)
+	// A table and a key in another case, which go-toml alone would match.
+	f.Add("[SERVER]\nbase_url = \"https://blog.example.org\"\n", "[log]\nLEVEL = \"debug\"\n", "PISATI_SERVER_BASE_URL=https://b.example.org", "", false)
 
 	f.Fuzz(func(t *testing.T, file, dropIn, vars, stateDir string, credential bool) {
 		e := env{}
@@ -1707,7 +1815,38 @@ func FuzzLoad(f *testing.F) {
 			return
 		}
 		valid(t, cfg)
+		for _, text := range []string{file, dropIn} {
+			spelt(t, text)
+		}
 	})
+}
+
+// spelt fails t unless every key in text, a file Load accepted, decoded
+// by go-toml alone into a map, which keeps keys as they are written, is a
+// section or a setting spelt as the settings table spells it.
+func spelt(t *testing.T, text string) {
+	t.Helper()
+	var doc map[string]any
+	if err := toml.Unmarshal([]byte(text), &doc); err != nil {
+		t.Fatalf("Load accepted %q, which go-toml does not decode: %v", text, err)
+	}
+	keys := make(map[string]bool)
+	for _, r := range config.Table() {
+		section, _, _ := strings.Cut(r.Key, ".")
+		keys[section], keys[r.Key] = true, true
+	}
+	for section, v := range doc {
+		table, ok := v.(map[string]any)
+		if !keys[section] || !ok {
+			t.Errorf("Load accepted %q, whose key %q is no section", text, section)
+			continue
+		}
+		for name := range table {
+			if !keys[section+"."+name] {
+				t.Errorf("Load accepted %q, whose key %q is no setting", text, section+"."+name)
+			}
+		}
+	}
 }
 
 // errorsAreTheAPI fails t unless each error err joins wraps one of the

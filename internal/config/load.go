@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"path"
 	"strings"
@@ -58,11 +59,14 @@ type Sources struct {
 // it replaces the default state directory.
 //
 // The error reports every unknown key in each file, every unknown
-// PISATI_ variable, and every value read that its rule refuses. Decoding a
-// file stops at its first syntax or type error, so a file with one is
-// reported once, at that error, and none of its settings are used; no
-// setting is then reported missing, as that file may hold it. A refused
-// secret it holds before the error is still reported.
+// PISATI_ variable, and every value read that its rule refuses. A key is
+// known only when spelt exactly as its setting is, in lower case: [SERVER]
+// or BAse_url is an unknown key, named as written with its file, whose
+// value is not used, and the setting it would set is not also reported
+// missing. Decoding a file stops at its first syntax or type error, so a
+// file with one is reported once, at that error, and none of its settings
+// are used; no setting is then reported missing, as that file may hold
+// it. A refused secret it holds before the error is still reported.
 //
 // A secret is never given in place: keys.main_key in any source is an
 // error. The main key comes from the file keys.main_key_file names,
@@ -88,11 +92,11 @@ func Load(ctx context.Context, src Sources, stateDirEnv string) (Config, error) 
 	for _, name := range UnknownEnv(src.EnvNames) {
 		errs = append(errs, fmt.Errorf("%s: %w", name, ErrUnknown))
 	}
-	cfg, refusedValues, missing := build(merged)
+	cfg, refusedValues, missing := build(merged, files.otherCase)
 	errs = append(errs, refusedValues...)
 	if len(files.unread) == 0 {
 		errs = append(errs, missing...)
-		errs = append(errs, missingCertificate(merged.Dev, cfg.Dev)...)
+		errs = append(errs, missingCertificate(merged.Dev, cfg.Dev, files.otherCase)...)
 	}
 
 	// systemd's $STATE_DIRECTORY replaces the default, but not a value a
@@ -121,8 +125,9 @@ func Load(ctx context.Context, src Sources, stateDirEnv string) (Config, error) 
 
 // missingCertificate reports dev.vite_cert_file and dev.vite_key_file
 // missing when dev, as built from the merged layer given, has an https
-// Vite dev server: Vite serves https only with both.
-func missingCertificate(given devLayer, dev Dev) []error {
+// Vite dev server: Vite serves https only with both. A setting a file
+// holds in another case, in otherCase, is not reported missing.
+func missingCertificate(given devLayer, dev Dev, otherCase map[string]bool) []error {
 	u, ok := dev.ViteURL.Get()
 	if !ok || u.Scheme != "https" {
 		return nil
@@ -138,7 +143,7 @@ func missingCertificate(given devLayer, dev Dev) []error {
 		default:
 			continue
 		}
-		if v == nil {
+		if v == nil && !otherCase[s.key] {
 			errs = append(errs, fmt.Errorf("%s: %w: the Vite dev server is https, so it needs a certificate and its key; want %s", s.label(), ErrMissing, s.value))
 		}
 	}
@@ -163,6 +168,10 @@ type configFiles struct {
 	// unread names each file or directory that could not be read in
 	// full, none of whose settings are used.
 	unread []string
+	// otherCase holds the key of each setting a file holds in another
+	// case, as an unknown key, which is reported, and so not reported
+	// missing as well.
+	otherCase map[string]bool
 }
 
 // readFiles reads pisati.toml, then each pisati.toml.d/*.toml in name
@@ -204,7 +213,9 @@ func readFiles(ctx context.Context, fsys fs.FS) (configFiles, error) {
 // alone spoil nothing: go-toml decodes the rest of the file. But go-toml
 // stops at any other failure, and may leave the field it was filling set
 // to nothing, so such a file gives none of its settings, though a refused
-// secret decoded before the failure is still reported.
+// secret decoded before the failure is still reported. A file holding a
+// key in another case, which go-toml alone would take for its setting, is
+// read through readMap instead.
 func (f *configFiles) read(fsys fs.FS, name string) {
 	data, err := readBounded(fsys, name)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -215,10 +226,37 @@ func (f *configFiles) read(fsys fs.FS, name string) {
 		f.unread = append(f.unread, name)
 		return
 	}
+	// go-toml matches a key to a field whatever its case, so a file that
+	// holds one in another case is read from a map, which keeps keys as
+	// written: only those spelt as the settings table spells them count.
+	var doc map[string]any
+	if toml.Unmarshal(data, &doc) == nil && inOtherCase(doc) {
+		f.readMap(name, doc)
+		return
+	}
 	var l layer
 	err = toml.NewDecoder(bytes.NewReader(data)).DisallowUnknownFields().Decode(&l)
 	f.errs = append(f.errs, decodeErrors(name, data, err)...)
 	if _, unknownOnly := errors.AsType[*toml.StrictMissingError](err); err != nil && !unknownOnly {
+		f.errs = append(f.errs, refusals(name, &l)...)
+		f.unread = append(f.unread, name)
+		return
+	}
+	overlay(&f.values, &l)
+}
+
+// readMap merges the settings of doc, the file name decoded into a map,
+// into the values, as fromMap reads them. A value of the wrong type is
+// reported as a decode failure is: the file gives none of its settings.
+func (f *configFiles) readMap(name string, doc map[string]any) {
+	l, unknown, wrongType, otherCase := fromMap(name, doc)
+	f.errs = append(f.errs, unknown...)
+	if f.otherCase == nil {
+		f.otherCase = make(map[string]bool)
+	}
+	maps.Copy(f.otherCase, otherCase)
+	if len(wrongType) > 0 {
+		f.errs = append(f.errs, wrongType...)
 		f.errs = append(f.errs, refusals(name, &l)...)
 		f.unread = append(f.unread, name)
 		return
@@ -323,8 +361,10 @@ func refusal(s setting, k refused) error {
 // build turns the merged layer into a Config, going by the settings
 // table: each value given, or each default, goes through its setting's
 // apply. It returns the values refused, and apart from them the settings
-// missing, which Load reports only when it read every file.
-func build(l layer) (c Config, refusedValues, missing []error) {
+// missing, which Load reports only when it read every file. A setting a
+// file holds in another case, in otherCase, is not reported missing: that
+// key is reported unknown.
+func build(l layer, otherCase map[string]bool) (c Config, refusedValues, missing []error) {
 	for _, s := range settings() {
 		switch k := s.kind.(type) {
 		case text:
@@ -337,7 +377,9 @@ func build(l layer) (c Config, refusedValues, missing []error) {
 				case applyDefault:
 					v = s.def
 				case reportMissing:
-					missing = append(missing, fmt.Errorf("%s: %w: want %s", s.label(), ErrMissing, s.value))
+					if !otherCase[s.key] {
+						missing = append(missing, fmt.Errorf("%s: %w: want %s", s.label(), ErrMissing, s.value))
+					}
 					continue
 				case leaveToRules:
 					continue
@@ -356,7 +398,9 @@ func build(l layer) (c Config, refusedValues, missing []error) {
 				case applyDefault:
 					items = splitList(s.def)
 				case reportMissing:
-					missing = append(missing, fmt.Errorf("%s: %w: want %s", s.label(), ErrMissing, s.value))
+					if !otherCase[s.key] {
+						missing = append(missing, fmt.Errorf("%s: %w: want %s", s.label(), ErrMissing, s.value))
+					}
 					continue
 				case leaveToRules:
 					continue

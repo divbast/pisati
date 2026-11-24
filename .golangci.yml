@@ -173,6 +173,7 @@ linters:
             - github.com/divbast/pisati
             - go.uber.org/goleak
             - github.com/divbast/ci # the acceptance suite's harness and contract
+            - github.com/pelletier/go-toml/v2 # decodes a file Load accepted as a map, to check each key it holds
             - golang.org/x/crypto/chacha20poly1305 # checks the sealed format against the cipher itself
             - go.opentelemetry.io/proto/otlp # decodes what the OTLP exporter sends, to check it
             - google.golang.org/protobuf/proto # the same
