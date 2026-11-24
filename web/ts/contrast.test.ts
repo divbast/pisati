@@ -109,8 +109,8 @@ function clamp(v: number): number {
 
 // Linear sRGB of an oklch colour, each channel clipped to sRGB, as
 // browsers show a colour outside the screen's gamut. CSS Color 4 asks for
-// the chroma to be reduced instead, but browsers do not do that, and
-// clipping is the worse of the two for contrast, so it is what counts.
+// the chroma to be reduced instead, but browsers ship clipping, so the
+// test measures the colour they show.
 function rgb([l, c, h]: readonly [number, number, number]): Rgb {
   const [r, g, b] = linear([l, c, h]);
   return [clamp(r), clamp(g), clamp(b)];

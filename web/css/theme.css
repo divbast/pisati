@@ -42,7 +42,11 @@
       oklch(99% 0.004 var(--accent-hue)),
       oklch(18% 0.012 var(--accent-hue))
     );
-    /* Selected text, muted or not, keeps 4.5:1 on it in both schemes. */
+    /*
+     * Selected text of every kind, muted text among it, reads in
+     * --color-text on the selection, as base.css's ::selection sets
+     * it, and --color-text keeps 4.5:1 on it in both schemes.
+     */
     --color-selection: light-dark(
       oklch(88% 0.06 var(--accent-hue)),
       oklch(34% 0.08 var(--accent-hue))
