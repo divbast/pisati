@@ -142,8 +142,8 @@ type Options struct {
 
 // DefaultOptions returns the Options Pisati runs with: 4 workers, a 5 min
 // lease, a backoff of 30 s doubling to 6 h with ±20% jitter, 12 attempts,
-// a poll every second, an 8 s drain, and a sweep every hour that keeps
-// done jobs for 7 days and dead ones for 30.
+// a poll every second, an 8 s drain, and a sweep every 10 minutes that
+// keeps done jobs for 7 days and dead ones for 30.
 func DefaultOptions() Options {
 	return Options{
 		Workers:     4,
@@ -154,7 +154,7 @@ func DefaultOptions() Options {
 		MaxAttempts: 12,
 		Poll:        time.Second,
 		Drain:       8 * time.Second,
-		SweepEvery:  time.Hour,
+		SweepEvery:  10 * time.Minute,
 		KeepDone:    7 * 24 * time.Hour,
 		KeepDead:    30 * 24 * time.Hour,
 	}

@@ -16,7 +16,7 @@ import (
 )
 
 // sweepTest is a Worker whose clock runs ahead of the bubble's by as much
-// as the test says, so that its jobs age days in the hour between two
+// as the test says, so that its jobs age days in the time between two
 // sweeps. Its handlers finish test.ok jobs and send test.bad jobs to the
 // dead letter.
 type sweepTest struct {
@@ -65,7 +65,7 @@ func wantStates(t *testing.T, s *store.Store, when string, want ...string) {
 }
 
 func TestSweepRemovesOldJobs(t *testing.T) {
-	t.Run("hourly, once their retention has passed", func(t *testing.T) {
+	t.Run("every 10 minutes, once their retention has passed", func(t *testing.T) {
 		inBubble(t, func(t *testing.T, s *store.Store) {
 			st := newSweepTest(t, s)
 			doneKey, deadKey := key(t, "done"), key(t, "dead")
@@ -78,13 +78,13 @@ func TestSweepRemovesOldJobs(t *testing.T) {
 			synctest.Wait()
 			wantStates(t, s, "once run", "done", "dead", "ready")
 
-			// The sweep an hour in finds the done job two hours short of
+			// The sweep 10 minutes in finds the done job two hours short of
 			// its retention.
 			st.ahead.Store(int64(st.opts.KeepDone - 2*time.Hour))
 			time.Sleep(st.opts.SweepEvery + time.Minute)
 			wantStates(t, s, "short of a week", "done", "dead", "ready")
 
-			// Past it now, but no sweep runs until the next hour.
+			// Past it now, but no sweep runs until the next one, 10 minutes on.
 			st.ahead.Store(int64(st.opts.KeepDone))
 			time.Sleep(st.opts.SweepEvery - 2*time.Minute)
 			wantStates(t, s, "between sweeps", "done", "dead", "ready")

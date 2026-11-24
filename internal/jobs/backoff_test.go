@@ -29,7 +29,7 @@ func TestDefaultOptions(t *testing.T) {
 		MaxAttempts: 12,
 		Poll:        time.Second,
 		Drain:       8 * time.Second,
-		SweepEvery:  time.Hour,
+		SweepEvery:  10 * time.Minute,
 		KeepDone:    7 * 24 * time.Hour,
 		KeepDead:    30 * 24 * time.Hour,
 	}
