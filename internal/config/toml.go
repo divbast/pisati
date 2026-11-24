@@ -138,11 +138,11 @@ func knownSetting(key string) bool {
 	return slices.ContainsFunc(settings(), func(s setting) bool { return s.key == key })
 }
 
-// failedKey returns the key of the expression data fails to parse in, as
+// failedKey returns the key of the expression data fails to decode in, as
 // TOML, at offset at, with the table that holds it: as much of the key as
 // reads, or the table alone when no key does or the failure is in a
-// comment. go-toml's errors name the key for a value it cannot decode, but
-// none for text that does not parse.
+// comment. go-toml's errors name no key for text that does not parse, and
+// for a key given twice only the key as its table holds it.
 //
 // Every expression before the one that fails is valid TOML, so a scan that
 // follows only lines, strings, brackets and comments finds where each

@@ -785,6 +785,27 @@ func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 			value: []string{needle},
 		},
 		{
+			name:  "a secret's key given twice",
+			file:  "[keys]\nmain_key = \"" + needle + "\"\nmain_key = \"y-" + needle + "\"\n",
+			want:  "pisati.toml:3:1: keys.main_key" + fixed,
+			value: []string{needle},
+			crlf:  true,
+		},
+		{
+			name:  "a key given twice, once dotted",
+			file:  "[log]\nlevel = \"debug\"\n[server]\nlisten = \":1\"\n[log]\nformat = \"text\"\n",
+			want:  "pisati.toml:5:2: log" + fixed,
+			value: []string{"debug", "text"},
+			crlf:  true,
+		},
+		{
+			name:  "a key given twice at the top, dotted",
+			file:  "log.level = \"debug\"\nlog.level = \"warn\"\n",
+			want:  "pisati.toml:2:1: log.level" + fixed,
+			value: []string{"debug", "warn"},
+			crlf:  true,
+		},
+		{
 			name:  "an invalid escape inside a secret",
 			file:  "[keys]\nmain_key = \"ЖЩ\\ЮЯ\"\n",
 			want:  "pisati.toml:2:17: keys.main_key" + fixed,
