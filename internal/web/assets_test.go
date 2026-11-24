@@ -288,6 +288,23 @@ func TestNewAssetsRefusesABadBuild(t *testing.T) {
 	})
 }
 
+// TestNewAssetsRefusesAnInputOfTheWrongKind checks that StyleTag can only
+// ever give a stylesheet and ScriptTag a script: a manifest that builds
+// either input to the other kind of file is refused, naming the input.
+func TestNewAssetsRefusesAnInputOfTheWrongKind(t *testing.T) {
+	for input, m := range map[string]string{
+		"web/css/layers.css": `{"web/css/layers.css": {"file": "assets/main-BvRk9kiK.js", "isEntry": true}}`,
+		"web/ts/main.ts":     `{"web/ts/main.ts": {"file": "assets/layers-CzttEyLW.css", "isEntry": true}}`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			a, err := web.NewAssets(t.Context(), build(m), baseURL(t, "https://blog.example.org"), config.Dev{})
+			if !errors.Is(err, web.ErrBuild) || !strings.Contains(err.Error(), input) {
+				t.Fatalf("NewAssets = %v, %v; want an error wrapping ErrBuild that names %s", a, err, input)
+			}
+		})
+	}
+}
+
 func TestNewAssetsStopsWhenCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -455,15 +472,16 @@ func TestZeroAssetTag(t *testing.T) {
 }
 
 // FuzzNewAssets checks that every manifest gives either an error wrapping
-// ErrBuild or Assets whose every tag names a file the handler serves, with
-// the integrity of what it serves, and that the handler never serves the
-// manifest.
+// ErrBuild or Assets whose every tag is of its entry's kind and names a
+// file the handler serves, with the integrity of what it serves, and that
+// the handler never serves the manifest.
 func FuzzNewAssets(f *testing.F) {
 	f.Add(manifest)
 	f.Add(`{"web/ts/main.ts": {"file": "assets/main-BvRk9kiK.js", "isEntry": true}}`)
 	f.Add(`{"web/css/layers.css": {"file": "assets/layers-CzttEyLW.css", "isEntry": true, "assets": ["assets/stale-Q1w2e3r4.js"]}}`)
 	f.Add(`{"a": {"file": ".vite/manifest.json"}}`)
 	f.Add(`{"a": {"file": "assets/stale-Q1w2e3r4.js", "imports": ["b"]}, "b": {"file": "PLACEHOLDER"}}`)
+	f.Add(`{"web/css/layers.css": {"file": "assets/main-BvRk9kiK.js", "isEntry": true}}`)
 	f.Fuzz(func(t *testing.T, m string) {
 		a, err := web.NewAssets(t.Context(), build(m), baseURL(t, "https://blog.example.org"), config.Dev{})
 		if err != nil {
@@ -478,14 +496,21 @@ func FuzzNewAssets(f *testing.F) {
 				t.Fatalf("GET %s: %d", target, w.Code)
 			}
 		}
-		for _, tt := range tags {
+		for _, tt := range []struct {
+			name string
+			of   func(*web.Assets) (web.AssetTag, bool)
+			kind web.AssetKind
+		}{
+			{name: "StyleTag", of: (*web.Assets).StyleTag, kind: web.Stylesheet},
+			{name: "ScriptTag", of: (*web.Assets).ScriptTag, kind: web.Script},
+		} {
 			tag, ok := tt.of(a)
 			if !ok {
 				continue
 			}
 			integrity, ok := tag.Integrity()
-			if !ok || (tag.Kind() != web.Script && tag.Kind() != web.Stylesheet) {
-				t.Fatalf("%s = %+v", tt.name, tag)
+			if !ok || tag.Kind() != tt.kind {
+				t.Fatalf("%s = %+v, want a %v with its integrity", tt.name, tag, tt.kind)
 			}
 			w := get(t, h, http.MethodGet, tag.URL())
 			if w.Code != http.StatusOK || sri(w.Body.Bytes()) != integrity {

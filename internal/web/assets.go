@@ -222,17 +222,22 @@ func NewAssets(ctx context.Context, fsys fs.FS, base config.BaseURL, dev config.
 		}
 		files[name] = f
 	}
-	return &Assets{style: m.tag(styleInput, files), script: m.tag(scriptInput, files), files: files}, nil
+	return &Assets{
+		style:  m.tag(styleInput, Stylesheet, files),
+		script: m.tag(scriptInput, Script, files),
+		files:  files,
+	}, nil
 }
 
-// tag returns the tag of input, a build input, from files, which holds
-// every file m names: the zero AssetTag when m has no such entry.
-func (m manifest) tag(input string, files map[string]file) AssetTag {
+// tag returns the tag of input, a build input that parseManifest has
+// checked builds to a file of kind, from files, which holds every file m
+// names: the zero AssetTag when m has no such entry.
+func (m manifest) tag(input string, kind AssetKind, files map[string]file) AssetTag {
 	c, ok := m[input]
 	if !ok || !c.IsEntry {
 		return AssetTag{}
 	}
-	return AssetTag{kind: entryKind(c.File), url: staticURL(c.File), integrity: integrity(files[c.File].data)}
+	return AssetTag{kind: kind, url: staticURL(c.File), integrity: integrity(files[c.File].data)}
 }
 
 // StyleTag returns the tag of the stylesheet every page links, and
@@ -326,8 +331,9 @@ type chunk struct {
 
 // parseManifest decodes raw as Vite's manifest, refusing any field Vite's
 // ManifestChunk lacks, and checks that every file it names can be served,
-// a stylesheet or a script, and that no entry loads another file, which a
-// page's tag could not check. Its errors wrap
+// a stylesheet or a script, that the stylesheet input builds to a .css
+// file and the script input to a .js file, and that no entry loads another
+// file, which a page's tag could not check. Its errors wrap
 // ErrBuild, and report every such problem at once.
 func parseManifest(raw []byte) (manifest, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -352,6 +358,13 @@ func parseManifest(raw []byte) (manifest, error) {
 			if err := servable(name); err != nil {
 				errs = append(errs, fmt.Errorf("%w: %q names %q: %w", ErrBuild, key, name, err))
 			}
+		}
+	}
+	// StyleTag gives a stylesheet and ScriptTag a script, whatever the
+	// manifest says the inputs build to.
+	for _, want := range [...]struct{ input, ext string }{{styleInput, ".css"}, {scriptInput, ".js"}} {
+		if c, ok := m[want.input]; ok && c.IsEntry && path.Ext(c.File) != want.ext {
+			errs = append(errs, fmt.Errorf("%w: the input %q builds to %q, not a %s file", ErrBuild, want.input, c.File, want.ext))
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
@@ -428,15 +441,6 @@ func readFile(ctx context.Context, fsys fs.FS, name string, limit int64) (data [
 		return nil, fmt.Errorf("%w: %q is bigger than %d bytes", ErrBuild, name, limit)
 	}
 	return data, nil
-}
-
-// entryKind returns the kind of element that loads file, an entry's
-// built file, which parseManifest has checked is a stylesheet or a script.
-func entryKind(file string) AssetKind {
-	if path.Ext(file) == ".css" {
-		return Stylesheet
-	}
-	return Script
 }
 
 // contentType returns the Content-Type Handler serves name with, and

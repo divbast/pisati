@@ -1,0 +1,13 @@
+[
+  { "path": "/home/dev/certs/localhost.pem", "valid": true },
+  { "path": "/home/dev/certs/localhost-key.pem", "valid": true },
+  { "path": "/", "valid": true },
+  { "path": "certs/localhost.pem", "valid": false },
+  { "path": "localhost.pem", "valid": false },
+  { "path": "./localhost.pem", "valid": false },
+  { "path": "/home/dev/./certs/localhost.pem", "valid": false },
+  { "path": "/home/dev/../dev/localhost.pem", "valid": false },
+  { "path": "/home//dev/localhost.pem", "valid": false },
+  { "path": "/home/dev/certs/", "valid": false },
+  { "path": "", "valid": false }
+]

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
-// Every colour pair a page shows, from the tokens in theme.css, meets
-// WCAG 2.2's contrast minimums, in both schemes, with more contrast asked
-// for or not, and at every accent hue a blog may set: 4.5:1 for text
-// (1.4.3), and 3:1 for what marks out a control or its state (1.4.11) and
-// for the lines that only separate, which Pisati holds to the same.
+// The colour pairs in the list below, each a foreground --color-* token of
+// theme.css on a background one, meet WCAG 2.2's contrast minimums, in
+// both schemes, with more contrast asked for or not, and at every accent
+// hue a blog may set: 4.5:1 for text (1.4.3), and 3:1 for what marks out a
+// control or its state (1.4.11) and for the lines that only separate,
+// which Pisati holds to the same. The test reads every --color-* token,
+// fails on one it cannot read, and on one that takes currentcolor, whose
+// colour depends on where it is used.
 
 import { expect, it } from "vite-plus/test";
 
@@ -14,8 +17,8 @@ import theme from "../css/theme.css?raw";
 type Oklch = readonly [lightness: number, chroma: number, hue: number | "accent"];
 type Scheme = "light" | "dark";
 type Rgb = readonly [number, number, number];
-// A colour token: a value for each scheme, another token's name, or the
-// colour currentcolor stands for, at a share, over transparent.
+// A colour token: a value for each scheme, another token's name, or
+// another token's colour at a share, over transparent.
 type Token =
   | Readonly<Record<Scheme, Oklch>>
   | { readonly alias: string }
@@ -28,12 +31,9 @@ const pair = new RegExp(
 );
 const alias = /--color-([a-z-]+):\s*var\(--color-([a-z-]+)\)/gu;
 const mix =
-  /--color-([a-z-]+):\s*color-mix\(\s*in oklch\s*,\s*currentcolor\s+([\d.]+)%\s*,\s*transparent\s*\)/gu;
-
-// The text colour of the elements each currentcolor token is used on,
-// which currentcolor then is: rules, table lines and fieldsets sit in
-// running text, in the text colour.
-const currentcolorOf: Readonly<Record<string, string>> = { rule: "text" };
+  /--color-([a-z-]+):\s*color-mix\(\s*in oklch\s*,\s*var\(--color-([a-z-]+)\)\s+([\d.]+)%\s*,\s*transparent\s*\)/gu;
+// Every --color-* declaration, with its value.
+const declaration = /--color-([a-z-]+)\s*:([^;]*);/gu;
 
 function colour(l: string, c: string, h: string): Oklch {
   return [Number(l) / 100, Number(c), h.startsWith("var(") ? "accent" : Number(h)];
@@ -50,16 +50,19 @@ function tokens(css: string): ReadonlyMap<string, Token> {
   for (const [, name = "", target = ""] of css.matchAll(alias)) {
     found.set(name, { alias: target });
   }
-  for (const [, name = "", share = ""] of css.matchAll(mix)) {
-    const text = currentcolorOf[name];
-    if (text === undefined) {
-      throw new Error(
-        `--color-${name} mixes currentcolor, and the test does not know what text colour it is used in`,
-      );
-    }
-    found.set(name, { mix: text, share: Number(share) / 100 });
+  for (const [, name = "", over = "", share = ""] of css.matchAll(mix)) {
+    found.set(name, { mix: over, share: Number(share) / 100 });
   }
   return found;
+}
+
+// The --color-* tokens css declares that tokens cannot read, and so no
+// pair could check.
+function unread(css: string): string[] {
+  const read = tokens(css);
+  return [...css.matchAll(declaration)]
+    .map(([, name = ""]) => name)
+    .filter((name) => !read.has(name));
 }
 
 const more = "@media (prefers-contrast: more)";
@@ -178,6 +181,7 @@ const pairs: readonly [fore: string, back: string, least: number][] = [
   ["text", "canvas", 4.5],
   ["text", "surface", 4.5],
   ["text", "selection", 4.5],
+  ["text-muted", "selection", 4.5],
   ["text-muted", "canvas", 4.5],
   ["accent", "canvas", 4.5],
   ["accent-strong", "canvas", 4.5],
@@ -204,7 +208,20 @@ it.each(pairs)("--color-%s on --color-%s meets %d:1", (fore, back, least) => {
   }
 });
 
-it("reads every colour token, so a pair above never goes unchecked", () => {
+it("reads every colour token theme.css declares, in either block", () => {
+  const at = theme.indexOf(more);
+  expect(unread(theme.slice(0, at))).toEqual([]);
+  expect(unread(theme.slice(at))).toEqual([]);
+});
+
+it("has no colour token that takes currentcolor, whose colour depends on where it is used", () => {
+  const takers = [...theme.matchAll(declaration)]
+    .filter(([, , value = ""]) => /currentcolor/iu.test(value))
+    .map(([, name = ""]) => name);
+  expect(takers).toEqual([]);
+});
+
+it("knows every colour token, so that each one new gets its pairs", () => {
   expect([...base.keys()].toSorted()).toEqual(
     [
       "accent",

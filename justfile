@@ -166,9 +166,10 @@ secrets:
 # Oxfmt honour as a suppression, in each of its forms (-line, -next-line
 # and the rest); and each ignore file these tools read, tracked anywhere or
 # present at the root, where they read one. Each pattern brackets one
-# character, so that this recipe never matches itself. .gitignore, which
-# Oxlint and Oxfmt also skip by, is the repository's own: review covers
-# its entries, as it does the configs' own ignore lists.
+# character, so that this recipe never matches itself, and names match in
+# any case, as macOS's file system does. The repository needs .gitignore,
+# so this cannot refuse it, though Oxlint and Oxfmt skip what it lists
+# too: review covers its entries, as it does the configs' own ignore lists.
 
 # Fail on any suppression comment or ignore file
 [script("mise", "exec", "--", "bash", "-euo", "pipefail")]
@@ -177,7 +178,7 @@ _fe-no-suppression:
     hits=$(git grep --untracked -n -o -i -I -E -e '(oxlint|eslint|stylelint)[-]disable[a-z-]*' \
         -e '@ts[-](ignore|expect-error|nocheck)' -e '(prettier|oxfmt)[-]ignore[a-z-]*' || [[ $? -eq 1 ]])
     ignores=$({ git ls-files; ls -A; } |
-        grep -E '(^|/)[.](stylelint|prettier|oxlint|eslint|oxfmt)ignore$' | sort -u || true)
+        grep -i -E '(^|/)[.](stylelint|prettier|oxlint|eslint|oxfmt)ignore$' | sort -u || true)
     status=0
     if [[ -n "${hits}" ]]; then
         while IFS=: read -r file line what; do

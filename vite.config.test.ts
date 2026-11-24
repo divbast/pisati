@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
-import { expect, it } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 
-import { devCertificate, devServerURL, scriptTargets } from "./vite.config.ts";
+import type { ConfigEnv } from "vite-plus";
+
+import paths from "./internal/config/testdata/dev-certificate-paths.json";
+
+import {
+  certificateFiles,
+  devCertificate,
+  devHTTPS,
+  devServerURL,
+  scriptTargets,
+} from "./vite.config.ts";
 
 it("targets the oldest version of each engine, comparing versions as numbers", () => {
   expect(
@@ -57,4 +67,79 @@ it.each<[string, Readonly<Record<string, string>>, RegExp]>([
   ["neither", {}, /PISATI_DEV_VITE_CERT_FILE.*PISATI_DEV_VITE_KEY_FILE/u],
 ])("refuses an https dev server with %s, naming what is missing", (_case, env, message) => {
   expect(() => devCertificate(new URL("https://localhost:5174"), env)).toThrow(message);
+});
+
+// Each path of the table Pisati's config test reads too, so that Pisati and
+// Vite agree on what a certificate or key path may be: a valid one is
+// accepted in either variable, and any other refused, whenever it is set
+// and whatever the dev server, without its value in the error, since it
+// may be the key itself, pasted by mistake.
+it.each(paths)("takes %j as Pisati does", ({ path, valid }: Readonly<(typeof paths)[number]>) => {
+  for (const name of ["PISATI_DEV_VITE_CERT_FILE", "PISATI_DEV_VITE_KEY_FILE"]) {
+    const check = (): void => {
+      certificateFiles({ [name]: path });
+    };
+    if (valid) {
+      expect(check).not.toThrow();
+      continue;
+    }
+    expect(check).toThrow(name);
+    if (path !== "") {
+      expect(check).not.toThrow(path);
+    }
+  }
+});
+
+it("accepts no certificate variables at all", () => {
+  expect(() => {
+    certificateFiles({});
+  }).not.toThrow();
+});
+
+// Only vp dev starts the dev server, so only it needs the certificate
+// files and reads them: vp build, Vitest's test mode and vp preview never do.
+it.each<[string, ConfigEnv]>([
+  ["vp build", { command: "build", mode: "production" }],
+  ["vp test", { command: "serve", mode: "test" }],
+  ["vp preview", { command: "serve", mode: "production", isPreview: true }],
+])("never needs or reads the certificate for %s", (_case, configEnv) => {
+  const reads: string[] = [];
+  const record = (path: string): string => {
+    reads.push(path);
+    return path;
+  };
+  expect(devHTTPS(configEnv, new URL("https://localhost:5174"), {}, record)).toBeUndefined();
+  expect(reads).toEqual([]);
+});
+
+function read(path: string): string {
+  return `read ${path}`;
+}
+
+it("reads the certificate for vp dev, and refuses to start without it", () => {
+  const dev: ConfigEnv = { command: "serve", mode: "development" };
+  const https = new URL("https://localhost:5174");
+  expect(() => devHTTPS(dev, https, {}, read)).toThrow("PISATI_DEV_VITE_CERT_FILE");
+  expect(
+    devHTTPS(
+      dev,
+      https,
+      { PISATI_DEV_VITE_CERT_FILE: "/c.pem", PISATI_DEV_VITE_KEY_FILE: "/k.pem" },
+      read,
+    ),
+  ).toEqual({ cert: "read /c.pem", key: "read /k.pem" });
+  expect(devHTTPS(dev, new URL("http://localhost:5173"), {}, read)).toBeUndefined();
+});
+
+// The rule holds for every command: the configuration itself, which vp
+// check, vp test and vp build load as vp dev does, refuses to load.
+it("refuses to load the configuration with a malformed certificate variable", async () => {
+  vi.stubEnv("PISATI_DEV_VITE_KEY_FILE", "certs/localhost-key.pem");
+  vi.resetModules();
+  try {
+    await expect(import("./vite.config.ts")).rejects.toThrow("PISATI_DEV_VITE_KEY_FILE");
+  } finally {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  }
 });

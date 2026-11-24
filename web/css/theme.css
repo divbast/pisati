@@ -42,9 +42,10 @@
       oklch(99% 0.004 var(--accent-hue)),
       oklch(18% 0.012 var(--accent-hue))
     );
+    /* Selected text, muted or not, keeps 4.5:1 on it in both schemes. */
     --color-selection: light-dark(
       oklch(88% 0.06 var(--accent-hue)),
-      oklch(38% 0.08 var(--accent-hue))
+      oklch(34% 0.08 var(--accent-hue))
     );
     --color-danger: light-dark(oklch(50% 0.19 27), oklch(74% 0.15 27));
     /*
@@ -58,11 +59,12 @@
     );
     /*
      * A line that only separates, a rule or a table's lines, is the text
-     * colour faded, in whatever colour the text around it is: as faint as
-     * it can be and still keep 3:1 against the page and a surface, which
-     * the contrast test checks.
+     * colour faded: the body text's, so that it looks the same in a
+     * blockquote's muted text as anywhere else, and as faint as it can be
+     * and still keep 3:1 against the page and a surface, which the
+     * contrast test checks.
      */
-    --color-rule: color-mix(in oklch, currentcolor 48%, transparent);
+    --color-rule: color-mix(in oklch, var(--color-text) 48%, transparent);
 
     &[data-theme="light"] {
       color-scheme: light;

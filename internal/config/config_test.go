@@ -6,12 +6,14 @@ package config_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"maps"
 	"net/url"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -1015,6 +1017,65 @@ func TestDevViteCertificate(t *testing.T) {
 			t.Errorf("certificate %q and key %q, want %q and %q", cfg.Dev.ViteCertFile, cfg.Dev.ViteKeyFile, cert, key)
 		}
 	})
+}
+
+// devCertificatePath is one case of testdata/dev-certificate-paths.json,
+// the table vite.config.test.ts reads too, so that Pisati and Vite agree
+// on what a certificate or key path may be.
+type devCertificatePath struct {
+	Path  string `json:"path"`
+	Valid bool   `json:"valid"`
+}
+
+// TestDevCertificatePaths checks each path of the shared table in either
+// variable, with an https, an http or no dev server: a valid one is
+// accepted, and used only with https; any other is refused whatever the
+// dev server, without its value in the error.
+func TestDevCertificatePaths(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile("testdata/dev-certificate-paths.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var cases []devCertificatePath
+	if err := dec.Decode(&cases); err != nil || len(cases) == 0 {
+		t.Fatalf("testdata/dev-certificate-paths.json: %v, %d cases", err, len(cases))
+	}
+	const other = "/home/dev/certs/other.pem"
+	for _, c := range cases {
+		for _, vite := range []string{"https://localhost:5173", "http://localhost:5173", ""} {
+			for _, name := range []string{"PISATI_DEV_VITE_CERT_FILE", "PISATI_DEV_VITE_KEY_FILE"} {
+				t.Run(fmt.Sprintf("%s %q with dev server %q", name, c.Path, vite), func(t *testing.T) {
+					t.Parallel()
+
+					e := env{
+						"PISATI_SERVER_BASE_URL": "http://localhost:8080", "PISATI_DEV_VITE_URL": vite,
+						"PISATI_DEV_VITE_CERT_FILE": other, "PISATI_DEV_VITE_KEY_FILE": other,
+					}
+					e[name] = c.Path
+					cfg, err := setup{env: e}.load(t.Context())
+					if !c.Valid {
+						refused(t, err, config.ErrInvalid, name)
+						if c.Path != "" && strings.Contains(err.Error(), c.Path) {
+							t.Errorf("error %q repeats the value %q", err, c.Path)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("Load: %v", err)
+					}
+					if got := map[string]string{
+						"PISATI_DEV_VITE_CERT_FILE": cfg.Dev.ViteCertFile, "PISATI_DEV_VITE_KEY_FILE": cfg.Dev.ViteKeyFile,
+					}[name]; got != c.Path {
+						t.Errorf("%s gives %q, want %q", name, got, c.Path)
+					}
+				})
+			}
+		}
+	}
 }
 
 func TestBaseURLIsLocal(t *testing.T) {

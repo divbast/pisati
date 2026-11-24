@@ -6,9 +6,10 @@
 
 import browserslist from "browserslist";
 import { readFileSync } from "node:fs";
+import { posix } from "node:path";
 
 import { browserslistToTargets } from "lightningcss";
-import { defineConfig, loadEnv, type Plugin, type UserConfig } from "vite-plus";
+import { defineConfig, loadEnv, type ConfigEnv, type Plugin, type UserConfig } from "vite-plus";
 
 // The browsers package.json's browserslist names, read once, so the
 // stylesheets and the scripts are built for the same ones.
@@ -108,27 +109,63 @@ export function devCertificate(
   return { cert, key };
 }
 
+// The certificate and key variables, whose values must be absolute,
+// clean paths whenever they are set, as Pisati's config requires: no "."
+// or ".." segment, no doubled or trailing slash, and not empty. A value
+// that is not one is refused for every command, whatever the dev server,
+// and never repeated, since it may be the key itself, pasted by mistake.
+export function certificateFiles(env: Readonly<Record<string, string | undefined>>): void {
+  const malformed = ["PISATI_DEV_VITE_CERT_FILE", "PISATI_DEV_VITE_KEY_FILE"].filter((name) => {
+    const path = env[name];
+    return path !== undefined && !cleanAbsolute(path);
+  });
+  if (malformed.length > 0) {
+    throw new Error(
+      `${malformed.join(" and ")}: want an absolute, clean path (the value is not shown, as it may be the key itself)`,
+    );
+  }
+}
+
+// Whether path is absolute and clean, as Go's filepath.Clean leaves an
+// absolute path unchanged.
+function cleanAbsolute(path: string): boolean {
+  return (
+    posix.isAbsolute(path) &&
+    posix.normalize(path) === path &&
+    (path === "/" || !path.endsWith("/"))
+  );
+}
+
+// The https options of the dev server, read from the certificate files
+// only when the dev server is starting for vp dev: never for vp build,
+// for Vitest, which runs a server of its own in the test mode, or for vp
+// preview, so that no other command depends on them.
+export function devHTTPS(
+  { command, mode, isPreview }: ConfigEnv,
+  url: URL,
+  env: Readonly<Record<string, string | undefined>>,
+  read: (path: string) => string,
+): { cert: string; key: string } | undefined {
+  if (command !== "serve" || mode === "test" || isPreview === true) {
+    return undefined;
+  }
+  const files = devCertificate(url, env);
+  if (files === undefined) {
+    return undefined;
+  }
+  return { cert: read(files.cert), key: read(files.key) };
+}
+
 const devEnv = loadEnv("development", false, "PISATI_DEV_");
+certificateFiles(devEnv);
 const devServer = devServerURL(devEnv);
 
-// Gives the dev server https from the certificate files, read only when
-// it starts, so that vp check, vp build, vp test and vp preview never
-// depend on them.
-function devHTTPS(): Plugin {
+function devHTTPSPlugin(): Plugin {
   return {
     name: "pisati:dev-https",
-    config(_config, { command, mode, isPreview }): UserConfig | undefined {
-      // Vitest runs a dev server too, in the test mode.
-      if (command !== "serve" || mode === "test" || isPreview === true) {
-        return undefined;
-      }
-      const files = devCertificate(devServer, devEnv);
-      if (files === undefined) {
-        return undefined;
-      }
-      return {
-        server: { https: { cert: readFileSync(files.cert), key: readFileSync(files.key) } },
-      };
+    config(_config, configEnv): UserConfig | undefined {
+      const https = devHTTPS(configEnv, devServer, devEnv, (path) => readFileSync(path, "utf8"));
+      return https === undefined ? undefined : { server: { https } };
     },
   };
 }
@@ -136,7 +173,7 @@ function devHTTPS(): Plugin {
 const targets = scriptTargets(browsers);
 
 export default defineConfig({
-  plugins: [devHTTPS()],
+  plugins: [devHTTPSPlugin()],
   // Pisati serves the build under /static/, so every URL the build writes,
   // a stylesheet's url() among them, starts there.
   base: "/static/",
@@ -214,6 +251,7 @@ export default defineConfig({
                 "HTMLFormElement",
                 "ReadonlyMap",
                 "RegExp",
+                "RegExpExecArray",
                 "RequestInit",
                 "Response",
                 "SubmitEvent",
