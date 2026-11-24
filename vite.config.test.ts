@@ -90,18 +90,25 @@ it.each(devViteURLs.filter(({ pisatiOnly }) => pisatiOnly !== true))(
   },
 );
 
-// The rule holds for every command: the configuration refuses to load,
-// here with the table's URL that holds a password.
-it("refuses to load the configuration with a URL Pisati refuses", async () => {
-  const withPassword = devViteURLs.find(({ password }) => password !== undefined);
-  expect(withPassword).toBeDefined();
-  vi.stubEnv("PISATI_DEV_VITE_URL", assembled(withPassword ?? { valid: false }));
+// The rule holds for every command: vp check, vp build and Vitest load
+// this configuration as vp dev does, so it refuses to load with each URL
+// of the table Vite refuses, and its error holds none of the value. An
+// environment variable cannot hold a NUL byte, so a URL with one is
+// checked through devServerURL alone, above.
+it.each(
+  devViteURLs.filter(
+    (testCase) =>
+      !testCase.valid && testCase.pisatiOnly !== true && !assembled(testCase).includes("\u0000"),
+  ),
+)("refuses to load the configuration with PISATI_DEV_VITE_URL %j", async (testCase: DevViteURL) => {
+  const url = assembled(testCase);
+  vi.stubEnv("PISATI_DEV_VITE_URL", url);
   vi.resetModules();
   try {
     const loading = import("./vite.config.ts");
-    await expect(loading).rejects.toThrow("it holds user information");
+    await expect(loading).rejects.toThrow("PISATI_DEV_VITE_URL: ");
     const message = await loading.then(() => "", String);
-    for (const part of userInfo(withPassword ?? { valid: false })) {
+    for (const part of [url, ...userInfo(testCase)]) {
       expect(message).not.toContain(part);
     }
   } finally {
