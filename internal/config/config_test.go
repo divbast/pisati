@@ -602,6 +602,114 @@ func TestSettingsTable(t *testing.T) {
 	}
 }
 
+// TestDecodeErrorsShowNoneOfTheFile reads files that do not decode, each
+// holding a value in a setting, a secret's among them: the error names the
+// file, line, column and key in fixed text, and holds nothing of the
+// file's text, which go-toml's own messages quote.
+func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
+	t.Parallel()
+
+	const fixed = ": invalid: it is not TOML, or not a value the setting takes (what the file holds is not shown); " +
+		"none of the file's settings are used until it decodes"
+	tests := []struct {
+		name, file, want string
+		value            []string // what of the file the error must not hold
+	}{
+		{
+			name:  "an invalid escape inside a secret",
+			file:  "[keys]\nmain_key = \"ЖЩ\\ЮЯ\"\n",
+			want:  "pisati.toml:2:17: keys.main_key" + fixed,
+			value: []string{"Ж", "Щ", "Ю", "Я", "Ð", "U+"},
+		},
+		{
+			name:  "an invalid ASCII escape inside a secret",
+			file:  "[keys]\nmain_key = \"pw\\qz\"\n",
+			want:  "pisati.toml:2:15: keys.main_key" + fixed,
+			value: []string{"'q'", "U+"},
+		},
+		{
+			name:  "a bare float out of range",
+			file:  "[keys]\nmain_key = 98765432109e999\n",
+			want:  "pisati.toml:2:12: keys.main_key" + fixed,
+			value: []string{"98765", "e999", "parsing", "strconv"},
+		},
+		{
+			name:  "a bad character at the start of a value",
+			file:  "[telemetry]\notlp_endpoint = Жhttp\n",
+			want:  "pisati.toml:2:17: telemetry.otlp_endpoint" + fixed,
+			value: []string{"Ж", "Ð", "U+", "http\n"},
+		},
+		{
+			name:  "a bad ASCII character at the start of a value",
+			file:  "[keys]\nmain_key = hunter2\n",
+			want:  "pisati.toml:2:12: keys.main_key" + fixed,
+			value: []string{"'h'", "U+", "hunter"},
+		},
+		{
+			name:  "a bad character at the start of a key, in a table",
+			file:  "[keys]\nЖmain_key = \"x\"\n",
+			want:  "pisati.toml:2:1: keys" + fixed,
+			value: []string{"Ж", "Ð", "U+"},
+		},
+		{
+			name:  "a bad character at the start of a dotted key, at the top",
+			file:  "keys.main_key = \"x\"\n!q = 1\n",
+			want:  "pisati.toml:2:1" + fixed,
+			value: []string{"'!'", "U+"},
+		},
+		{
+			name:  "junk after a quoted key's value",
+			file:  "[keys]\n\"main_key\" = \"pw\" Ж\n",
+			want:  "pisati.toml:2:19: keys.main_key" + fixed,
+			value: []string{"Ж", "Ð", "U+"},
+		},
+		{
+			name:  "an invalid escape after a comment",
+			file:  "[keys]\n# the key\nmain_key = \"pw\\qz\"\n",
+			want:  "pisati.toml:3:15: keys.main_key" + fixed,
+			value: []string{"'q'", "U+"},
+		},
+		{
+			name:  "a control character in a comment before a key",
+			file:  "[keys]\n# the \x01 key\nmain_key = \"pw\"\n",
+			want:  "pisati.toml:2:7: keys" + fixed,
+			value: []string{"U+", "\x01"},
+		},
+		{
+			name:  "a table name left open",
+			file:  "[keys\n",
+			want:  "pisati.toml:1:6: keys" + fixed,
+			value: []string{"']'"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := setup{
+				files: fstest.MapFS{"pisati.toml": tomlFile(tt.file)},
+				env:   env{"PISATI_SERVER_BASE_URL": baseURL},
+			}.load(t.Context())
+			refused(t, err, config.ErrInvalid, tt.want)
+			parts := []error{err}
+			if joined, ok := errors.AsType[interface {
+				error
+				Unwrap() []error
+			}](err); ok {
+				parts = joined.Unwrap()
+			}
+			if !slices.ContainsFunc(parts, func(e error) bool { return e.Error() == tt.want }) {
+				t.Errorf("error %q has no part that is exactly %q", err, tt.want)
+			}
+			for _, v := range tt.value {
+				if strings.Contains(err.Error(), v) {
+					t.Errorf("error %q holds %q, from the file", err, v)
+				}
+			}
+		})
+	}
+}
+
 func TestLoadListsEveryError(t *testing.T) {
 	t.Parallel()
 

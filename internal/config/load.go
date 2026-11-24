@@ -217,7 +217,7 @@ func (f *configFiles) read(fsys fs.FS, name string) {
 	}
 	var l layer
 	err = toml.NewDecoder(bytes.NewReader(data)).DisallowUnknownFields().Decode(&l)
-	f.errs = append(f.errs, decodeErrors(name, err)...)
+	f.errs = append(f.errs, decodeErrors(name, data, err)...)
 	if _, unknownOnly := errors.AsType[*toml.StrictMissingError](err); err != nil && !unknownOnly {
 		f.errs = append(f.errs, refusals(name, &l)...)
 		f.unread = append(f.unread, name)
@@ -253,11 +253,12 @@ func readBounded(fsys fs.FS, name string) (data []byte, err error) {
 	return data, nil
 }
 
-// decodeErrors turns what decoding the file name returned into one error
-// for each problem, each giving the file, line and column, and the key
-// when there is one. They never quote the file, which may hold a secret
-// in a key Load refuses.
-func decodeErrors(name string, err error) []error {
+// decodeErrors turns what decoding data, the file name, returned into one
+// error for each problem. An unknown key's gives the file, line and
+// column, and the key. Any other gives the file, and the line, column and
+// key when go-toml or failedKey can tell them, in fixed text: never
+// go-toml's own message, which may quote the file, and so a secret in it.
+func decodeErrors(name string, data []byte, err error) []error {
 	if err == nil {
 		return nil
 	}
@@ -269,16 +270,37 @@ func decodeErrors(name string, err error) []error {
 		}
 		return errs
 	}
-	const unused = "none of the file's settings are used until it decodes"
-	if de, ok := errors.AsType[*toml.DecodeError](err); ok {
-		row, col := de.Position()
-		where := fmt.Sprintf("%s:%d:%d", name, row, col)
-		if key := de.Key(); len(key) > 0 {
-			where += ": " + strings.Join(key, ".")
-		}
-		return []error{fmt.Errorf("%s: %w: %s; %s", where, ErrInvalid, strings.TrimPrefix(de.Error(), "toml: "), unused)}
+	const why = "it is not TOML, or not a value the setting takes (what the file holds is not shown); " +
+		"none of the file's settings are used until it decodes"
+	de, ok := errors.AsType[*toml.DecodeError](err)
+	if !ok {
+		return []error{fmt.Errorf("%s: %w: %s", name, ErrInvalid, why)}
 	}
-	return []error{fmt.Errorf("%s: %w: %w; %s", name, ErrInvalid, err, unused)}
+	row, col := de.Position()
+	where := fmt.Sprintf("%s:%d:%d", name, row, col)
+	key := de.Key()
+	if len(key) == 0 {
+		key = failedKey(data, offset(data, row, col))
+	}
+	if len(key) > 0 {
+		where += ": " + strings.Join(key, ".")
+	}
+	return []error{fmt.Errorf("%s: %w: %s", where, ErrInvalid, why)}
+}
+
+// offset returns the offset in data of line row, column col, as go-toml
+// counts them from 1, in bytes; the length of data when data has no such
+// place.
+func offset(data []byte, row, col int) int {
+	start := 0
+	for range row - 1 {
+		n := bytes.IndexByte(data[start:], '\n')
+		if n < 0 {
+			return len(data)
+		}
+		start += n + 1
+	}
+	return min(start+max(col-1, 0), len(data))
 }
 
 // refusals reports each refused setting l holds, found in the file name.
