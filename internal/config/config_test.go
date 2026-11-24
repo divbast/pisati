@@ -1514,6 +1514,81 @@ func TestDevCertificatePaths(t *testing.T) {
 	}
 }
 
+// devViteURL is one case of testdata/dev-vite-urls.json, the table
+// vite.config.test.ts reads too, so that Pisati and Vite refuse the same
+// dev.vite_url values. A case gives its URL whole, or, when it holds user
+// information, in parts: the scheme, the user, the password if there is
+// one, and the host, so that no credential-shaped string sits in the
+// table. Base is the base URL beside it, http://localhost:8080 unless it
+// says otherwise; a case whose verdict hangs on it is PisatiOnly, as Vite
+// never reads the base URL.
+type devViteURL struct {
+	URL        string  `json:"url"`
+	Scheme     string  `json:"scheme"`
+	User       *string `json:"user"`
+	Password   *string `json:"password"`
+	Host       string  `json:"host"`
+	Base       string  `json:"base"`
+	PisatiOnly bool    `json:"pisatiOnly"`
+	Valid      bool    `json:"valid"`
+}
+
+// value returns the URL c gives, assembled from its parts when it has
+// them, and whether c is well formed: a URL whole or in parts, not both.
+func (c devViteURL) value() (string, bool) {
+	if c.User == nil {
+		return c.URL, c.Scheme == "" && c.Password == nil && c.Host == ""
+	}
+	password := ""
+	if c.Password != nil {
+		password = ":" + *c.Password
+	}
+	return c.Scheme + "://" + *c.User + password + "@" + c.Host, c.URL == "" && c.Scheme != "" && c.Host != ""
+}
+
+// TestDevViteURLs checks each URL of the shared table as dev.vite_url,
+// beside its base URL and with an https dev server's certificate and key
+// given: a valid one is accepted, any other refused without its value in
+// the error.
+func TestDevViteURLs(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile("testdata/dev-vite-urls.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var cases []devViteURL
+	if err := dec.Decode(&cases); err != nil || len(cases) == 0 {
+		t.Fatalf("testdata/dev-vite-urls.json: %v, %d cases", err, len(cases))
+	}
+	for _, c := range cases {
+		url, ok := c.value()
+		if !ok {
+			t.Fatalf("testdata/dev-vite-urls.json: case %+v gives its URL both whole and in parts, or neither", c)
+		}
+		t.Run(fmt.Sprintf("%q beside %q", url, c.Base), func(t *testing.T) {
+			t.Parallel()
+
+			_, err := setup{env: env{
+				"PISATI_SERVER_BASE_URL": cmp.Or(c.Base, "http://localhost:8080"), "PISATI_DEV_VITE_URL": url,
+				"PISATI_DEV_VITE_CERT_FILE": "/certs/localhost.pem", "PISATI_DEV_VITE_KEY_FILE": "/certs/localhost-key.pem",
+			}}.load(t.Context())
+			if c.Valid {
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				return
+			}
+			refused(t, err, config.ErrInvalid, "dev.vite_url (PISATI_DEV_VITE_URL): invalid")
+			if url != "" && strings.Contains(err.Error(), url) || c.Password != nil && strings.Contains(err.Error(), *c.Password) {
+				t.Errorf("error %q repeats the value", err)
+			}
+		})
+	}
+}
+
 func TestBaseURLIsLocal(t *testing.T) {
 	t.Parallel()
 

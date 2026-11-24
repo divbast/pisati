@@ -243,8 +243,11 @@ breaking change.
   https URL, `PISATI_DEV_VITE_CERT_FILE` and `PISATI_DEV_VITE_KEY_FILE`,
   which only `vp dev` needs. A certificate or key variable that is set
   must hold an absolute, clean path, for every command, as Pisati refuses
-  any other. So a dev server on a port other than 5173, or over https,
-  takes these variables, which Pisati and Vite both read
+  any other, and `vite.devserver.ts` refuses a `PISATI_DEV_VITE_URL`
+  that Pisati refuses as `dev.vite_url`, without repeating it. Each side's
+  test reads one table of cases for each rule, in
+  `internal/config/testdata/`. So a dev server on a port other than 5173,
+  or over https, takes these variables, which Pisati and Vite both read
 - `just archive`, `just scan` — write the image as an OCI archive, then run
   `divbast-scan` over it and the published `:latest`. Needs network access
   to ghcr.io

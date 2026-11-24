@@ -11,6 +11,8 @@ import { posix } from "node:path";
 import { browserslistToTargets } from "lightningcss";
 import { defineConfig, loadEnv, type ConfigEnv, type Plugin, type UserConfig } from "vite-plus";
 
+import { devServerURL } from "./vite.devserver.ts";
+
 // The browsers package.json's browserslist names, read once, so the
 // stylesheets and the scripts are built for the same ones.
 const browsers = browserslist();
@@ -73,16 +75,6 @@ export function scriptTargets(list: readonly string[]): string[] {
     .toSorted();
 }
 
-// Where the Vite dev server listens: the URL PISATI_DEV_VITE_URL gives,
-// which Pisati's dev mode loads from, or Vite's usual address when it is
-// unset or empty, as Pisati's config reads an empty one. Vite reads only
-// the environment, never pisati.toml, so a dev server anywhere else needs
-// the variable, for both.
-export function devServerURL(env: Readonly<Record<string, string | undefined>>): URL {
-  const url = env["PISATI_DEV_VITE_URL"];
-  return new URL(url === undefined || url === "" ? "http://localhost:5173" : url);
-}
-
 // The certificate and key files an https dev server serves with, which
 // PISATI_DEV_VITE_CERT_FILE and PISATI_DEV_VITE_KEY_FILE name, as they do
 // for Pisati's config; none for an http one, which needs neither and
@@ -103,7 +95,7 @@ export function devCertificate(
   ];
   if (missing.length > 0) {
     throw new Error(
-      `PISATI_DEV_VITE_URL is https (${url.origin}), so the dev server needs a certificate and its key: set ${missing.join(" and ")}`,
+      `PISATI_DEV_VITE_URL is https, so the dev server needs a certificate and its key: set ${missing.join(" and ")}`,
     );
   }
   return { cert, key };

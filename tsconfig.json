@@ -25,5 +25,11 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true
   },
-  "include": ["web/ts", "vite.config.ts", "vite.config.test.ts", "stylelint.config.mjs"]
+  "include": [
+    "web/ts",
+    "vite.config.ts",
+    "vite.devserver.ts",
+    "vite.config.test.ts",
+    "stylelint.config.mjs"
+  ]
 }

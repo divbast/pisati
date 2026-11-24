@@ -6,14 +6,10 @@ import { expect, it, vi } from "vite-plus/test";
 import type { ConfigEnv } from "vite-plus";
 
 import paths from "./internal/config/testdata/dev-certificate-paths.json";
+import viteURLs from "./internal/config/testdata/dev-vite-urls.json";
 
-import {
-  certificateFiles,
-  devCertificate,
-  devHTTPS,
-  devServerURL,
-  scriptTargets,
-} from "./vite.config.ts";
+import { certificateFiles, devCertificate, devHTTPS, scriptTargets } from "./vite.config.ts";
+import { devServerURL } from "./vite.devserver.ts";
 
 it("targets the oldest version of each engine, comparing versions as numbers", () => {
   expect(
@@ -39,6 +35,65 @@ it("finds the dev server where PISATI_DEV_VITE_URL points, an empty one counting
   expect(devServerURL({ PISATI_DEV_VITE_URL: "https://[::1]:5174" }).href).toBe(
     "https://[::1]:5174/",
   );
+});
+
+// A case of the table Pisati's config test reads too: its URL whole, or,
+// when it holds user information, in parts, so that no credential-shaped
+// string sits in the table; base is the base URL beside it, and a case
+// whose verdict hangs on that is pisatiOnly, as Vite never reads it.
+interface DevViteURL {
+  readonly url?: string | undefined;
+  readonly scheme?: string | undefined;
+  readonly user?: string | undefined;
+  readonly password?: string | undefined;
+  readonly host?: string | undefined;
+  readonly base?: string | undefined;
+  readonly pisatiOnly?: boolean | undefined;
+  readonly valid: boolean;
+}
+
+const devViteURLs: readonly DevViteURL[] = viteURLs;
+
+// The URL a case gives, assembled from its parts when it has them.
+function assembled({ url, scheme, user, password, host }: DevViteURL): string {
+  if (user === undefined) {
+    return url ?? "";
+  }
+  return `${scheme ?? ""}://${user}${password === undefined ? "" : `:${password}`}@${host ?? ""}`;
+}
+
+// Each URL of the table, but for those whose verdict hangs on the base
+// URL, so that Vite refuses PISATI_DEV_VITE_URL exactly when Pisati
+// refuses dev.vite_url, and never repeats it, as it may hold a password.
+it.each(devViteURLs.filter(({ pisatiOnly }) => pisatiOnly !== true))(
+  "takes PISATI_DEV_VITE_URL %j as Pisati takes dev.vite_url",
+  (testCase: DevViteURL) => {
+    const url = assembled(testCase);
+    const check = (): URL => devServerURL({ PISATI_DEV_VITE_URL: url });
+    if (testCase.valid) {
+      expect(check).not.toThrow();
+      return;
+    }
+    expect(check).toThrow("PISATI_DEV_VITE_URL: ");
+    expect(check).not.toThrow(url);
+    expect(check).not.toThrow(testCase.password ?? url);
+  },
+);
+
+// The rule holds for every command: the configuration refuses to load,
+// here with the table's URL that holds a password.
+it("refuses to load the configuration with a URL Pisati refuses", async () => {
+  const withPassword = devViteURLs.find(({ password }) => password !== undefined);
+  expect(withPassword).toBeDefined();
+  vi.stubEnv("PISATI_DEV_VITE_URL", assembled(withPassword ?? { valid: false }));
+  vi.resetModules();
+  try {
+    await expect(import("./vite.config.ts")).rejects.toThrow("it holds user information");
+    await expect(import("./vite.config.ts")).rejects.not.toThrow(withPassword?.password ?? "");
+  } finally {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  }
 });
 
 it("serves https from the certificate and key the variables name", () => {
