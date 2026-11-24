@@ -72,30 +72,16 @@ func Dist() fs.FS {
 	return sub
 }
 
-// Entry is one of the front end's entries: a source file vite.config.ts
-// builds as an input of its own, named by its path from the repository's
-// root, which is also the key Vite's manifest gives it. StyleEntry and
-// ScriptEntry are all there are; any other Entry names none.
-type Entry string
-
+// The front end's two entries, the inputs vite.config.ts builds, by their
+// paths from the repository's root, which are also the keys Vite's
+// manifest gives them.
 const (
-	// StyleEntry is the stylesheet every page links, a build of its own
-	// so that a page with no script loads it.
-	StyleEntry Entry = "web/css/layers.css"
-	// ScriptEntry is the script a page with something to enhance loads.
-	ScriptEntry Entry = "web/ts/main.ts"
+	// styleInput is the stylesheet every page links, a build of its own so
+	// that a page with no script loads it.
+	styleInput = "web/css/layers.css"
+	// scriptInput is the script a page with something to enhance loads.
+	scriptInput = "web/ts/main.ts"
 )
-
-// kind returns the element that loads e, and whether e is an entry.
-func (e Entry) kind() (AssetKind, bool) {
-	switch e {
-	case StyleEntry:
-		return Stylesheet, true
-	case ScriptEntry:
-		return Script, true
-	}
-	return 0, false
-}
 
 // AssetKind is the element a page loads an asset with. The zero AssetKind
 // is none, and only the zero AssetTag has it.
@@ -159,15 +145,16 @@ func (t AssetTag) CrossOrigin() bool {
 	return t.crossOrigin
 }
 
-// Assets is the front end as pages load it: the tags for its entries, and
-// the handler that serves its files. Outside dev mode both come from a
-// build's manifest; in dev mode, every tag points at the Vite dev server.
-// An Assets never changes once made, and is safe for concurrent use. The
-// zero Assets has no tags and serves nothing, as for a build with no
-// manifest.
+// Assets is the front end as pages load it: the tags of its two entries,
+// the stylesheet and the script, and the handler that serves its files.
+// Outside dev mode both come from a build's manifest; in dev mode, every
+// tag points at the Vite dev server. An Assets never changes once made,
+// and is safe for concurrent use. The zero Assets has no tags and serves
+// nothing, as for a build with no manifest.
 type Assets struct {
-	// tags holds each entry's tag, by the entry's source path.
-	tags map[string]AssetTag
+	// style and script are the entries' tags: the zero AssetTag where
+	// there is none.
+	style, script AssetTag
 	// files holds each file Handler serves, by its path in the build.
 	files map[string]file
 	// dev is the Vite dev server's origin in dev mode, and empty outside.
@@ -184,13 +171,14 @@ type file struct {
 //
 // Outside dev mode, when dev.ViteURL is unset, it reads the build fsys
 // holds: Vite's manifest at .vite/manifest.json, and each file the manifest
-// names. Each entry's tag gives the file's URL under /static/ and its
-// integrity value, which NewAssets computes from the bytes it read and
+// names. The two entries' tags give each one's file's URL under /static/
+// and its integrity value, which NewAssets computes from the bytes it read and
 // will serve, trusting nothing the manifest says about them. Only the
 // files the manifest names are served, so neither the manifest nor
 // anything else in fsys ever is. When fsys has no manifest, as before
 // anything is built, there are no tags, pages render without the front
-// end, and nothing is served. Anything else the manifest gets wrong is an
+// end, and nothing is served. The manifest's other entries, if it has any,
+// get no tag. Anything else the manifest gets wrong is an
 // error wrapping ErrBuild: a page should never load a file that is not
 // there, or one it cannot check.
 //
@@ -209,7 +197,11 @@ func NewAssets(ctx context.Context, fsys fs.FS, base config.BaseURL, dev config.
 		if err != nil {
 			return nil, err
 		}
-		return &Assets{dev: origin}, nil
+		return &Assets{
+			style:  AssetTag{kind: Stylesheet, url: origin + staticURL(styleInput), crossOrigin: true},
+			script: AssetTag{kind: Script, url: origin + staticURL(scriptInput), crossOrigin: true},
+			dev:    origin,
+		}, nil
 	}
 	raw, err := readFile(ctx, fsys, manifestPath, maxManifest)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -230,29 +222,31 @@ func NewAssets(ctx context.Context, fsys fs.FS, base config.BaseURL, dev config.
 		}
 		files[name] = f
 	}
-	tags := make(map[string]AssetTag)
-	for entry, c := range m {
-		if !c.IsEntry {
-			continue
-		}
-		tags[entry] = AssetTag{kind: entryKind(c.File), url: staticURL(c.File), integrity: integrity(files[c.File].data)}
-	}
-	return &Assets{tags: tags, files: files}, nil
+	return &Assets{style: m.tag(styleInput, files), script: m.tag(scriptInput, files), files: files}, nil
 }
 
-// Tag returns the tag a page loads entry with, and whether there is one.
-// Outside dev mode an entry has one when the manifest has it, and with no
-// manifest none does; in dev mode, StyleEntry and ScriptEntry have one.
-func (a *Assets) Tag(entry Entry) (AssetTag, bool) {
-	if a.dev != "" {
-		kind, ok := entry.kind()
-		if !ok {
-			return AssetTag{}, false
-		}
-		return AssetTag{kind: kind, url: a.dev + staticURL(string(entry)), crossOrigin: true}, true
+// tag returns the tag of input, a build input, from files, which holds
+// every file m names: the zero AssetTag when m has no such entry.
+func (m manifest) tag(input string, files map[string]file) AssetTag {
+	c, ok := m[input]
+	if !ok || !c.IsEntry {
+		return AssetTag{}
 	}
-	t, ok := a.tags[string(entry)]
-	return t, ok
+	return AssetTag{kind: entryKind(c.File), url: staticURL(c.File), integrity: integrity(files[c.File].data)}
+}
+
+// StyleTag returns the tag of the stylesheet every page links, and
+// whether there is one: outside dev mode when the build's manifest has the
+// stylesheet's entry, and in dev mode always.
+func (a *Assets) StyleTag() (AssetTag, bool) {
+	return a.style, a.style.url != ""
+}
+
+// ScriptTag returns the tag of the script a page with something to
+// enhance loads, and whether there is one: outside dev mode when the
+// build's manifest has the script's entry, and in dev mode always.
+func (a *Assets) ScriptTag() (AssetTag, bool) {
+	return a.script, a.script.url != ""
 }
 
 // DevClient returns the tag of Vite's client, which keeps a page in step

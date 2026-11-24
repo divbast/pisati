@@ -221,19 +221,27 @@ breaking change.
   clone holds: all of it locally, and in CI once the lint job checks out
   the full history
 - `just fe-check` — the front end's gates: no suppression comment at
-  all, of Oxlint, ESLint, Stylelint, TypeScript or Oxfmt (a noisy rule is
-  switched off by name, with its reason, in `vite.config.ts` or
-  `stylelint.config.mjs` instead); `vp check` (Oxfmt, Oxlint with the
+  all, of Oxlint, ESLint, Stylelint, TypeScript or Oxfmt, and no ignore
+  file they read (`.stylelintignore`, `.prettierignore`, `.oxlintignore`,
+  `.eslintignore`, `.oxfmtignore`), tracked anywhere or present at the
+  root (a noisy rule is switched off by name, with its reason, in
+  `vite.config.ts` or `stylelint.config.mjs` instead). Oxlint and Oxfmt
+  also skip what `.gitignore` lists, so its entries are reviewed like the
+  configs' own ignore lists; `vp check` (Oxfmt, Oxlint with the
   correctness, suspicious, perf and pedantic categories as errors, and the
   TypeScript type checks); `vp test` (Vitest, on happy-dom, with a test of
   the colour contrast `web/css/theme.css` gives); Stylelint
   over `web/**/*.css`; and `pnpm audit --prod`
 - `just fe-build` — `vp build` the stylesheets and scripts under `web/`
   into `internal/web/dist`, which `go:embed` compiles into the binary.
-  Only `PLACEHOLDER` there is tracked: the build output never is. `vp dev`
-  serves the same sources where `PISATI_DEV_VITE_URL` points, or at
-  `http://localhost:5173` when it is unset, which is where Pisati's dev
-  mode loads them from
+  Only `PLACEHOLDER` there is tracked: the build output never is
+- `vp dev` (`pnpm exec vp dev`) serves the same sources for Pisati's dev
+  mode, which is on only when `dev.vite_url` is set. Vite reads the
+  environment alone, never `pisati.toml`: `PISATI_DEV_VITE_URL`, which
+  is `http://localhost:5173` to Vite when unset or empty, and, for an
+  https URL, `PISATI_DEV_VITE_CERT_FILE` and `PISATI_DEV_VITE_KEY_FILE`,
+  which only `vp dev` needs. So a dev server on a port other than 5173,
+  or over https, takes these variables, which Pisati and Vite both read
 - `just archive`, `just scan` — write the image as an OCI archive, then run
   `divbast-scan` over it and the published `:latest`. Needs network access
   to ghcr.io

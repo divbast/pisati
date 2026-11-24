@@ -135,7 +135,7 @@ async function apply(
  * Submits form as the browser would have without this script: from the
  * same button, or, when the browser refuses that because the button has
  * left the form, with the theme in a field of its own, since a plain
- * submit sends no button's value.
+ * submit sends no button's value, removed once it is sent.
  */
 function submitAsBrowser(
   doc: Document,
@@ -152,5 +152,9 @@ function submitAsBrowser(
     field.value = theme;
     form.append(field);
     form.submit();
+    // submit takes the form's fields as it is called, so the field can go
+    // at once: a page the browser keeps and shows again, on Back, then
+    // never posts a second theme beside its button's.
+    field.remove();
   }
 }

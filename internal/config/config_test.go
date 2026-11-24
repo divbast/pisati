@@ -49,6 +49,8 @@ master_key_file = "/run/file/key"
 
 [dev]
 vite_url = ""
+vite_cert_file = "/srv/file/vite.pem"
+vite_key_file = "/srv/file/vite-key.pem"
 `
 
 // env is a fake environment: the variables a test sets, and no others.
@@ -101,6 +103,8 @@ func describe(c config.Config) map[string]string {
 		"telemetry.pprof":         c.Telemetry.Pprof.String(),
 		"keys.master_key":         source(c.Keys.MasterKey),
 		"dev.vite_url":            optional(c.Dev.ViteURL),
+		"dev.vite_cert_file":      c.Dev.ViteCertFile,
+		"dev.vite_key_file":       c.Dev.ViteKeyFile,
 	}
 }
 
@@ -174,6 +178,8 @@ func TestLoadDefaults(t *testing.T) {
 		"telemetry.pprof":         "off",
 		"keys.master_key":         "generated",
 		"dev.vite_url":            "unset",
+		"dev.vite_cert_file":      "",
+		"dev.vite_key_file":       "",
 	})
 	if !cfg.Server.BaseURL.IsHTTPS() {
 		t.Errorf("%s: IsHTTPS = false", cfg.Server.BaseURL)
@@ -285,6 +291,8 @@ func TestEnvWinsOverFiles(t *testing.T) {
 		"telemetry.pprof":         "on",
 		"keys.master_key":         "file /run/file/key",
 		"dev.vite_url":            "unset",
+		"dev.vite_cert_file":      "/srv/file/vite.pem",
+		"dev.vite_key_file":       "/srv/file/vite-key.pem",
 	})
 
 	cfg, err = setup{files: files, env: env{
@@ -300,6 +308,8 @@ func TestEnvWinsOverFiles(t *testing.T) {
 		"PISATI_TELEMETRY_PPROF":         "off",
 		"PISATI_KEYS_MASTER_KEY_FILE":    "/run/env/key",
 		"PISATI_DEV_VITE_URL":            "http://localhost:5173",
+		"PISATI_DEV_VITE_CERT_FILE":      "/srv/env/vite.pem",
+		"PISATI_DEV_VITE_KEY_FILE":       "/srv/env/vite-key.pem",
 	}}.load(t.Context())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -317,6 +327,8 @@ func TestEnvWinsOverFiles(t *testing.T) {
 		"telemetry.pprof":         "off",
 		"keys.master_key":         "file /run/env/key",
 		"dev.vite_url":            "http://localhost:5173",
+		"dev.vite_cert_file":      "/srv/env/vite.pem",
+		"dev.vite_key_file":       "/srv/env/vite-key.pem",
 	})
 }
 
@@ -507,7 +519,7 @@ var knownEnv = []string{
 	"PISATI_SERVER_TRUSTED_PROXIES", "PISATI_SERVER_HSTS", "PISATI_STORAGE_STATE_DIR",
 	"PISATI_LOG_LEVEL", "PISATI_LOG_FORMAT", "PISATI_TELEMETRY_OTLP_ENDPOINT",
 	"PISATI_TELEMETRY_PPROF", "PISATI_KEYS_MASTER_KEY", "PISATI_KEYS_MASTER_KEY_FILE",
-	"PISATI_DEV_VITE_URL",
+	"PISATI_DEV_VITE_URL", "PISATI_DEV_VITE_CERT_FILE", "PISATI_DEV_VITE_KEY_FILE",
 }
 
 func TestUnknownEnv(t *testing.T) {
@@ -895,7 +907,12 @@ func TestDevViteURLOnlyWithLocalhost(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := setup{env: env{"PISATI_SERVER_BASE_URL": tt.base, "PISATI_DEV_VITE_URL": tt.vite}}.load(t.Context())
+			e := env{"PISATI_SERVER_BASE_URL": tt.base, "PISATI_DEV_VITE_URL": tt.vite}
+			if strings.HasPrefix(tt.vite, "https:") {
+				// An https Vite dev server needs its certificate and key.
+				e["PISATI_DEV_VITE_CERT_FILE"], e["PISATI_DEV_VITE_KEY_FILE"] = "/certs/localhost.pem", "/certs/localhost-key.pem"
+			}
+			cfg, err := setup{env: e}.load(t.Context())
 			if tt.want == "" {
 				refused(t, err, config.ErrInvalid, "dev.vite_url (PISATI_DEV_VITE_URL)", "localhost")
 				return
@@ -908,6 +925,96 @@ func TestDevViteURLOnlyWithLocalhost(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDevViteCertificate(t *testing.T) {
+	t.Parallel()
+
+	const (
+		cert = "/home/dev/certs/localhost.pem"
+		key  = "/home/dev/certs/localhost-key.pem"
+	)
+	tests := []struct {
+		name               string
+		vite, cert, key    *string
+		wantCert, wantKey  string
+		missing, malformed []string // the settings refused, by label
+	}{
+		{name: "https, with both", vite: new("https://localhost:5173"), cert: new(cert), key: new(key), wantCert: cert, wantKey: key},
+		{
+			name: "https, with no key", vite: new("https://localhost:5173"), cert: new(cert),
+			missing: []string{"dev.vite_key_file (PISATI_DEV_VITE_KEY_FILE)"},
+		},
+		{
+			name: "https, with neither", vite: new("https://[::1]:5173"),
+			missing: []string{"dev.vite_cert_file (PISATI_DEV_VITE_CERT_FILE)", "dev.vite_key_file (PISATI_DEV_VITE_KEY_FILE)"},
+		},
+		// Used only with an https dev.vite_url, and otherwise accepted
+		// and left unused, as server.hsts is with a plain-http base URL.
+		{name: "http, with both", vite: new("http://localhost:5173"), cert: new(cert), key: new(key), wantCert: cert, wantKey: key},
+		{name: "no dev server, with both", cert: new(cert), key: new(key), wantCert: cert, wantKey: key},
+		{name: "http, with neither", vite: new("http://localhost:5173")},
+		{
+			name: "a relative path", vite: new("https://localhost:5173"), cert: new("certs/localhost.pem"), key: new(key),
+			malformed: []string{"dev.vite_cert_file (PISATI_DEV_VITE_CERT_FILE)"},
+		},
+		{
+			name: "an unclean path, with no dev server", cert: new(cert), key: new("/home/dev/../dev/key.pem"),
+			malformed: []string{"dev.vite_key_file (PISATI_DEV_VITE_KEY_FILE)"},
+		},
+		{
+			name: "empty", vite: new("https://localhost:5173"), cert: new(""), key: new(key),
+			malformed: []string{"dev.vite_cert_file (PISATI_DEV_VITE_CERT_FILE)"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			e := env{"PISATI_SERVER_BASE_URL": "http://localhost:8080"}
+			for name, v := range map[string]*string{
+				"PISATI_DEV_VITE_URL": tt.vite, "PISATI_DEV_VITE_CERT_FILE": tt.cert, "PISATI_DEV_VITE_KEY_FILE": tt.key,
+			} {
+				if v != nil {
+					e[name] = *v
+				}
+			}
+			cfg, err := setup{env: e}.load(t.Context())
+			switch {
+			case len(tt.missing) > 0:
+				refused(t, err, config.ErrMissing, tt.missing...)
+				return
+			case len(tt.malformed) > 0:
+				refused(t, err, config.ErrInvalid, tt.malformed...)
+				// A key pasted in place of its path stays out of the error.
+				for _, v := range []*string{tt.cert, tt.key} {
+					if v != nil && *v != "" && *v != cert && *v != key && strings.Contains(err.Error(), *v) {
+						t.Errorf("error %q repeats the value %q", err, *v)
+					}
+				}
+				return
+			case err != nil:
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Dev.ViteCertFile != tt.wantCert || cfg.Dev.ViteKeyFile != tt.wantKey {
+				t.Errorf("certificate %q and key %q, want %q and %q", cfg.Dev.ViteCertFile, cfg.Dev.ViteKeyFile, tt.wantCert, tt.wantKey)
+			}
+		})
+	}
+
+	t.Run("from a file", func(t *testing.T) {
+		t.Parallel()
+
+		cfg, err := setup{files: fstest.MapFS{"pisati.toml": tomlFile(
+			"[server]\nbase_url = \"https://localhost:8443\"\n[dev]\nvite_url = \"https://localhost:5173\"\n" +
+				"vite_cert_file = \"" + cert + "\"\nvite_key_file = \"" + key + "\"\n")}}.load(t.Context())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Dev.ViteCertFile != cert || cfg.Dev.ViteKeyFile != key {
+			t.Errorf("certificate %q and key %q, want %q and %q", cfg.Dev.ViteCertFile, cfg.Dev.ViteKeyFile, cert, key)
+		}
+	})
 }
 
 func TestBaseURLIsLocal(t *testing.T) {
@@ -1167,6 +1274,7 @@ func TestSecretRedacts(t *testing.T) {
 func FuzzLoad(f *testing.F) {
 	f.Add(everyKey, "[log]\nlevel = \"debug\"\n", "", "", false)
 	f.Add("", "", "PISATI_SERVER_BASE_URL=http://localhost:8080\nPISATI_DEV_VITE_URL=http://localhost:5173", "/var/lib/private/pisati", true)
+	f.Add("[dev]\nvite_url = \"https://localhost:5173\"\nvite_cert_file = \"/c.pem\"\n", "", "PISATI_SERVER_BASE_URL=http://[::1]:8080\nPISATI_DEV_VITE_KEY_FILE=/k.pem", "", false)
 	f.Add("[server]\nbase_url = \"https://blog.example.org/\"\ntrusted_proxies = [\"10.0.0.1\"]\n", "[server]\ntrusted_proxies = []\n",
 		"PISATI_SERVER_TRUSTED_PROXIES=192.0.2.0/24, 2001:db8::/32\nPISATI_KEYS_MASTER_KEY_FILE=/run/k", "", true)
 	f.Add("[keys]\nmaster_key = \"x\"\n[nope]\n", "x = [", "PISATI_NOPE=1\nPISATI_LOG_LEVEL=loud", "relative", false)
@@ -1295,6 +1403,14 @@ func valid(t *testing.T, c config.Config) {
 	}
 	if u, ok := c.Dev.ViteURL.Get(); ok && (!localhost(u.Hostname()) || !localhost(bu.Hostname())) {
 		t.Errorf("Vite URL %q with base URL %q: both must be on localhost", u.String(), base)
+	}
+	if u, ok := c.Dev.ViteURL.Get(); ok && u.Scheme == "https" && (c.Dev.ViteCertFile == "" || c.Dev.ViteKeyFile == "") {
+		t.Errorf("https Vite URL %q with certificate %q and key %q: it needs both", u.String(), c.Dev.ViteCertFile, c.Dev.ViteKeyFile)
+	}
+	for _, p := range []string{c.Dev.ViteCertFile, c.Dev.ViteKeyFile} {
+		if p != "" && (!filepath.IsAbs(p) || filepath.Clean(p) != p) {
+			t.Errorf("Vite certificate or key file %q is not absolute and clean", p)
+		}
 	}
 	switch s := c.Keys.MasterKey.(type) {
 	case config.FromFile:

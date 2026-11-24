@@ -198,7 +198,7 @@
        */
       @media (forced-colors: active) {
         border-style: dashed;
-        border-width: calc(var(--border-width) * 3);
+        border-width: var(--border-width-invalid);
       }
     }
   }
@@ -234,8 +234,9 @@
       opacity: var(--opacity-disabled);
 
       /*
-       * Forced colours ignore the fading, so there a disabled button
-       * takes the system's colour for disabled text.
+       * Forced colours replace the button's own colours, so there a
+       * disabled button also takes the system's colour for disabled
+       * text, which tells it apart by more than its fading.
        */
       @media (forced-colors: active) {
         color: GrayText;

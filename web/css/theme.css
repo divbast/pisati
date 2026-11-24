@@ -57,11 +57,12 @@
       oklch(60% 0.02 var(--accent-hue))
     );
     /*
-     * A line that only separates, a rule or a table's lines, marks no
-     * control, so it is the text colour faded, in whatever colour the
-     * text around it is.
+     * A line that only separates, a rule or a table's lines, is the text
+     * colour faded, in whatever colour the text around it is: as faint as
+     * it can be and still keep 3:1 against the page and a surface, which
+     * the contrast test checks.
      */
-    --color-rule: color-mix(in oklch, currentcolor 25%, transparent);
+    --color-rule: color-mix(in oklch, currentcolor 48%, transparent);
 
     &[data-theme="light"] {
       color-scheme: light;

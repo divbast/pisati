@@ -140,6 +140,11 @@ func TestSecurityHeadersDevMode(t *testing.T) {
 			origin: "http://[::1]:5173", live: "ws://[::1]:5173",
 		},
 		{
+			// The socket follows the dev server's scheme, not the site's.
+			name: "an https dev server for a plain-http site", base: "http://localhost:8080", vite: "https://localhost:5173",
+			origin: "https://localhost:5173", live: "wss://localhost:5173",
+		},
+		{
 			name: "https on localhost", base: "https://localhost:8443", vite: "https://localhost:5173",
 			origin: "https://localhost:5173", live: "wss://localhost:5173",
 			hsts: "max-age=63072000", upgrade: "; upgrade-insecure-requests",

@@ -66,11 +66,10 @@ function fakeFetch(respond: () => Promise<Response>): { fetch: Fetch; calls: Cal
 
 // A fetch whose answers the test gives, one call at a time, and which, like
 // the browser's, fails a request once its signal is aborted.
-function heldFetch(): {
-  fetch: Fetch;
-  held: { answer: (r: Response) => void; init: RequestInit | undefined }[];
-} {
-  const held: { answer: (r: Response) => void; init: RequestInit | undefined }[] = [];
+type Held = { readonly answer: (r: Response) => void; readonly init: RequestInit | undefined };
+
+function heldFetch(): { fetch: Fetch; held: Held[] } {
+  const held: Held[] = [];
   const fetch: Fetch = (_input, init) =>
     new Promise((resolve, reject) => {
       init?.signal?.addEventListener("abort", () => {
@@ -198,6 +197,9 @@ it("falls back with the theme in a field of its own once the button is gone", as
     new URLSearchParams({ next: "/posts/1?page=2", theme: "dark" }).toString(),
   ]);
   expect(pressed(form)).toEqual(unpressed);
+  // The field goes once it is sent, so a page the browser keeps and shows
+  // again, on Back, never posts a second theme beside its button's.
+  expect(form.querySelectorAll('input[name="theme"]')).toHaveLength(0);
 });
 
 it("applies only the newest choice when the reader changes their mind", async () => {

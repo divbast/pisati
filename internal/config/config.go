@@ -99,6 +99,13 @@ type Dev struct {
 	// ViteURL is the Vite dev server. Load sets it only when it and the
 	// base URL are both on localhost, 127.0.0.1 or [::1].
 	ViteURL OptionalURL
+	// ViteCertFile and ViteKeyFile name the certificate and the private
+	// key the Vite dev server serves https with: absolute, clean paths,
+	// which Load requires when ViteURL is https. They apply only then,
+	// and are accepted and left unused otherwise. Pisati never opens
+	// them: vite.config.ts reads them, from PISATI_DEV_VITE_CERT_FILE and
+	// PISATI_DEV_VITE_KEY_FILE.
+	ViteCertFile, ViteKeyFile string
 }
 
 // ViteOrigin returns the origin of ViteURL, the Vite dev server's, and

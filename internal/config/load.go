@@ -69,6 +69,10 @@ type Sources struct {
 // else the credential pisati-master-key when Credentials holds it, else
 // it is Generated.
 //
+// An https dev.vite_url needs dev.vite_cert_file and dev.vite_key_file
+// both, which are reported missing without it; with an http dev.vite_url,
+// or none, Load accepts them and nothing uses them.
+//
 // Load checks ctx before each file it reads, and stops with ctx's error
 // once it is done. On any error, the Config is the zero Config.
 func Load(ctx context.Context, src Sources, stateDirEnv string) (Config, error) {
@@ -88,6 +92,7 @@ func Load(ctx context.Context, src Sources, stateDirEnv string) (Config, error) 
 	errs = append(errs, refusedValues...)
 	if len(files.unread) == 0 {
 		errs = append(errs, missing...)
+		errs = append(errs, missingCertificate(merged.Dev, cfg.Dev)...)
 	}
 
 	// systemd's $STATE_DIRECTORY replaces the default, but not a value a
@@ -112,6 +117,32 @@ func Load(ctx context.Context, src Sources, stateDirEnv string) (Config, error) 
 		return Config{}, errors.Join(errs...)
 	}
 	return cfg, nil
+}
+
+// missingCertificate reports dev.vite_cert_file and dev.vite_key_file
+// missing when dev, as built from the merged layer given, has an https
+// Vite dev server: Vite serves https only with both.
+func missingCertificate(given devLayer, dev Dev) []error {
+	u, ok := dev.ViteURL.Get()
+	if !ok || u.Scheme != "https" {
+		return nil
+	}
+	var errs []error
+	for _, s := range settings() {
+		var v *string
+		switch s.key {
+		case "dev.vite_cert_file":
+			v = given.ViteCertFile
+		case "dev.vite_key_file":
+			v = given.ViteKeyFile
+		default:
+			continue
+		}
+		if v == nil {
+			errs = append(errs, fmt.Errorf("%s: %w: the Vite dev server is https, so it needs a certificate and its key; want %s", s.label(), ErrMissing, s.value))
+		}
+	}
+	return errs
 }
 
 // stopped returns ctx's error, said to have stopped Load, or nil while

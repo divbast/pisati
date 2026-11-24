@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
-// The colour tokens in theme.css meet WCAG 2.2's contrast minimums, in
-// both schemes, with more contrast asked for or not, and at every accent
-// hue a blog may set: 4.5:1 for text (1.4.3) and 3:1 for what marks out a
-// control or its state (1.4.11).
+// Every colour pair a page shows, from the tokens in theme.css, meets
+// WCAG 2.2's contrast minimums, in both schemes, with more contrast asked
+// for or not, and at every accent hue a blog may set: 4.5:1 for text
+// (1.4.3), and 3:1 for what marks out a control or its state (1.4.11) and
+// for the lines that only separate, which Pisati holds to the same.
 
 import { expect, it } from "vite-plus/test";
 
@@ -12,7 +13,13 @@ import theme from "../css/theme.css?raw";
 
 type Oklch = readonly [lightness: number, chroma: number, hue: number | "accent"];
 type Scheme = "light" | "dark";
-type Tokens = ReadonlyMap<string, Readonly<Record<Scheme, Oklch>> | { alias: string }>;
+type Rgb = readonly [number, number, number];
+// A colour token: a value for each scheme, another token's name, or the
+// colour currentcolor stands for, at a share, over transparent.
+type Token =
+  | Readonly<Record<Scheme, Oklch>>
+  | { readonly alias: string }
+  | { readonly mix: string; readonly share: number };
 
 const oklch = String.raw`oklch\(\s*([\d.]+)%\s+([\d.]+)\s+(var\(--accent-hue\)|[\d.]+)\s*\)`;
 const pair = new RegExp(
@@ -20,14 +27,21 @@ const pair = new RegExp(
   "gu",
 );
 const alias = /--color-([a-z-]+):\s*var\(--color-([a-z-]+)\)/gu;
+const mix =
+  /--color-([a-z-]+):\s*color-mix\(\s*in oklch\s*,\s*currentcolor\s+([\d.]+)%\s*,\s*transparent\s*\)/gu;
+
+// The text colour of the elements each currentcolor token is used on,
+// which currentcolor then is: rules, table lines and fieldsets sit in
+// running text, in the text colour.
+const currentcolorOf: Readonly<Record<string, string>> = { rule: "text" };
 
 function colour(l: string, c: string, h: string): Oklch {
   return [Number(l) / 100, Number(c), h.startsWith("var(") ? "accent" : Number(h)];
 }
 
 // The tokens a block of theme.css sets.
-function tokens(css: string): Tokens {
-  const found = new Map<string, Readonly<Record<Scheme, Oklch>> | { alias: string }>();
+function tokens(css: string): ReadonlyMap<string, Token> {
+  const found = new Map<string, Token>();
   for (const [, name = "", l1 = "", c1 = "", h1 = "", l2 = "", c2 = "", h2 = ""] of css.matchAll(
     pair,
   )) {
@@ -36,12 +50,33 @@ function tokens(css: string): Tokens {
   for (const [, name = "", target = ""] of css.matchAll(alias)) {
     found.set(name, { alias: target });
   }
+  for (const [, name = "", share = ""] of css.matchAll(mix)) {
+    const text = currentcolorOf[name];
+    if (text === undefined) {
+      throw new Error(
+        `--color-${name} mixes currentcolor, and the test does not know what text colour it is used in`,
+      );
+    }
+    found.set(name, { mix: text, share: Number(share) / 100 });
+  }
   return found;
 }
 
 const more = "@media (prefers-contrast: more)";
-const base = tokens(theme.slice(0, theme.indexOf(more)));
-const contrasted = new Map([...base, ...tokens(theme.slice(theme.indexOf(more)))]);
+
+// The tokens theme.css sets, as they stand, and with more contrast asked
+// for. A theme.css without the more-contrast block is an error, so its
+// colours never go unchecked by quietly checking the others twice.
+function blocks(css: string): [ReadonlyMap<string, Token>, ReadonlyMap<string, Token>] {
+  const at = css.indexOf(more);
+  if (at < 0) {
+    throw new Error(`theme.css has no ${more} block to check`);
+  }
+  const base = tokens(css.slice(0, at));
+  return [base, new Map([...base, ...tokens(css.slice(at))])];
+}
+
+const [base, contrasted] = blocks(theme);
 
 // Linear sRGB of an oklch colour, by Björn Ottosson's OKLab matrices.
 function linear([l, c, h]: readonly [number, number, number]): [number, number, number] {
@@ -63,9 +98,9 @@ function clamp(v: number): number {
   return Math.min(1, Math.max(0, v));
 }
 
-// Relative luminance, after reducing chroma until the colour fits sRGB,
-// as a browser maps an oklch colour outside the screen's gamut.
-function luminance([l, c, h]: readonly [number, number, number]): number {
+// Linear sRGB of an oklch colour, after reducing chroma until it fits
+// sRGB, as a browser maps a colour outside the screen's gamut.
+function rgb([l, c, h]: readonly [number, number, number]): Rgb {
   const fits = (chroma: number): boolean =>
     linear([l, chroma, h]).every((v) => v >= -1e-6 && v <= 1 + 1e-6);
   let chroma = c;
@@ -82,24 +117,59 @@ function luminance([l, c, h]: readonly [number, number, number]): number {
     chroma = low;
   }
   const [r, g, b] = linear([l, chroma, h]);
-  return 0.2126 * clamp(r) + 0.7152 * clamp(g) + 0.0722 * clamp(b);
+  return [clamp(r), clamp(g), clamp(b)];
 }
 
-function resolve(set: Tokens, name: string, scheme: Scheme, hue: number): [number, number, number] {
+// sRGB's transfer function and its inverse, since a browser blends a
+// translucent colour over what lies under it in encoded sRGB.
+function encode(v: number): number {
+  return v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055;
+}
+
+function decode(v: number): number {
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+}
+
+// The linear sRGB of the token name, in scheme, at the accent hue, laid
+// over back, which a translucent token needs.
+function shown(
+  set: ReadonlyMap<string, Token>,
+  name: string,
+  scheme: Scheme,
+  hue: number,
+  back: Rgb,
+): Rgb {
   const token = set.get(name);
   if (token === undefined) {
     throw new Error(`theme.css sets no --color-${name}`);
   }
   if ("alias" in token) {
-    return resolve(set, token.alias, scheme, hue);
+    return shown(set, token.alias, scheme, hue, back);
+  }
+  if ("mix" in token) {
+    const over = shown(set, token.mix, scheme, hue, back);
+    const blend = (i: 0 | 1 | 2): number =>
+      decode(token.share * encode(over[i]) + (1 - token.share) * encode(back[i]));
+    return [blend(0), blend(1), blend(2)];
   }
   const [l, c, h] = token[scheme];
-  return [l, c, h === "accent" ? hue : h];
+  return rgb([l, c, h === "accent" ? hue : h]);
 }
 
-function ratio(set: Tokens, fore: string, back: string, scheme: Scheme, hue: number): number {
-  const a = luminance(resolve(set, fore, scheme, hue));
-  const b = luminance(resolve(set, back, scheme, hue));
+function luminance([r, g, b]: Rgb): number {
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function ratio(
+  set: ReadonlyMap<string, Token>,
+  fore: string,
+  back: string,
+  scheme: Scheme,
+  hue: number,
+): number {
+  const under = shown(set, back, scheme, hue, [0, 0, 0]);
+  const a = luminance(shown(set, fore, scheme, hue, under));
+  const b = luminance(under);
   return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 }
 
@@ -107,13 +177,17 @@ function ratio(set: Tokens, fore: string, back: string, scheme: Scheme, hue: num
 const pairs: readonly [fore: string, back: string, least: number][] = [
   ["text", "canvas", 4.5],
   ["text", "surface", 4.5],
+  ["text", "selection", 4.5],
   ["text-muted", "canvas", 4.5],
   ["accent", "canvas", 4.5],
   ["accent-strong", "canvas", 4.5],
   ["on-accent", "accent", 4.5],
   ["on-accent", "accent-strong", 4.5],
   ["border-field", "canvas", 3],
+  ["border-field", "surface", 3],
   ["danger", "canvas", 3],
+  ["rule", "canvas", 3],
+  ["rule", "surface", 3],
 ];
 
 const hues = Array.from({ length: 72 }, (_, i) => i * 5);
@@ -139,10 +213,15 @@ it("reads every colour token, so a pair above never goes unchecked", () => {
       "canvas",
       "danger",
       "on-accent",
+      "rule",
       "selection",
       "surface",
       "text",
       "text-muted",
     ].toSorted(),
   );
+});
+
+it("refuses a theme with no more-contrast block", () => {
+  expect(() => blocks(theme.replace(more, "@media (width >= 0)"))).toThrow(more);
 });

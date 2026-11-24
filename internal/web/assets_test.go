@@ -8,12 +8,13 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -111,21 +112,31 @@ func get(t testing.TB, h http.Handler, method, target string, header ...string) 
 	return w
 }
 
+// tags are the two ways a page asks for an entry's tag.
+var tags = []struct {
+	name string
+	of   func(*web.Assets) (web.AssetTag, bool)
+}{
+	{name: "StyleTag", of: (*web.Assets).StyleTag},
+	{name: "ScriptTag", of: (*web.Assets).ScriptTag},
+}
+
 func TestAssetsHashedImmutableWithSRI(t *testing.T) {
 	fsys := build(manifest)
 	a := production(t, fsys)
 	for _, tt := range []struct {
-		entry             web.Entry
+		name              string
+		of                func(*web.Assets) (web.AssetTag, bool)
 		file, contentType string
 		kind              web.AssetKind
 	}{
-		{entry: web.StyleEntry, file: stylesheet, kind: web.Stylesheet, contentType: "text/css; charset=utf-8"},
-		{entry: web.ScriptEntry, file: script, kind: web.Script, contentType: "text/javascript; charset=utf-8"},
+		{name: "StyleTag", of: (*web.Assets).StyleTag, file: stylesheet, kind: web.Stylesheet, contentType: "text/css; charset=utf-8"},
+		{name: "ScriptTag", of: (*web.Assets).ScriptTag, file: script, kind: web.Script, contentType: "text/javascript; charset=utf-8"},
 	} {
-		t.Run(string(tt.entry), func(t *testing.T) {
-			tag, ok := a.Tag(tt.entry)
+		t.Run(tt.name, func(t *testing.T) {
+			tag, ok := tt.of(a)
 			if !ok {
-				t.Fatalf("Tag(%q): no tag", tt.entry)
+				t.Fatalf("%s: no tag", tt.name)
 			}
 			if tag.Kind() != tt.kind {
 				t.Errorf("Kind %v, want %v", tag.Kind(), tt.kind)
@@ -163,11 +174,6 @@ func TestAssetsHashedImmutableWithSRI(t *testing.T) {
 		})
 	}
 
-	for _, entry := range []web.Entry{"web/ts/missing.ts", "assets/main-BvRk9kiK.js", "", "web/ts"} {
-		if tag, ok := a.Tag(entry); ok {
-			t.Errorf("Tag(%q) = %+v, want none: the manifest has no such entry", entry, tag)
-		}
-	}
 	if tag, ok := a.DevClient(); ok {
 		t.Errorf("DevClient = %+v outside dev mode", tag)
 	}
@@ -221,9 +227,9 @@ func TestAssetsAbsentManifestRendersWithout(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := production(t, fsys)
-			for _, entry := range []web.Entry{web.StyleEntry, web.ScriptEntry} {
-				if tag, ok := a.Tag(entry); ok {
-					t.Errorf("Tag(%q) = %+v with no manifest", entry, tag)
+			for _, tt := range tags {
+				if tag, ok := tt.of(a); ok {
+					t.Errorf("%s = %+v with no manifest", tt.name, tag)
 				}
 			}
 			if w := get(t, a.Handler(), http.MethodGet, "/static/PLACEHOLDER"); w.Code != http.StatusNotFound {
@@ -324,17 +330,18 @@ func TestDevModeOnlyOnLocalhost(t *testing.T) {
 				t.Fatalf("NewAssets: %v", err)
 			}
 			for _, want := range []struct {
-				entry web.Entry
-				kind  web.AssetKind
+				name, input string
+				of          func(*web.Assets) (web.AssetTag, bool)
+				kind        web.AssetKind
 			}{
-				{entry: web.ScriptEntry, kind: web.Script},
-				{entry: web.StyleEntry, kind: web.Stylesheet},
+				{name: "ScriptTag", input: "web/ts/main.ts", of: (*web.Assets).ScriptTag, kind: web.Script},
+				{name: "StyleTag", input: "web/css/layers.css", of: (*web.Assets).StyleTag, kind: web.Stylesheet},
 			} {
-				tag, ok := a.Tag(want.entry)
+				tag, ok := want.of(a)
 				if !ok {
-					t.Fatalf("Tag(%q): none in dev mode", want.entry)
+					t.Fatalf("%s: none in dev mode", want.name)
 				}
-				if u := tt.origin + "/static/" + string(want.entry); tag.URL() != u {
+				if u := tt.origin + "/static/" + want.input; tag.URL() != u {
 					t.Errorf("URL %q, want %q", tag.URL(), u)
 				}
 				if tag.Kind() != want.kind {
@@ -355,15 +362,6 @@ func TestDevModeOnlyOnLocalhost(t *testing.T) {
 			if _, ok := client.Integrity(); ok {
 				t.Error("DevClient has an integrity value")
 			}
-			// Only what vite.config.ts builds as an input is an entry: an
-			// imported file, or any other path, is none.
-			for _, entry := range []web.Entry{
-				"web/css/tokens.css", "web/ts/theme.ts", "../web/ts/main.ts", "/web/ts/main.ts", "web/img/logo.png", "web/ts", "",
-			} {
-				if tag, ok := a.Tag(entry); ok {
-					t.Errorf("Tag(%q) = %+v, want none", entry, tag)
-				}
-			}
 			// Vite serves every file; Pisati serves none of the build's.
 			if w := get(t, a.Handler(), http.MethodGet, "/static/"+script); w.Code != http.StatusNotFound {
 				t.Errorf("GET /static/%s in dev mode: %d, want 404", script, w.Code)
@@ -372,14 +370,14 @@ func TestDevModeOnlyOnLocalhost(t *testing.T) {
 	}
 }
 
-// TestEntriesAreViteInputs checks that the entries Assets knows are
-// exactly the inputs vite.config.ts builds.
-func TestEntriesAreViteInputs(t *testing.T) {
-	config, err := os.ReadFile("../../vite.config.ts")
+// viteInputs returns the inputs vite.config.ts builds.
+func viteInputs(t *testing.T) []string {
+	t.Helper()
+	source, err := os.ReadFile("../../vite.config.ts")
 	if err != nil {
 		t.Fatal(err)
 	}
-	list := regexp.MustCompile(`(?s)\binput:\s*\[(.*?)\]`).FindSubmatch(config)
+	list := regexp.MustCompile(`(?s)\binput:\s*\[(.*?)\]`).FindSubmatch(source)
 	if list == nil {
 		t.Fatal("vite.config.ts names no input list")
 	}
@@ -387,11 +385,52 @@ func TestEntriesAreViteInputs(t *testing.T) {
 	for _, m := range regexp.MustCompile(`"([^"]+)"`).FindAllSubmatch(list[1], -1) {
 		inputs = append(inputs, string(m[1]))
 	}
-	slices.Sort(inputs)
-	want := []string{string(web.StyleEntry), string(web.ScriptEntry)}
-	slices.Sort(want)
-	if !slices.Equal(inputs, want) {
-		t.Errorf("vite.config.ts builds %q, and Assets knows the entries %q", inputs, want)
+	return inputs
+}
+
+// TestTagsAreViteInputs checks that StyleTag and ScriptTag answer for
+// exactly the inputs vite.config.ts builds: a stylesheet and a script, by
+// the keys Vite's manifest gives them.
+func TestTagsAreViteInputs(t *testing.T) {
+	inputs := viteInputs(t)
+	if len(inputs) != 2 {
+		t.Fatalf("vite.config.ts builds %q, and Assets has tags for two inputs", inputs)
+	}
+	files := map[string]string{".css": stylesheet, ".js": script, ".ts": script}
+	var b strings.Builder
+	b.WriteString("{")
+	for i, input := range inputs {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, "%q: {%q: %q, %q: true}", input, "file", files[path.Ext(input)], "isEntry")
+	}
+	b.WriteString("}")
+	a := production(t, build(b.String()))
+	for _, tt := range tags {
+		if _, ok := tt.of(a); !ok {
+			t.Errorf("%s: none for a manifest of vite.config.ts's inputs %q", tt.name, inputs)
+		}
+	}
+}
+
+// TestTagsOnlyForTheBuildInputs checks that no other entry of the
+// manifest, nor a chunk keyed by an input that is no entry, gets a tag.
+func TestTagsOnlyForTheBuildInputs(t *testing.T) {
+	for name, m := range map[string]string{
+		"other entries": `{"web/css/other.css": {"file": "assets/layers-CzttEyLW.css", "isEntry": true},
+			"web/ts/other.ts": {"file": "assets/main-BvRk9kiK.js", "isEntry": true}}`,
+		"the inputs, as chunks alone": `{"web/css/layers.css": {"file": "assets/layers-CzttEyLW.css"},
+			"web/ts/main.ts": {"file": "assets/main-BvRk9kiK.js"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := production(t, build(m))
+			for _, tt := range tags {
+				if tag, ok := tt.of(a); ok {
+					t.Errorf("%s = %+v, want none", tt.name, tag)
+				}
+			}
+		})
 	}
 }
 
@@ -439,18 +478,18 @@ func FuzzNewAssets(f *testing.F) {
 				t.Fatalf("GET %s: %d", target, w.Code)
 			}
 		}
-		for _, entry := range []web.Entry{web.ScriptEntry, web.StyleEntry, "a", "b"} {
-			tag, ok := a.Tag(entry)
+		for _, tt := range tags {
+			tag, ok := tt.of(a)
 			if !ok {
 				continue
 			}
 			integrity, ok := tag.Integrity()
 			if !ok || (tag.Kind() != web.Script && tag.Kind() != web.Stylesheet) {
-				t.Fatalf("Tag(%q) = %+v", entry, tag)
+				t.Fatalf("%s = %+v", tt.name, tag)
 			}
 			w := get(t, h, http.MethodGet, tag.URL())
 			if w.Code != http.StatusOK || sri(w.Body.Bytes()) != integrity {
-				t.Fatalf("GET %s for %q: %d, the body hashing to %s, not %s", tag.URL(), entry, w.Code, sri(w.Body.Bytes()), integrity)
+				t.Fatalf("GET %s for %s: %d, the body hashing to %s, not %s", tag.URL(), tt.name, w.Code, sri(w.Body.Bytes()), integrity)
 			}
 		}
 	})

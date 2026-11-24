@@ -159,30 +159,44 @@ vuln:
 secrets:
     betterleaks git --ignore-gitleaks-allow --redact --verbose --no-color --no-banner .
 
-# The front end's gates. vp check runs Oxfmt, Oxlint and the TypeScript
-# type checks, and vp test the scripts' tests. pnpm audit reads only the
-# packages whose code a page ships, the dependencies; the tools that build
-# it are devDependencies. The audit asks the npm registry.
-
 # A front-end finding is fixed, or its rule switched off by name, with the
-# reason, in vite.config.ts or stylelint.config.mjs: no comment may
-# suppress one. This refuses, in every file git tracks or would track, each
-# comment Oxlint, ESLint, Stylelint, TypeScript and Oxfmt honour as a
-# suppression, in each of its forms (-line, -next-line and the rest). Each
-# pattern brackets one character, so that this recipe never matches itself.
+# reason, in vite.config.ts or stylelint.config.mjs: neither a comment nor
+# an ignore file may suppress one. This refuses, in every file git tracks
+# or would track, each comment Oxlint, ESLint, Stylelint, TypeScript and
+# Oxfmt honour as a suppression, in each of its forms (-line, -next-line
+# and the rest); and each ignore file these tools read, tracked anywhere or
+# present at the root, where they read one. Each pattern brackets one
+# character, so that this recipe never matches itself. .gitignore, which
+# Oxlint and Oxfmt also skip by, is the repository's own: review covers
+# its entries, as it does the configs' own ignore lists.
 
-# Fail on any suppression comment
+# Fail on any suppression comment or ignore file
 [script("mise", "exec", "--", "bash", "-euo", "pipefail")]
 _fe-no-suppression:
-    rule="the front end takes no suppression comment: fix the finding, or switch its rule off by name in the config, with the reason"
+    rule="the front end takes no suppression comment or ignore file: fix the finding, or switch its rule off by name in the config, with the reason"
     hits=$(git grep --untracked -n -o -i -I -E -e '(oxlint|eslint|stylelint)[-]disable[a-z-]*' \
         -e '@ts[-](ignore|expect-error|nocheck)' -e '(prettier|oxfmt)[-]ignore[a-z-]*' || [[ $? -eq 1 ]])
+    ignores=$({ git ls-files; ls -A; } |
+        grep -E '(^|/)[.](stylelint|prettier|oxlint|eslint|oxfmt)ignore$' | sort -u || true)
+    status=0
     if [[ -n "${hits}" ]]; then
         while IFS=: read -r file line what; do
             echo "${file}:${line}: ${what}: ${rule}" >&2
         done <<<"${hits}"
-        exit 1
+        status=1
     fi
+    if [[ -n "${ignores}" ]]; then
+        while read -r file; do
+            echo "${file}: an ignore file the front end's tools read: ${rule}" >&2
+        done <<<"${ignores}"
+        status=1
+    fi
+    exit "${status}"
+
+# The front end's gates. vp check runs Oxfmt, Oxlint and the TypeScript
+# type checks, and vp test the scripts' tests. pnpm audit reads only the
+# packages whose code a page ships, the dependencies; the tools that build
+# it are devDependencies. The audit asks the npm registry.
 
 # Every gate of the stylesheets and scripts under web/
 fe-check: _fe-no-suppression

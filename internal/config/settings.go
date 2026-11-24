@@ -51,7 +51,9 @@ type keysLayer struct {
 }
 
 type devLayer struct {
-	ViteURL *string `toml:"vite_url"`
+	ViteURL      *string `toml:"vite_url"`
+	ViteCertFile *string `toml:"vite_cert_file"`
+	ViteKeyFile  *string `toml:"vite_key_file"`
 }
 
 // setting is one row of the settings table.
@@ -255,6 +257,25 @@ func settings() []setting {
 				apply: applyViteURL,
 			},
 		},
+		{
+			// Required when dev.vite_url is https, and used only then.
+			key:    "dev.vite_cert_file",
+			value:  absolutePath + ", used only with an https dev.vite_url",
+			absent: leaveToRules,
+			kind: text{
+				field: func(l *layer) **string { return &l.Dev.ViteCertFile },
+				apply: into(filePath, func(c *Config) *string { return &c.Dev.ViteCertFile }),
+			},
+		},
+		{
+			key:    "dev.vite_key_file",
+			value:  absolutePath + ", used only with an https dev.vite_url",
+			absent: leaveToRules,
+			kind: text{
+				field: func(l *layer) **string { return &l.Dev.ViteKeyFile },
+				apply: into(filePath, func(c *Config) *string { return &c.Dev.ViteKeyFile }),
+			},
+		},
 	}
 }
 
@@ -308,10 +329,21 @@ func applyViteURL(c *Config, s string) error {
 // never repeats s, which may be the secret itself, given by mistake in
 // place of its file's path.
 func fileSource(s string) (SecretSource, error) {
-	if !cleanAbsolute(s) {
-		return nil, fmt.Errorf("%w value: want an absolute, clean path (the value is not shown, as it may be the secret itself)", ErrInvalid)
+	p, err := filePath(s)
+	if err != nil {
+		return nil, err
 	}
-	return FromFile{Path: s}, nil
+	return FromFile{Path: p}, nil
+}
+
+// filePath returns s, the path of a file that holds a secret or goes with
+// one, when it is absolute and clean. Its error never repeats s, which may
+// be the secret itself, given by mistake in place of its file's path.
+func filePath(s string) (string, error) {
+	if !cleanAbsolute(s) {
+		return "", fmt.Errorf("%w value: want an absolute, clean path (the value is not shown, as it may be the secret itself)", ErrInvalid)
+	}
+	return s, nil
 }
 
 // parsePath returns s when it is an absolute, clean path.
