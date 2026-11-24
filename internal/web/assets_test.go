@@ -11,6 +11,9 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -112,13 +115,14 @@ func TestAssetsHashedImmutableWithSRI(t *testing.T) {
 	fsys := build(manifest)
 	a := production(t, fsys)
 	for _, tt := range []struct {
-		entry, file, contentType string
-		kind                     web.AssetKind
+		entry             web.Entry
+		file, contentType string
+		kind              web.AssetKind
 	}{
-		{entry: "web/css/layers.css", file: stylesheet, kind: web.Stylesheet, contentType: "text/css; charset=utf-8"},
-		{entry: "web/ts/main.ts", file: script, kind: web.Script, contentType: "text/javascript; charset=utf-8"},
+		{entry: web.StyleEntry, file: stylesheet, kind: web.Stylesheet, contentType: "text/css; charset=utf-8"},
+		{entry: web.ScriptEntry, file: script, kind: web.Script, contentType: "text/javascript; charset=utf-8"},
 	} {
-		t.Run(tt.entry, func(t *testing.T) {
+		t.Run(string(tt.entry), func(t *testing.T) {
 			tag, ok := a.Tag(tt.entry)
 			if !ok {
 				t.Fatalf("Tag(%q): no tag", tt.entry)
@@ -159,7 +163,7 @@ func TestAssetsHashedImmutableWithSRI(t *testing.T) {
 		})
 	}
 
-	for _, entry := range []string{"web/ts/missing.ts", "assets/main-BvRk9kiK.js", "", "web/ts"} {
+	for _, entry := range []web.Entry{"web/ts/missing.ts", "assets/main-BvRk9kiK.js", "", "web/ts"} {
 		if tag, ok := a.Tag(entry); ok {
 			t.Errorf("Tag(%q) = %+v, want none: the manifest has no such entry", entry, tag)
 		}
@@ -170,19 +174,8 @@ func TestAssetsHashedImmutableWithSRI(t *testing.T) {
 }
 
 func TestAssetsServeOnlyBuiltFiles(t *testing.T) {
-	// The stylesheet names a picture it uses.
-	m := `{
-  "web/css/layers.css": {"file": "assets/layers-CzttEyLW.css", "isEntry": true, "assets": ["assets/picture-Z9y8x7w6.svg"]},
-  "web/ts/main.ts": {"file": "assets/main-BvRk9kiK.js", "isEntry": true}
-}`
-	a := production(t, build(m))
+	a := production(t, build(manifest))
 	h := a.Handler()
-
-	if w := get(t, h, http.MethodGet, "/static/assets/picture-Z9y8x7w6.svg"); w.Code != http.StatusOK ||
-		w.Header().Get("Content-Type") != "image/svg+xml" || w.Header().Get("Cache-Control") != immutable {
-		t.Errorf("an asset the stylesheet names: %d, %q, %q; want 200, image/svg+xml, immutable",
-			w.Code, w.Header().Get("Content-Type"), w.Header().Get("Cache-Control"))
-	}
 
 	for _, target := range []string{
 		"/static/.vite/manifest.json",
@@ -196,6 +189,7 @@ func TestAssetsServeOnlyBuiltFiles(t *testing.T) {
 		"/static/" + script + "/",
 		"/" + script,
 		"/static/assets/MAIN-BVRK9KIK.JS",
+		"/static/assets/picture-Z9y8x7w6.svg",
 	} {
 		w := get(t, h, http.MethodGet, target)
 		if w.Code != http.StatusNotFound {
@@ -227,7 +221,7 @@ func TestAssetsAbsentManifestRendersWithout(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := production(t, fsys)
-			for _, entry := range []string{"web/css/layers.css", "web/ts/main.ts"} {
+			for _, entry := range []web.Entry{web.StyleEntry, web.ScriptEntry} {
 				if tag, ok := a.Tag(entry); ok {
 					t.Errorf("Tag(%q) = %+v with no manifest", entry, tag)
 				}
@@ -262,12 +256,12 @@ func TestNewAssetsRefusesABadBuild(t *testing.T) {
 		{name: "the manifest itself", manifest: `{"m": {"file": ".vite/manifest.json"}}`},
 		{name: "a script beside the manifest", manifest: `{"m": {"file": ".vite/stale-Q1w2e3r4.js"}}`},
 		{name: "a file of no known type", manifest: `{"web/x.txt": {"file": "PLACEHOLDER"}}`},
-		{name: "an entry neither script nor stylesheet", manifest: `{"web/p.svg": {"file": "assets/picture-Z9y8x7w6.svg", "isEntry": true}}`},
 		{name: "an entry that imports a chunk", manifest: `{"web/ts/main.ts": {"file": "assets/main-BvRk9kiK.js", "isEntry": true, "imports": ["_shared.js"]},
 			"_shared.js": {"file": "assets/stale-Q1w2e3r4.js"}}`},
 		{name: "an entry that imports later", manifest: `{"web/ts/main.ts": {"file": "assets/main-BvRk9kiK.js", "isEntry": true, "dynamicImports": ["_shared.js"]},
 			"_shared.js": {"file": "assets/stale-Q1w2e3r4.js"}}`},
 		{name: "an entry that imports a stylesheet", manifest: `{"web/ts/main.ts": {"file": "assets/main-BvRk9kiK.js", "isEntry": true, "css": ["assets/layers-CzttEyLW.css"]}}`},
+		{name: "an asset of a type not served", manifest: `{"web/css/layers.css": {"file": "assets/layers-CzttEyLW.css", "isEntry": true, "assets": ["assets/picture-Z9y8x7w6.svg"]}}`},
 		{name: "an asset not built", manifest: `{"web/css/layers.css": {"file": "assets/layers-CzttEyLW.css", "isEntry": true, "assets": ["assets/gone-00000000.svg"]}}`},
 		{name: "a manifest over 1 MiB", manifest: big},
 	} {
@@ -330,18 +324,17 @@ func TestDevModeOnlyOnLocalhost(t *testing.T) {
 				t.Fatalf("NewAssets: %v", err)
 			}
 			for _, want := range []struct {
-				entry string
+				entry web.Entry
 				kind  web.AssetKind
 			}{
-				{entry: "web/ts/main.ts", kind: web.Script},
-				{entry: "web/css/layers.css", kind: web.Stylesheet},
-				{entry: "web/css/tokens.css", kind: web.Stylesheet},
+				{entry: web.ScriptEntry, kind: web.Script},
+				{entry: web.StyleEntry, kind: web.Stylesheet},
 			} {
 				tag, ok := a.Tag(want.entry)
 				if !ok {
 					t.Fatalf("Tag(%q): none in dev mode", want.entry)
 				}
-				if u := tt.origin + "/static/" + want.entry; tag.URL() != u {
+				if u := tt.origin + "/static/" + string(want.entry); tag.URL() != u {
 					t.Errorf("URL %q, want %q", tag.URL(), u)
 				}
 				if tag.Kind() != want.kind {
@@ -362,7 +355,11 @@ func TestDevModeOnlyOnLocalhost(t *testing.T) {
 			if _, ok := client.Integrity(); ok {
 				t.Error("DevClient has an integrity value")
 			}
-			for _, entry := range []string{"../web/ts/main.ts", "/web/ts/main.ts", "web/img/logo.png", "web/ts", ""} {
+			// Only what vite.config.ts builds as an input is an entry: an
+			// imported file, or any other path, is none.
+			for _, entry := range []web.Entry{
+				"web/css/tokens.css", "web/ts/theme.ts", "../web/ts/main.ts", "/web/ts/main.ts", "web/img/logo.png", "web/ts", "",
+			} {
 				if tag, ok := a.Tag(entry); ok {
 					t.Errorf("Tag(%q) = %+v, want none", entry, tag)
 				}
@@ -372,6 +369,29 @@ func TestDevModeOnlyOnLocalhost(t *testing.T) {
 				t.Errorf("GET /static/%s in dev mode: %d, want 404", script, w.Code)
 			}
 		})
+	}
+}
+
+// TestEntriesAreViteInputs checks that the entries Assets knows are
+// exactly the inputs vite.config.ts builds.
+func TestEntriesAreViteInputs(t *testing.T) {
+	config, err := os.ReadFile("../../vite.config.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := regexp.MustCompile(`(?s)\binput:\s*\[(.*?)\]`).FindSubmatch(config)
+	if list == nil {
+		t.Fatal("vite.config.ts names no input list")
+	}
+	var inputs []string
+	for _, m := range regexp.MustCompile(`"([^"]+)"`).FindAllSubmatch(list[1], -1) {
+		inputs = append(inputs, string(m[1]))
+	}
+	slices.Sort(inputs)
+	want := []string{string(web.StyleEntry), string(web.ScriptEntry)}
+	slices.Sort(want)
+	if !slices.Equal(inputs, want) {
+		t.Errorf("vite.config.ts builds %q, and Assets knows the entries %q", inputs, want)
 	}
 }
 
@@ -402,7 +422,7 @@ func TestZeroAssetTag(t *testing.T) {
 func FuzzNewAssets(f *testing.F) {
 	f.Add(manifest)
 	f.Add(`{"web/ts/main.ts": {"file": "assets/main-BvRk9kiK.js", "isEntry": true}}`)
-	f.Add(`{"web/css/layers.css": {"file": "assets/layers-CzttEyLW.css", "isEntry": true, "assets": ["assets/picture-Z9y8x7w6.svg"]}}`)
+	f.Add(`{"web/css/layers.css": {"file": "assets/layers-CzttEyLW.css", "isEntry": true, "assets": ["assets/stale-Q1w2e3r4.js"]}}`)
 	f.Add(`{"a": {"file": ".vite/manifest.json"}}`)
 	f.Add(`{"a": {"file": "assets/stale-Q1w2e3r4.js", "imports": ["b"]}, "b": {"file": "PLACEHOLDER"}}`)
 	f.Fuzz(func(t *testing.T, m string) {
@@ -419,7 +439,7 @@ func FuzzNewAssets(f *testing.F) {
 				t.Fatalf("GET %s: %d", target, w.Code)
 			}
 		}
-		for _, entry := range []string{"web/ts/main.ts", "web/css/layers.css", "a", "b"} {
+		for _, entry := range []web.Entry{web.ScriptEntry, web.StyleEntry, "a", "b"} {
 			tag, ok := a.Tag(entry)
 			if !ok {
 				continue

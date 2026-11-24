@@ -164,8 +164,28 @@ secrets:
 # packages whose code a page ships, the dependencies; the tools that build
 # it are devDependencies. The audit asks the npm registry.
 
+# A front-end finding is fixed, or its rule switched off by name, with the
+# reason, in vite.config.ts or stylelint.config.mjs: no comment may
+# suppress one. This refuses, in every file git tracks or would track, each
+# comment Oxlint, ESLint, Stylelint, TypeScript and Oxfmt honour as a
+# suppression, in each of its forms (-line, -next-line and the rest). Each
+# pattern brackets one character, so that this recipe never matches itself.
+
+# Fail on any suppression comment
+[script("mise", "exec", "--", "bash", "-euo", "pipefail")]
+_fe-no-suppression:
+    rule="the front end takes no suppression comment: fix the finding, or switch its rule off by name in the config, with the reason"
+    hits=$(git grep --untracked -n -o -i -I -E -e '(oxlint|eslint|stylelint)[-]disable[a-z-]*' \
+        -e '@ts[-](ignore|expect-error|nocheck)' -e '(prettier|oxfmt)[-]ignore[a-z-]*' || [[ $? -eq 1 ]])
+    if [[ -n "${hits}" ]]; then
+        while IFS=: read -r file line what; do
+            echo "${file}:${line}: ${what}: ${rule}" >&2
+        done <<<"${hits}"
+        exit 1
+    fi
+
 # Every gate of the stylesheets and scripts under web/
-fe-check:
+fe-check: _fe-no-suppression
     pnpm exec vp check
     pnpm exec vp test
     pnpm exec stylelint "web/**/*.css"

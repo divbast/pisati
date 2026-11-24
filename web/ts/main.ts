@@ -6,4 +6,4 @@
 
 import { enhanceThemeForms } from "./theme.ts";
 
-enhanceThemeForms(document, async (input, init) => fetch(input, init));
+enhanceThemeForms(document, (input, init) => fetch(input, init));

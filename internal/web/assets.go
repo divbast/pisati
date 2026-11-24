@@ -72,6 +72,31 @@ func Dist() fs.FS {
 	return sub
 }
 
+// Entry is one of the front end's entries: a source file vite.config.ts
+// builds as an input of its own, named by its path from the repository's
+// root, which is also the key Vite's manifest gives it. StyleEntry and
+// ScriptEntry are all there are; any other Entry names none.
+type Entry string
+
+const (
+	// StyleEntry is the stylesheet every page links, a build of its own
+	// so that a page with no script loads it.
+	StyleEntry Entry = "web/css/layers.css"
+	// ScriptEntry is the script a page with something to enhance loads.
+	ScriptEntry Entry = "web/ts/main.ts"
+)
+
+// kind returns the element that loads e, and whether e is an entry.
+func (e Entry) kind() (AssetKind, bool) {
+	switch e {
+	case StyleEntry:
+		return Stylesheet, true
+	case ScriptEntry:
+		return Script, true
+	}
+	return 0, false
+}
+
 // AssetKind is the element a page loads an asset with. The zero AssetKind
 // is none, and only the zero AssetTag has it.
 type AssetKind uint8
@@ -169,8 +194,8 @@ type file struct {
 // error wrapping ErrBuild: a page should never load a file that is not
 // there, or one it cannot check.
 //
-// In dev mode, when dev.ViteURL is set, fsys is not read, and every tag
-// points at the Vite dev server's origin, with crossorigin and no
+// In dev mode, when dev.ViteURL is set, fsys is not read, and each entry's
+// tag points at the Vite dev server's origin, with crossorigin and no
 // integrity value; DevClient gives Vite's client script, and Handler
 // serves nothing. Dev mode needs both the dev server and base on
 // localhost, 127.0.0.1 or [::1], as config.Load ensures, and is otherwise
@@ -179,7 +204,7 @@ type file struct {
 // It checks ctx before each file it reads, and returns ctx's error once
 // ctx is done.
 func NewAssets(ctx context.Context, fsys fs.FS, base config.BaseURL, dev config.Dev) (*Assets, error) {
-	if vite, ok := dev.ViteURL.Get(); ok {
+	if vite, ok := dev.ViteOrigin(); ok {
 		origin, err := devOrigin(base, vite)
 		if err != nil {
 			return nil, err
@@ -210,23 +235,23 @@ func NewAssets(ctx context.Context, fsys fs.FS, base config.BaseURL, dev config.
 		if !c.IsEntry {
 			continue
 		}
-		// parseManifest has checked that every entry has a kind.
-		kind, _ := entryKind(c.File)
-		tags[entry] = AssetTag{kind: kind, url: staticURL(c.File), integrity: integrity(files[c.File].data)}
+		tags[entry] = AssetTag{kind: entryKind(c.File), url: staticURL(c.File), integrity: integrity(files[c.File].data)}
 	}
 	return &Assets{tags: tags, files: files}, nil
 }
 
-// Tag returns the tag a page loads entry with, entry being the source
-// path vite.config.ts names as an input, such as web/ts/main.ts, and
-// whether there is one. Outside dev mode only the manifest's entries have
-// one, and with no manifest none does; in dev mode, every clean relative
-// path to a .ts or .css file has one.
-func (a *Assets) Tag(entry string) (AssetTag, bool) {
+// Tag returns the tag a page loads entry with, and whether there is one.
+// Outside dev mode an entry has one when the manifest has it, and with no
+// manifest none does; in dev mode, StyleEntry and ScriptEntry have one.
+func (a *Assets) Tag(entry Entry) (AssetTag, bool) {
 	if a.dev != "" {
-		return a.devTag(entry)
+		kind, ok := entry.kind()
+		if !ok {
+			return AssetTag{}, false
+		}
+		return AssetTag{kind: kind, url: a.dev + staticURL(string(entry)), crossOrigin: true}, true
 	}
-	t, ok := a.tags[entry]
+	t, ok := a.tags[string(entry)]
 	return t, ok
 }
 
@@ -274,39 +299,15 @@ func (a *Assets) Handler() http.Handler {
 	})
 }
 
-// devTag returns the dev server's tag for entry, a source path.
-func (a *Assets) devTag(entry string) (AssetTag, bool) {
-	if !fs.ValidPath(entry) {
-		return AssetTag{}, false
-	}
-	var kind AssetKind
-	switch path.Ext(entry) {
-	case ".ts":
-		kind = Script
-	case ".css":
-		kind = Stylesheet
-	default:
-		return AssetTag{}, false
-	}
-	return AssetTag{kind: kind, url: a.dev + staticURL(entry), crossOrigin: true}, true
-}
-
-// devOrigin returns the origin of the Vite dev server at vite, for a site
+// devOrigin returns the origin of dev's Vite dev server, for a site
 // served at base, or an error wrapping ErrDevServer unless both are on
 // localhost, 127.0.0.1 or [::1].
-func devOrigin(base config.BaseURL, vite url.URL) (string, error) {
-	b, err := url.Parse(base.String())
-	if err != nil || !loopback(b.Hostname()) || !loopback(vite.Hostname()) {
+func devOrigin(base config.BaseURL, vite config.Origin) (string, error) {
+	if !base.IsLocal() || !vite.IsLocal() {
 		return "", fmt.Errorf("%w: the dev server %s and the base URL %q must both be on localhost, 127.0.0.1 or [::1]",
-			ErrDevServer, vite.Redacted(), base.String())
+			ErrDevServer, vite.String(), base.String())
 	}
-	return vite.Scheme + "://" + vite.Host, nil
-}
-
-// loopback reports whether host, without brackets or a port, is one of the
-// hosts config allows a dev server on: localhost, 127.0.0.1 or ::1.
-func loopback(host string) bool {
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	return vite.String(), nil
 }
 
 // manifest is Vite's build manifest, decoded strictly: each chunk the build
@@ -331,8 +332,8 @@ type chunk struct {
 
 // parseManifest decodes raw as Vite's manifest, refusing any field Vite's
 // ManifestChunk lacks, and checks that every file it names can be served,
-// that each entry is a script or a stylesheet, and that no entry loads
-// another file, which a page's tag could not check. Its errors wrap
+// a stylesheet or a script, and that no entry loads another file, which a
+// page's tag could not check. Its errors wrap
 // ErrBuild, and report every such problem at once.
 func parseManifest(raw []byte) (manifest, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -350,9 +351,6 @@ func parseManifest(raw []byte) (manifest, error) {
 	var errs []error
 	for _, key := range slices.Sorted(maps.Keys(m)) {
 		c := m[key]
-		if _, ok := entryKind(c.File); c.IsEntry && !ok {
-			errs = append(errs, fmt.Errorf("%w: entry %q builds to %q, which is neither a script nor a stylesheet", ErrBuild, key, c.File))
-		}
 		if c.IsEntry && len(c.Imports)+len(c.DynamicImports)+len(c.CSS) > 0 {
 			errs = append(errs, fmt.Errorf("%w: entry %q imports other files, which its tag would load unchecked", ErrBuild, key))
 		}
@@ -438,38 +436,26 @@ func readFile(ctx context.Context, fsys fs.FS, name string, limit int64) (data [
 	return data, nil
 }
 
-// entryKind returns the kind of element that loads file, an entry's built
-// file, and whether there is one.
-func entryKind(file string) (AssetKind, bool) {
-	switch path.Ext(file) {
-	case ".css":
-		return Stylesheet, true
-	case ".js":
-		return Script, true
+// entryKind returns the kind of element that loads file, an entry's
+// built file, which parseManifest has checked is a stylesheet or a script.
+func entryKind(file string) AssetKind {
+	if path.Ext(file) == ".css" {
+		return Stylesheet
 	}
-	return 0, false
+	return Script
 }
 
 // contentType returns the Content-Type Handler serves name with, and
-// whether it serves files of name's type at all. The types are fixed here,
-// rather than read from the system's tables, so that a file is served the
-// same way everywhere.
+// whether it serves files of name's type at all: stylesheets and scripts,
+// all a build of the front end writes. The types are fixed here, rather
+// than read from the system's tables, so that a file is served the same
+// way everywhere.
 func contentType(name string) (string, bool) {
 	switch path.Ext(name) {
 	case ".css":
 		return "text/css; charset=utf-8", true
 	case ".js":
 		return "text/javascript; charset=utf-8", true
-	case ".svg":
-		return "image/svg+xml", true
-	case ".png":
-		return "image/png", true
-	case ".webp":
-		return "image/webp", true
-	case ".avif":
-		return "image/avif", true
-	case ".woff2":
-		return "font/woff2", true
 	}
 	return "", false
 }

@@ -16,3 +16,8 @@ minimumReleaseAge: 10080
 # its platform.
 strictDepBuilds: true
 allowBuilds: {}
+
+# pnpm exec, which every recipe runs the tools through, fails when the
+# installed packages no longer match the lockfile, so a stale install never
+# runs: just setup brings it back in step.
+verifyDepsBeforeRun: error

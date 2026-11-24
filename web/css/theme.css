@@ -47,6 +47,21 @@
       oklch(38% 0.08 var(--accent-hue))
     );
     --color-danger: light-dark(oklch(50% 0.19 27), oklch(74% 0.15 27));
+    /*
+     * A form field's border shows where the field is, so it keeps 3:1
+     * against the page in both schemes (WCAG 2.2, 1.4.11); the
+     * contrast test checks it at every accent hue.
+     */
+    --color-border-field: light-dark(
+      oklch(56% 0.02 var(--accent-hue)),
+      oklch(60% 0.02 var(--accent-hue))
+    );
+    /*
+     * A line that only separates, a rule or a table's lines, marks no
+     * control, so it is the text colour faded, in whatever colour the
+     * text around it is.
+     */
+    --color-rule: color-mix(in oklch, currentcolor 25%, transparent);
 
     &[data-theme="light"] {
       color-scheme: light;
@@ -57,13 +72,14 @@
     }
 
     /*
-     * A reader who asks for more contrast gets text at full strength on
-     * a pure background, in either scheme.
+     * A reader who asks for more contrast gets text and field borders at
+     * full strength on a pure background, in either scheme.
      */
     @media (prefers-contrast: more) {
       --color-canvas: light-dark(oklch(100% 0 0), oklch(0% 0 0));
       --color-text: light-dark(oklch(0% 0 0), oklch(100% 0 0));
       --color-text-muted: var(--color-text);
+      --color-border-field: var(--color-text);
       --color-accent: light-dark(
         oklch(35% 0.15 var(--accent-hue)),
         oklch(88% 0.09 var(--accent-hue))

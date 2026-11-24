@@ -17,6 +17,9 @@ export type Theme = "light" | "dark" | "auto";
 /** The fetch the forms post with, which tests replace. */
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
+/** How one posted choice ended: applied, failed, or overtaken by a newer one. */
+type Outcome = "applied" | "failed" | "overtaken";
+
 const themes: ReadonlySet<string> = new Set<Theme>(["light", "dark", "auto"]);
 
 function isTheme(value: unknown): value is Theme {
@@ -26,51 +29,62 @@ function isTheme(value: unknown): value is Theme {
 /**
  * Enhances each form in doc marked data-theme-form, which posts its
  * buttons' theme (name="theme", value light, dark or auto) and a next page
- * to come back to. On submit, it posts the same fields with post, applies
- * the theme to <html> once the server has answered with success, and sets
- * aria-pressed on the form's theme buttons to show which is chosen. A
- * theme it does not know goes to the server as the form would send it.
- * A request that fails, or an answer that is not success, submits the form
- * as the browser would have, from the same button.
+ * to come back to. On submit, it posts the same fields with post, marks
+ * the form aria-busy while the request is out, and applies the theme to
+ * <html> once the server has answered with success, setting aria-pressed
+ * on the form's theme buttons to show which is chosen. A newer choice
+ * cancels the request of an older one, which then changes nothing. A theme
+ * it does not know goes to the server as the form would send it. A request
+ * that fails, or an answer that is not success, submits the form as the
+ * browser would have, with the theme chosen.
  */
 export function enhanceThemeForms(doc: Document, post: Fetch): void {
   for (const form of doc.querySelectorAll<HTMLFormElement>("form[data-theme-form]")) {
-    // Set while this script submits the form itself, after a failure, so
-    // that submit goes ahead as the browser's own.
-    let fallingBack = false;
-    form.addEventListener("submit", (event) => {
-      if (fallingBack) {
+    enhance(doc, form, post);
+  }
+}
+
+function enhance(doc: Document, form: HTMLFormElement, post: Fetch): void {
+  // Set while this script submits the form itself, after a failure, so
+  // that submit goes ahead as the browser's own.
+  let fallingBack = false;
+  // The newest choice's request, which a newer choice cancels.
+  let newest: AbortController | undefined;
+  form.addEventListener("submit", (event) => {
+    if (fallingBack) {
+      return;
+    }
+    const submitter = event.submitter;
+    const fields = new FormData(form, submitter);
+    const theme = fields.get("theme");
+    if (!isTheme(theme)) {
+      return;
+    }
+    event.preventDefault();
+    newest?.abort();
+    const request = new AbortController();
+    newest = request;
+    form.setAttribute("aria-busy", "true");
+    void apply(doc, form, fields, theme, post, request.signal).then((outcome) => {
+      if (outcome === "overtaken") {
         return;
       }
-      const submitter = event.submitter;
-      const fields = new FormData(form, submitter);
-      const theme = fields.get("theme");
-      if (!isTheme(theme)) {
-        return;
-      }
-      event.preventDefault();
-      void apply(doc, form, fields, theme, post).then((applied) => {
-        if (applied) {
-          return;
-        }
+      form.removeAttribute("aria-busy");
+      if (outcome === "failed") {
         fallingBack = true;
         try {
-          form.requestSubmit(submitter);
-        } catch {
-          // The button has left the form since: submit without it.
-          form.submit();
+          submitAsBrowser(doc, form, submitter, theme);
         } finally {
           fallingBack = false;
         }
-      });
+      }
     });
-  }
+  });
 }
 
 /**
  * Posts fields to form's action and, when the server answers with success,
- * applies theme. It reports whether it did: false for a request that
- * failed or an answer that is not success.
+ * applies theme, unless signal says a newer choice has overtaken it.
  */
 async function apply(
   doc: Document,
@@ -78,7 +92,8 @@ async function apply(
   fields: FormData,
   theme: Theme,
   post: Fetch,
-): Promise<boolean> {
+  signal: AbortSignal,
+): Promise<Outcome> {
   const body = new URLSearchParams();
   for (const [name, value] of fields) {
     if (typeof value === "string") {
@@ -97,16 +112,45 @@ async function apply(
       // from, which there is no need to fetch: the redirect itself is
       // the success.
       redirect: "manual",
+      signal,
     });
   } catch {
-    return false;
+    return signal.aborted ? "overtaken" : "failed";
+  }
+  // An answer may arrive after its request was cancelled.
+  if (signal.aborted) {
+    return "overtaken";
   }
   if (!response.ok && response.type !== "opaqueredirect") {
-    return false;
+    return "failed";
   }
   doc.documentElement.dataset["theme"] = theme;
   for (const button of form.querySelectorAll<HTMLButtonElement>('button[name="theme"]')) {
     button.setAttribute("aria-pressed", String(button.value === theme));
   }
-  return true;
+  return "applied";
+}
+
+/**
+ * Submits form as the browser would have without this script: from the
+ * same button, or, when the browser refuses that because the button has
+ * left the form, with the theme in a field of its own, since a plain
+ * submit sends no button's value.
+ */
+function submitAsBrowser(
+  doc: Document,
+  form: HTMLFormElement,
+  submitter: HTMLElement | null,
+  theme: Theme,
+): void {
+  try {
+    form.requestSubmit(submitter);
+  } catch {
+    const field = doc.createElement("input");
+    field.type = "hidden";
+    field.name = "theme";
+    field.value = theme;
+    form.append(field);
+    form.submit();
+  }
 }

@@ -7,7 +7,7 @@
 # For the stylesheets and scripts under web/: the Node the Containerfile's
 # Node stage runs, and the pnpm that installs pnpm-lock.yaml
 "core:node" = "26.13.1"
-pnpm = "12.23.0"
+pnpm = "12.21.0"
 # For the secrets recipe, which scans the whole history
 "aqua:betterleaks/betterleaks" = "1.10.1"
 

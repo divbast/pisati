@@ -6,38 +6,77 @@
 
 import browserslist from "browserslist";
 import { browserslistToTargets } from "lightningcss";
-import { defineConfig } from "vite-plus";
+import { defineConfig, loadEnv } from "vite-plus";
 
 // The browsers package.json's browserslist names, read once, so the
 // stylesheets and the scripts are built for the same ones.
 const browsers = browserslist();
 
+// The engines build.target names, for each browser browserslist names
+// that runs one. Opera and Samsung Internet run Chromium releases older
+// than the Chrome of the same day, so they keep engines of their own.
+const engines: Readonly<Record<string, string>> = {
+  chrome: "chrome",
+  and_chr: "chrome",
+  edge: "edge",
+  firefox: "firefox",
+  and_ff: "firefox",
+  safari: "safari",
+  ios_saf: "ios",
+  opera: "opera",
+  samsung: "samsung",
+};
+
+// A browser version as major and minor numbers, compared as numbers, so
+// that 17.10 comes after 17.4.
+type Version = readonly [major: number, minor: number];
+
+// The version browserslist writes, such as "132", "18.2" or the range
+// "18.5-18.6", whose first version counts; none for one it gives no
+// number, such as "TP".
+function parseVersion(text: string): Version | undefined {
+  const match = /^(\d+)(?:\.(\d+))?/u.exec(text);
+  if (match === null) {
+    return undefined;
+  }
+  return [Number(match[1]), Number(match[2] ?? "0")];
+}
+
+function older(a: Version, b: Version): boolean {
+  return a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
+}
+
 // The script build's targets, in the form build.target takes: the oldest
-// version of each engine the browsers above run. Opera, Samsung Internet
-// and Android's WebView are Chromium, so Chrome's version covers them.
-function scriptTargets(list: readonly string[]): string[] {
-  const engines: Readonly<Record<string, string>> = {
-    chrome: "chrome",
-    and_chr: "chrome",
-    edge: "edge",
-    firefox: "firefox",
-    and_ff: "firefox",
-    safari: "safari",
-    ios_saf: "ios",
-  };
-  const oldest = new Map<string, number>();
+// version of each engine the browsers run.
+export function scriptTargets(list: readonly string[]): string[] {
+  const oldest = new Map<string, Version>();
   for (const browser of list) {
-    const [name = "", version = ""] = browser.split(" ");
+    const [name = "", text = ""] = browser.split(" ");
     const engine = engines[name];
-    // A range, such as iOS's "18.5-18.6", counts as its first version.
-    const first = Number.parseFloat(version.split("-")[0] ?? "");
-    if (engine === undefined || Number.isNaN(first)) {
+    const version = parseVersion(text);
+    if (engine === undefined || version === undefined) {
       continue;
     }
-    oldest.set(engine, Math.min(oldest.get(engine) ?? first, first));
+    const seen = oldest.get(engine);
+    if (seen === undefined || older(version, seen)) {
+      oldest.set(engine, version);
+    }
   }
-  return [...oldest].map(([engine, version]) => `${engine}${version}`).toSorted();
+  return [...oldest]
+    .map(([engine, [major, minor]]) => `${engine}${major}${minor === 0 ? "" : `.${minor}`}`)
+    .toSorted();
 }
+
+// The Vite dev server, where Pisati's dev mode looks for it: the URL
+// PISATI_DEV_VITE_URL gives Pisati, read here from the environment alone,
+// or Vite's usual address when it is unset. The server listens there, and
+// writes that origin into what it serves, since pages come from Pisati's
+// own origin.
+const devServer = new URL(
+  loadEnv("development", false, "PISATI_DEV_")["PISATI_DEV_VITE_URL"] ?? "http://localhost:5173",
+);
+
+const targets = scriptTargets(browsers);
 
 export default defineConfig({
   // Pisati serves the build under /static/, so every URL the build writes,
@@ -55,7 +94,11 @@ export default defineConfig({
     emptyOutDir: false,
     // .vite/manifest.json, from which Pisati names each entry's hashed file.
     manifest: true,
-    target: scriptTargets(browsers),
+    target: targets,
+    // The stylesheets are built for every browser above, Samsung
+    // Internet's included, before Vite minifies them; the minifier takes
+    // its targets in build.target's form, which has no Samsung Internet.
+    cssTarget: targets.filter((target) => !target.startsWith("samsung")),
     cssMinify: "lightningcss",
     // Every file is served from /static/ under the page's policy, never
     // inlined as a data: URL, which the policy refuses.
@@ -69,15 +112,17 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    // URL keeps an IPv6 address's brackets, which listening does not take.
+    host: devServer.hostname.replace(/^\[(.*)\]$/u, "$1"),
+    port: Number(devServer.port || (devServer.protocol === "https:" ? "443" : "80")),
     strictPort: true,
-    // Pages come from Pisati, at another origin, so the URLs Vite writes
-    // into what it serves name the dev server itself.
-    origin: "http://localhost:5173",
+    origin: devServer.origin,
   },
   test: {
     environment: "happy-dom",
-    include: ["web/ts/**/*.test.ts"],
+    include: ["web/ts/**/*.test.ts", "vite.config.test.ts"],
+    // The stylesheets as they are written, for the tests that read them.
+    css: { include: [/\/web\/css\/[^/]+\.css(?:\?raw)?$/u] },
   },
   fmt: {
     // Oxfmt formats the front end's code, stylesheets and JSON. The
@@ -90,6 +135,14 @@ export default defineConfig({
       correctness: "error",
       suspicious: "error",
       perf: "error",
+      pedantic: "error",
+    },
+    // A pedantic rule is switched off here, by name and with its reason,
+    // never by a comment in the code.
+    rules: {
+      // The DOM's own types, Document and HTMLFormElement among them, are
+      // mutable by nature, so a parameter of one can never be readonly.
+      "typescript/prefer-readonly-parameter-types": "off",
     },
     options: {
       typeAware: true,

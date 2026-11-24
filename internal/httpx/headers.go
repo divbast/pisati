@@ -6,7 +6,6 @@ package httpx
 import (
 	"context"
 	"net/http"
-	"net/url"
 	"strconv"
 
 	"github.com/divbast/pisati/internal/config"
@@ -112,26 +111,19 @@ func hstsValue(s config.HSTSScope) string {
 // devServer when dev sets none. It panics when the server, or base, is
 // away from loopback: config.Load sets ViteURL only when both are on it.
 func devServerOf(base config.BaseURL, dev config.Dev) devServer {
-	u, ok := dev.ViteURL.Get()
+	vite, ok := dev.ViteOrigin()
 	if !ok {
 		return devServer{}
 	}
-	b, err := url.Parse(base.String())
-	if err != nil || !loopback(b.Hostname()) || !loopback(u.Hostname()) {
-		panic("httpx: SecurityHeaders was given the Vite dev server " + u.Redacted() + " for the base URL " +
+	if !base.IsLocal() || !vite.IsLocal() {
+		panic("httpx: SecurityHeaders was given the Vite dev server " + vite.String() + " for the base URL " +
 			base.String() + ", and both must be on localhost, 127.0.0.1 or [::1]")
 	}
 	socket := "ws://"
-	if u.Scheme == "https" {
+	if vite.IsHTTPS() {
 		socket = "wss://"
 	}
-	return devServer{origin: u.Scheme + "://" + u.Host, socket: socket + u.Host}
-}
-
-// loopback reports whether host, without brackets or a port, is one of
-// the hosts config allows a dev server on: localhost, 127.0.0.1 or ::1.
-func loopback(host string) bool {
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	return devServer{origin: vite.String(), socket: socket + vite.Host()}
 }
 
 // Nonce returns the nonce of the response to the request ctx belongs to,

@@ -8,6 +8,18 @@
       "matchFileNames": ["go.mod", "tools/go.mod"],
       "matchDepNames": ["github.com/a-h/templ"],
       "groupName": "templ"
+    },
+    {
+      "description": "pnpm installs a release only once it is 7 days old (minimumReleaseAge in pnpm-workspace.yaml), and refuses a younger one, so Renovate proposes none sooner: a PR for a younger release would fail its lockfile update.",
+      "matchManagers": ["npm"],
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "pnpm as mise.toml installs it and as package.json's packageManager names it move in one PR, after the same 7 days, so the pnpm that installs locally and in CI is the one Renovate updates the lockfile with.",
+      "matchManagers": ["mise", "npm"],
+      "matchDepNames": ["pnpm"],
+      "groupName": "pnpm",
+      "minimumReleaseAge": "7 days"
     }
   ]
 }

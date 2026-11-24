@@ -2,21 +2,25 @@
 /* SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee> */
 
 /*
- * The design tokens: every font, size, space, radius and duration the
- * other rules use, as custom properties on :root. Rules name a token,
- * never a literal value, so a blog's settings and its own stylesheet
- * restyle a page by setting tokens alone. The colours live in theme.css.
+ * The design tokens: the fonts, sizes, spaces, weights, radii and
+ * durations the other rules use, as custom properties on :root, so a
+ * blog's settings and its own stylesheet restyle a page by setting tokens
+ * alone. The colours live in theme.css. What stays literal in the rules is
+ * mechanics no setting would change: a visually hidden element's single
+ * pixel, a percentage of the text colour, or a container query's width,
+ * which no custom property can set.
  */
 
 /*
  * The hue every colour in theme.css is built on, which a blog's accent
- * colour setting changes. It is registered so that a value of the wrong
- * type falls back to this initial value, where an unregistered property
+ * colour setting changes: an angle, such as 250deg, or a number of
+ * degrees, as oklch() takes either. It is registered so that a value of
+ * any other type falls back to this initial value, where an unregistered property
  * would leave every colour built on it invalid. A registration applies to
  * the whole document, so it sits outside the layers.
  */
 @property --accent-hue {
-  syntax: "<number>";
+  syntax: "<angle> | <number>";
   inherits: true;
   initial-value: 250;
 }
@@ -52,6 +56,11 @@
 
     --leading-tight: 1.2;
     --leading-body: 1.6;
+    --weight-strong: 600;
+    /* Code sits a little smaller than the text around it, to look its size. */
+    --size-code: 0.9em;
+    --underline-offset: 0.15em;
+    --underline-hover: 0.12em;
 
     /* The space scale, fluid between the same screen sizes as the type. */
     --space-3xs: clamp(0.25rem, 0.2396rem + 0.0521vi, 0.2812rem);
@@ -72,8 +81,12 @@
     --radius-s: 0.25rem;
     --radius-m: 0.5rem;
     --border-width: 1px;
+    --border-width-strong: 0.25rem;
     --focus-width: 3px;
     --focus-offset: 2px;
+    --opacity-disabled: 0.6;
+    /* A text box opens six lines tall. */
+    --rows-text-box: 6lh;
 
     --duration-fast: 120ms;
     --duration-slow: 240ms;

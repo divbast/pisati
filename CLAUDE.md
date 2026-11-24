@@ -180,8 +180,10 @@ breaking change.
   (`divbast-pin`) in each ci workflow that runs this repository's code,
   refuse workflows that call ci at more than one commit
 - **divbast/renovate-config** holds the presets `renovate.json` extends.
-  `renovate.json` adds one rule of its own: templ's runtime and its
-  generator move in one PR
+  `renovate.json` adds rules of its own: templ's runtime and its generator
+  move in one PR; npm packages wait 7 days after release, as pnpm's
+  `minimumReleaseAge` makes the install do; and pnpm moves in `mise.toml`
+  and `package.json`'s `packageManager` together
 - **divbast/infra** holds the org's settings, this repository's rulesets,
   the `divbast-renovate` App, the `renovate`
   environment and `PISATI_AUTOMERGE`
@@ -218,12 +220,20 @@ breaking change.
   modules. `secrets` runs betterleaks over the history of every ref the
   clone holds: all of it locally, and in CI once the lint job checks out
   the full history
-- `just fe-check` — the front end's gates: `vp check` (Oxfmt, Oxlint and
-  the TypeScript type checks), `vp test` (Vitest, on happy-dom),
-  Stylelint over `web/**/*.css`, and `pnpm audit --prod`
+- `just fe-check` — the front end's gates: no suppression comment at
+  all, of Oxlint, ESLint, Stylelint, TypeScript or Oxfmt (a noisy rule is
+  switched off by name, with its reason, in `vite.config.ts` or
+  `stylelint.config.mjs` instead); `vp check` (Oxfmt, Oxlint with the
+  correctness, suspicious, perf and pedantic categories as errors, and the
+  TypeScript type checks); `vp test` (Vitest, on happy-dom, with a test of
+  the colour contrast `web/css/theme.css` gives); Stylelint
+  over `web/**/*.css`; and `pnpm audit --prod`
 - `just fe-build` — `vp build` the stylesheets and scripts under `web/`
   into `internal/web/dist`, which `go:embed` compiles into the binary.
-  Only `PLACEHOLDER` there is tracked: the build output never is
+  Only `PLACEHOLDER` there is tracked: the build output never is. `vp dev`
+  serves the same sources where `PISATI_DEV_VITE_URL` points, or at
+  `http://localhost:5173` when it is unset, which is where Pisati's dev
+  mode loads them from
 - `just archive`, `just scan` — write the image as an OCI archive, then run
   `divbast-scan` over it and the published `:latest`. Needs network access
   to ghcr.io

@@ -910,6 +910,63 @@ func TestDevViteURLOnlyWithLocalhost(t *testing.T) {
 	}
 }
 
+func TestBaseURLIsLocal(t *testing.T) {
+	t.Parallel()
+
+	for base, want := range map[string]bool{
+		"http://localhost:8080":     true,
+		"http://127.0.0.1":          true,
+		"http://[::1]:8080":         true,
+		"https://LocalHost:8443/":   true,
+		"https://blog.example.org":  false,
+		"https://127.0.0.2":         false,
+		"https://[::2]":             false,
+		"https://localhost.example": false,
+	} {
+		b, err := config.ParseBaseURL(base)
+		if err != nil {
+			t.Fatalf("ParseBaseURL(%q): %v", base, err)
+		}
+		if got := b.IsLocal(); got != want {
+			t.Errorf("%q.IsLocal() = %v, want %v", base, got, want)
+		}
+	}
+	if (config.BaseURL{}).IsLocal() {
+		t.Error("the zero BaseURL is local")
+	}
+}
+
+func TestDevViteOrigin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		vite, origin, host string
+		https, local       bool
+	}{
+		{vite: "http://localhost:5173", origin: "http://localhost:5173", host: "localhost:5173", local: true},
+		{vite: "http://LOCALHOST:5173/static/", origin: "http://localhost:5173", host: "localhost:5173", local: true},
+		{vite: "http://127.0.0.1:5173", origin: "http://127.0.0.1:5173", host: "127.0.0.1:5173", local: true},
+		{vite: "https://[::1]:5173", origin: "https://[::1]:5173", host: "[::1]:5173", https: true, local: true},
+		{vite: "http://localhost:80", origin: "http://localhost", host: "localhost", local: true},
+		{vite: "https://vite.example.org:443", origin: "https://vite.example.org", host: "vite.example.org", https: true},
+		{vite: "http://127.0.0.2:5173", origin: "http://127.0.0.2:5173", host: "127.0.0.2:5173"},
+	}
+	for _, tt := range tests {
+		u, err := config.ParseOptionalURL(tt.vite)
+		if err != nil {
+			t.Fatalf("ParseOptionalURL(%q): %v", tt.vite, err)
+		}
+		o, ok := config.Dev{ViteURL: u}.ViteOrigin()
+		if !ok || o.String() != tt.origin || o.Host() != tt.host || o.IsHTTPS() != tt.https || o.IsLocal() != tt.local {
+			t.Errorf("ViteOrigin for %q = %q, host %q, https %v, local %v, %v; want %q, %q, %v, %v, true",
+				tt.vite, o.String(), o.Host(), o.IsHTTPS(), o.IsLocal(), ok, tt.origin, tt.host, tt.https, tt.local)
+		}
+	}
+	if o, ok := (config.Dev{}).ViteOrigin(); ok || o != (config.Origin{}) || o.String() != "" {
+		t.Errorf("ViteOrigin with no Vite URL = %v, %v; want the zero Origin, false", o, ok)
+	}
+}
+
 // brokenFS fails to open anything, with err.
 type brokenFS struct{ err error }
 

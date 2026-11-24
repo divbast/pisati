@@ -101,6 +101,49 @@ type Dev struct {
 	ViteURL OptionalURL
 }
 
+// ViteOrigin returns the origin of ViteURL, the Vite dev server's, and
+// whether there is one: only when ViteURL is set.
+func (d Dev) ViteOrigin() (Origin, bool) {
+	u, ok := d.ViteURL.Get()
+	if !ok {
+		return Origin{}, false
+	}
+	return Origin{scheme: u.Scheme, host: u.Host, local: loopback(u.Hostname())}, true
+}
+
+// Origin is where a URL is served: its scheme, http or https, and its
+// host, with the port when it is not the scheme's default, in the
+// canonical form a BaseURL has. The zero Origin is none: its String is
+// empty.
+type Origin struct {
+	scheme, host string
+	local        bool
+}
+
+// String returns the origin as scheme://host[:port].
+func (o Origin) String() string {
+	if o.scheme == "" {
+		return ""
+	}
+	return o.scheme + "://" + o.host
+}
+
+// Host returns the host, with the port when it is not the scheme's
+// default: an IPv6 address is in brackets.
+func (o Origin) Host() string {
+	return o.host
+}
+
+// IsHTTPS reports whether the scheme is https.
+func (o Origin) IsHTTPS() bool {
+	return o.scheme == "https"
+}
+
+// IsLocal reports whether the host is localhost, 127.0.0.1 or [::1].
+func (o Origin) IsLocal() bool {
+	return o.local
+}
+
 // BaseURL is the URL the site is served at: https://host[:port], or
 // http://host[:port] when the host is localhost, 127.0.0.1 or [::1]. It
 // has no path, query, fragment or user information; its host is lower
@@ -138,6 +181,12 @@ func ParseBaseURL(s string) (BaseURL, error) {
 // IsHTTPS reports whether the site is served over https.
 func (b BaseURL) IsHTTPS() bool {
 	return b.https
+}
+
+// IsLocal reports whether the site is served on localhost, 127.0.0.1 or
+// [::1]. The zero BaseURL is not.
+func (b BaseURL) IsLocal() bool {
+	return b.local
 }
 
 // String returns the URL in its canonical form, which ParseBaseURL gives
