@@ -12,6 +12,7 @@
 
 import { expect, it } from "vite-plus/test";
 
+import baseCss from "../css/base.css?raw";
 import theme from "../css/theme.css?raw";
 
 type Oklch = readonly [lightness: number, chroma: number, hue: number | "accent"];
@@ -24,16 +25,21 @@ type Token =
   | { readonly alias: string }
   | { readonly mix: string; readonly share: number };
 
+// A token's name, whatever it is: the test must read every --color-*
+// declaration, so none slips past it for a name of another form.
+const tokenName = String.raw`([^\s:;()]+)`;
 const oklch = String.raw`oklch\(\s*([\d.]+)%\s+([\d.]+)\s+(var\(--accent-hue\)|[\d.]+)\s*\)`;
 const pair = new RegExp(
-  String.raw`--color-([a-z-]+):\s*light-dark\(\s*${oklch}\s*,\s*${oklch}\s*\)`,
+  String.raw`--color-${tokenName}:\s*light-dark\(\s*${oklch}\s*,\s*${oklch}\s*\)`,
   "gu",
 );
-const alias = /--color-([a-z-]+):\s*var\(--color-([a-z-]+)\)/gu;
-const mix =
-  /--color-([a-z-]+):\s*color-mix\(\s*in oklch\s*,\s*var\(--color-([a-z-]+)\)\s+([\d.]+)%\s*,\s*transparent\s*\)/gu;
+const alias = new RegExp(String.raw`--color-${tokenName}:\s*var\(--color-${tokenName}\)`, "gu");
+const mix = new RegExp(
+  String.raw`--color-${tokenName}:\s*color-mix\(\s*in oklch\s*,\s*var\(--color-${tokenName}\)\s+([\d.]+)%\s*,\s*transparent\s*\)`,
+  "gu",
+);
 // Every --color-* declaration, with its value.
-const declaration = /--color-([a-z-]+)\s*:([^;]*);/gu;
+const declaration = new RegExp(String.raw`--color-${tokenName}\s*:([^;]*);`, "gu");
 
 function colour(l: string, c: string, h: string): Oklch {
   return [Number(l) / 100, Number(c), h.startsWith("var(") ? "accent" : Number(h)];
@@ -101,25 +107,12 @@ function clamp(v: number): number {
   return Math.min(1, Math.max(0, v));
 }
 
-// Linear sRGB of an oklch colour, after reducing chroma until it fits
-// sRGB, as a browser maps a colour outside the screen's gamut.
+// Linear sRGB of an oklch colour, each channel clipped to sRGB, as
+// browsers show a colour outside the screen's gamut. CSS Color 4 asks for
+// the chroma to be reduced instead, but browsers do not do that, and
+// clipping is the worse of the two for contrast, so it is what counts.
 function rgb([l, c, h]: readonly [number, number, number]): Rgb {
-  const fits = (chroma: number): boolean =>
-    linear([l, chroma, h]).every((v) => v >= -1e-6 && v <= 1 + 1e-6);
-  let chroma = c;
-  if (!fits(chroma)) {
-    let low = 0;
-    for (let step = 0; step < 24; step++) {
-      const mid = (low + chroma) / 2;
-      if (fits(mid)) {
-        low = mid;
-      } else {
-        chroma = mid;
-      }
-    }
-    chroma = low;
-  }
-  const [r, g, b] = linear([l, chroma, h]);
+  const [r, g, b] = linear([l, c, h]);
   return [clamp(r), clamp(g), clamp(b)];
 }
 
@@ -180,8 +173,12 @@ function ratio(
 const pairs: readonly [fore: string, back: string, least: number][] = [
   ["text", "canvas", 4.5],
   ["text", "surface", 4.5],
+  // Selected text of every kind, muted text, links and button labels
+  // among it, takes the body colour, as base.css's ::selection sets it, so
+  // only --color-text ever shows on the selection. iOS Safari ignores
+  // ::selection altogether and shows the system's own highlight, whose
+  // contrast is outside the page's control.
   ["text", "selection", 4.5],
-  ["text-muted", "selection", 4.5],
   ["text-muted", "canvas", 4.5],
   ["accent", "canvas", 4.5],
   ["accent-strong", "canvas", 4.5],
@@ -208,17 +205,46 @@ it.each(pairs)("--color-%s on --color-%s meets %d:1", (fore, back, least) => {
   }
 });
 
+// The pair above holds for every selected text only while ::selection
+// gives it the body colour on the selection's background.
+it("selects text in the body colour, on the selection's background", () => {
+  const rule = /::selection\s*\{([^}]*)\}/u.exec(baseCss)?.[1] ?? "";
+  expect(rule).toMatch(/(?:^|[;\s])color:\s*var\(--color-text\)/u);
+  expect(rule).toMatch(/background-color:\s*var\(--color-selection\)/u);
+});
+
 it("reads every colour token theme.css declares, in either block", () => {
   const at = theme.indexOf(more);
   expect(unread(theme.slice(0, at))).toEqual([]);
   expect(unread(theme.slice(at))).toEqual([]);
 });
 
-it("has no colour token that takes currentcolor, whose colour depends on where it is used", () => {
-  const takers = [...theme.matchAll(declaration)]
+// The --color-* tokens css declares that take currentcolor.
+function takers(css: string): string[] {
+  return [...css.matchAll(declaration)]
     .filter(([, , value = ""]) => /currentcolor/iu.test(value))
     .map(([, name = ""]) => name);
-  expect(takers).toEqual([]);
+}
+
+it("has no colour token that takes currentcolor, whose colour depends on where it is used", () => {
+  expect(takers(theme)).toEqual([]);
+});
+
+it.each(["gray-2", "Hint", "x_y"])("reads --color-%s whatever its name", (name) => {
+  expect(unread(`--color-${name}: oklch(50% 0.1 250);`)).toEqual([name]);
+  expect(
+    tokens(`--color-${name}: light-dark(oklch(50% 0.1 250), oklch(60% 0.1 250));`).has(name),
+  ).toBe(true);
+  expect(takers(`--color-${name}: color-mix(in oklch, currentcolor 50%, transparent);`)).toEqual([
+    name,
+  ]);
+});
+
+// Browsers show a colour outside sRGB by clipping each channel to it, not
+// by reducing its chroma as CSS Color 4 describes: the worst a screen
+// shows, which the test therefore measures.
+it("clips a colour outside sRGB per channel, as browsers show it", () => {
+  expect(rgb([0.7, 0.4, 30])).toEqual([1, 0, 0]);
 });
 
 it("knows every colour token, so that each one new gets its pairs", () => {

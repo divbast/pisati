@@ -126,7 +126,15 @@
     outline-offset: var(--focus-offset);
   }
 
+  /*
+   * Selected text of every kind, muted text, links and button labels
+   * among it, reads in the body colour on the selection, which keeps
+   * 4.5:1 for it; each takes its own colour back once deselected. iOS
+   * Safari ignores ::selection altogether and shows the system's own
+   * highlight, whose contrast is outside the page's control.
+   */
   ::selection {
+    color: var(--color-text);
     background-color: var(--color-selection);
   }
 
