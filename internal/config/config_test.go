@@ -748,10 +748,13 @@ const (
 var everywhere = []givenIn{inVariable, inFile}
 
 func (g givenIn) String() string {
-	if g == inFile {
+	switch g {
+	case inVariable:
+		return "in its variable"
+	case inFile:
 		return "in pisati.toml"
 	}
-	return "in its variable"
+	panic(fmt.Sprintf("givenIn(%d) is not a place a setting is given", g))
 }
 
 // loadURLSetting loads the URL setting key set to value, given where
@@ -770,6 +773,8 @@ func loadURLSetting(t *testing.T, key, value string, where givenIn) (cfg config.
 		s.env[variable] = value
 	case inFile:
 		s.files = fstest.MapFS{"pisati.toml": tomlFile("[" + section + "]\n" + name + " = " + tomlString(value) + "\n")}
+	default:
+		t.Fatalf("givenIn(%d): no such place to give a setting", where)
 	}
 	cfg, err = s.load(t.Context())
 	return cfg, key + " (" + variable + ")", err
@@ -1090,6 +1095,7 @@ func TestDevViteURLOnlyWithLocalhost(t *testing.T) {
 		{name: "a public base URL", base: baseURL, vite: "http://localhost:5173"},
 		{name: "a public Vite URL", base: "http://localhost:8080", vite: "http://vite.example.org:5173"},
 		{name: "another loopback address", base: "http://localhost:8080", vite: "http://127.0.0.2:5173"},
+		{name: "a public Vite URL with a path", base: "http://localhost:8080", vite: "https://vite.example.org:5173/pa-q7z"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1103,6 +1109,11 @@ func TestDevViteURLOnlyWithLocalhost(t *testing.T) {
 			cfg, err := setup{env: e}.load(t.Context())
 			if tt.want == "" {
 				refused(t, err, config.ErrInvalid, "dev.vite_url (PISATI_DEV_VITE_URL)", "localhost")
+				// The error names the setting and the rule, never the URL.
+				_, hostAndPath, _ := strings.Cut(tt.vite, "://")
+				if strings.Contains(err.Error(), hostAndPath) || strings.Contains(err.Error(), "q7z") {
+					t.Errorf("error %q repeats the URL", err)
+				}
 				return
 			}
 			if err != nil {

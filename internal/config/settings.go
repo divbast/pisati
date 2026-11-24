@@ -310,7 +310,8 @@ func applyTrustedProxies(c *Config, items []string) []error {
 
 // applyViteURL stores s as the Vite dev server's URL. A URL is accepted
 // only on localhost, 127.0.0.1 or [::1], with a base URL there too; c
-// already holds the base URL, unless it was refused.
+// already holds the base URL, unless it was refused. Its errors never
+// repeat the URL.
 func applyViteURL(c *Config, s string) error {
 	vite, err := ParseOptionalURL(s)
 	if err != nil {
@@ -319,7 +320,8 @@ func applyViteURL(c *Config, s string) error {
 	u, set := vite.Get()
 	baseGiven := c.Server.BaseURL != BaseURL{}
 	if set && baseGiven && (!c.Server.BaseURL.local || !loopback(u.Hostname())) {
-		return fmt.Errorf("%w value %q: the Vite dev server is for development alone, so it and the base URL must both be on localhost, 127.0.0.1 or [::1]", ErrInvalid, u.String())
+		return fmt.Errorf("%w value: the Vite dev server is for development alone, so it and the base URL must both be on localhost, "+
+			"127.0.0.1 or [::1] (the value is not shown, as a URL may hold a password)", ErrInvalid)
 	}
 	c.Dev.ViteURL = vite
 	return nil

@@ -378,11 +378,13 @@ func parseWebURL(s string) (url.URL, error) {
 		return url.URL{}, errors.New("it has no host")
 	case u.User != nil:
 		return url.URL{}, errors.New("it holds user information")
-	// url.Parse keeps a space in a path, as it does other characters RFC
-	// 3986 refuses there, and String then escapes them, so the URL would
-	// not be the one given. The path as given is RawPath, or, when
-	// url.Parse leaves that empty, the path's default escaping, which is
-	// EscapedPath and holds none of them.
+	// RFC 3986 lets a path hold some characters only percent-encoded.
+	// url.Parse keeps them unescaped, and String then escapes most of
+	// them, a space among them, so the URL would not be the one given;
+	// it leaves "[" and "]" as they are, which are refused all the same.
+	// The path as given is RawPath, or, when url.Parse leaves that
+	// empty, the path's default escaping, which is EscapedPath and holds
+	// none of them.
 	case !escapedPath(cmp.Or(u.RawPath, u.EscapedPath())):
 		return url.URL{}, errors.New("its path holds a character a URL must percent-encode")
 	}
