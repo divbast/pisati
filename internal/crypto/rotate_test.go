@@ -25,7 +25,7 @@ import (
 
 func TestRewrap(t *testing.T) {
 	s := newStore(t)
-	old, next := newMaster(t), newMaster(t)
+	old, next := newMainKey(t), newMainKey(t)
 	k := openKeyring(t, s, old)
 	first := seal(t, k, "first", "assoc")
 	if err := crypto.Rotate(t.Context(), s, k); err != nil {
@@ -34,22 +34,22 @@ func TestRewrap(t *testing.T) {
 	second := seal(t, k, "second", "assoc")
 	before := dataKeys(t, s)
 
-	t.Run("refuses a master that does not unwrap the keys", func(t *testing.T) {
-		if err := crypto.Rewrap(t.Context(), s, newMaster(t), next); !errors.Is(err, crypto.ErrMasterMismatch) {
-			t.Fatalf("Rewrap from another master: %v, want ErrMasterMismatch", err)
+	t.Run("refuses a main key that does not unwrap the keys", func(t *testing.T) {
+		if err := crypto.Rewrap(t.Context(), s, newMainKey(t), next); !errors.Is(err, crypto.ErrMainKeyMismatch) {
+			t.Fatalf("Rewrap from another main key: %v, want ErrMainKeyMismatch", err)
 		}
 		if after := dataKeys(t, s); !sameKeys(before, after) {
 			t.Error("a refused Rewrap changed the data keys")
 		}
 	})
 
-	t.Run("refuses a master that unwraps only some", func(t *testing.T) {
+	t.Run("refuses a main key that unwraps only some", func(t *testing.T) {
 		// The last key is one old cannot unwrap, so a Rewrap that wrote
 		// each key as it went would have changed the first by then.
 		damageKey(t, s, 2)
 		damaged := dataKeys(t, s)
-		if err := crypto.Rewrap(t.Context(), s, old, next); !errors.Is(err, crypto.ErrMasterMismatch) {
-			t.Fatalf("Rewrap with a damaged key: %v, want ErrMasterMismatch", err)
+		if err := crypto.Rewrap(t.Context(), s, old, next); !errors.Is(err, crypto.ErrMainKeyMismatch) {
+			t.Fatalf("Rewrap with a damaged key: %v, want ErrMainKeyMismatch", err)
 		}
 		if after := dataKeys(t, s); !sameKeys(damaged, after) {
 			t.Error("a refused Rewrap changed the data keys: it committed part of its work")
@@ -58,15 +58,15 @@ func TestRewrap(t *testing.T) {
 	})
 
 	t.Run("refuses what it cannot use", func(t *testing.T) {
-		var zero crypto.Master
+		var zero crypto.MainKey
 		for _, c := range []struct {
 			name     string
 			s        *store.Store
-			from, to crypto.Master
+			from, to crypto.MainKey
 		}{
 			{"no store", nil, old, next},
-			{"the zero old master", s, zero, next},
-			{"the zero new master", s, old, zero},
+			{"the zero old main key", s, zero, next},
+			{"the zero new main key", s, old, zero},
 		} {
 			if err := crypto.Rewrap(t.Context(), c.s, c.from, c.to); !errors.Is(err, crypto.ErrInvalid) {
 				t.Errorf("%s: %v, want ErrInvalid", c.name, err)
@@ -92,8 +92,8 @@ func TestRewrap(t *testing.T) {
 			t.Errorf("Rewrap left key %d wrapped as it was", before[i].id)
 		}
 	}
-	if _, err := crypto.OpenKeyring(t.Context(), s, old, clock, rand.Reader); !errors.Is(err, crypto.ErrMasterMismatch) {
-		t.Errorf("OpenKeyring with the old master after Rewrap: %v, want ErrMasterMismatch", err)
+	if _, err := crypto.OpenKeyring(t.Context(), s, old, clock, rand.Reader); !errors.Is(err, crypto.ErrMainKeyMismatch) {
+		t.Errorf("OpenKeyring with the old main key after Rewrap: %v, want ErrMainKeyMismatch", err)
 	}
 	reopened := openKeyring(t, s, next)
 	wantOpens(t, reopened, first, "assoc", "first")
@@ -105,7 +105,7 @@ func TestRewrap(t *testing.T) {
 
 func TestRotateSwitchesOnlyAfterCommit(t *testing.T) {
 	s := newStore(t)
-	m := newMaster(t)
+	m := newMainKey(t)
 	k := openKeyring(t, s, m)
 	// A trigger on the job Rotate enqueues adds a row that breaks a
 	// deferred foreign key, which SQLite checks only at the commit: the
@@ -147,7 +147,7 @@ func TestRotateSwitchesOnlyAfterCommit(t *testing.T) {
 
 func TestRotateRefusesWhatItCannotUse(t *testing.T) {
 	s := newStore(t)
-	m := newMaster(t)
+	m := newMainKey(t)
 	k := openKeyring(t, s, m)
 	before := dataKeys(t, s)
 	for _, c := range []struct {
@@ -165,14 +165,14 @@ func TestRotateRefusesWhatItCannotUse(t *testing.T) {
 		}
 	}
 
-	// A keyring whose master the database's keys are no longer wrapped
+	// A keyring whose main key the database's keys are no longer wrapped
 	// by would wrap a new key so that nothing could open the keyring.
-	if err := crypto.Rewrap(t.Context(), s, m, newMaster(t)); err != nil {
+	if err := crypto.Rewrap(t.Context(), s, m, newMainKey(t)); err != nil {
 		t.Fatal(err)
 	}
 	rewrapped := dataKeys(t, s)
-	if err := crypto.Rotate(t.Context(), s, k); !errors.Is(err, crypto.ErrMasterMismatch) {
-		t.Errorf("Rotate after Rewrap, on the keyring opened before: %v, want ErrMasterMismatch", err)
+	if err := crypto.Rotate(t.Context(), s, k); !errors.Is(err, crypto.ErrMainKeyMismatch) {
+		t.Errorf("Rotate after Rewrap, on the keyring opened before: %v, want ErrMainKeyMismatch", err)
 	}
 	if after := dataKeys(t, s); !sameKeys(rewrapped, after) || len(after) != len(before) {
 		t.Error("a refused Rotate changed the data keys")
@@ -255,7 +255,7 @@ func plainNote(id int64) []byte {
 func TestRotateReencryptsRegisteredFields(t *testing.T) {
 	s := newStore(t)
 	exec(t, s, secrets)
-	k := openKeyring(t, s, newMaster(t))
+	k := openKeyring(t, s, newMainKey(t))
 	re, err := crypto.NewReencrypter(k, valueField(), noteField())
 	if err != nil {
 		t.Fatalf("NewReencrypter: %v", err)
@@ -352,7 +352,7 @@ func TestRotateReencryptsRegisteredFields(t *testing.T) {
 func TestReencryptLeavesWhatItCannotOpen(t *testing.T) {
 	s := newStore(t)
 	exec(t, s, secrets)
-	k := openKeyring(t, s, newMaster(t))
+	k := openKeyring(t, s, newMainKey(t))
 	re, err := crypto.NewReencrypter(k, valueField())
 	if err != nil {
 		t.Fatal(err)
@@ -430,7 +430,7 @@ func TestReencryptLeavesWhatItCannotOpen(t *testing.T) {
 
 func TestReencrypterRegistersFields(t *testing.T) {
 	s := newStore(t)
-	k := openKeyring(t, s, newMaster(t))
+	k := openKeyring(t, s, newMainKey(t))
 	good := crypto.Field{Table: "_t1", IDColumn: "id", Column: "a_b"}
 	if _, err := crypto.NewReencrypter(k, good); err != nil {
 		t.Errorf("NewReencrypter(%+v): %v", good, err)
@@ -496,7 +496,7 @@ func TestFieldAssoc(t *testing.T) {
 
 func TestOneCurrentKey(t *testing.T) {
 	s := newStore(t)
-	m := newMaster(t)
+	m := newMainKey(t)
 	// Two keyrings on one database, as two processes would have: the
 	// second's current key is no longer the database's once the first
 	// rotates.
@@ -536,7 +536,7 @@ func TestOneCurrentKey(t *testing.T) {
 func TestReencryptCommitsEachBatch(t *testing.T) {
 	s := newStore(t)
 	exec(t, s, secrets)
-	k := openKeyring(t, s, newMaster(t))
+	k := openKeyring(t, s, newMainKey(t))
 	re, err := crypto.NewReencrypter(k, valueField())
 	if err != nil {
 		t.Fatal(err)
@@ -584,7 +584,7 @@ func TestReencryptRefusesAnIDColumnThatIsNotUnique(t *testing.T) {
 	s := newStore(t)
 	exec(t, s, `CREATE TABLE dupes (rid INTEGER, value BLOB) STRICT`)
 	f := crypto.Field{Table: "dupes", IDColumn: "rid", Column: "value"}
-	k := openKeyring(t, s, newMaster(t))
+	k := openKeyring(t, s, newMainKey(t))
 	re, err := crypto.NewReencrypter(k, f)
 	if err != nil {
 		t.Fatal(err)

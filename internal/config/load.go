@@ -26,8 +26,8 @@ const (
 	// maxFileSize bounds each configuration file, far above any real one.
 	maxFileSize = 1 << 20
 
-	// masterKeyCredential is the credential the master key is read from.
-	masterKeyCredential = "pisati-master-key"
+	// mainKeyCredential is the credential the main key is read from.
+	mainKeyCredential = "pisati-main-key"
 
 	defaultStateDir = "/var/lib/pisati"
 )
@@ -64,9 +64,9 @@ type Sources struct {
 // setting is then reported missing, as that file may hold it. A refused
 // secret it holds before the error is still reported.
 //
-// A secret is never given in place: keys.master_key in any source is an
-// error. The master key comes from the file keys.master_key_file names,
-// else the credential pisati-master-key when Credentials holds it, else
+// A secret is never given in place: keys.main_key in any source is an
+// error. The main key comes from the file keys.main_key_file names,
+// else the credential pisati-main-key when Credentials holds it, else
 // it is Generated.
 //
 // An https dev.vite_url needs dev.vite_cert_file and dev.vite_key_file
@@ -104,11 +104,11 @@ func Load(ctx context.Context, src Sources, stateDirEnv string) (Config, error) 
 			cfg.Storage.StateDir = dir
 		}
 	}
-	if merged.Keys.MasterKeyFile == nil {
+	if merged.Keys.MainKeyFile == nil {
 		if err := stopped(ctx); err != nil {
 			return Config{}, err
 		}
-		if cfg.Keys.MasterKey, err = credentialSource(src.Credentials); err != nil {
+		if cfg.Keys.MainKey, err = credentialSource(src.Credentials); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -369,16 +369,16 @@ func stateDirectory(s string) (string, error) {
 	return parsePath(s)
 }
 
-// credentialSource returns the credential as the master key's source
+// credentialSource returns the credential as the main key's source
 // when creds holds it, else Generated.
 func credentialSource(creds fs.FS) (SecretSource, error) {
 	if creds == nil {
 		return Generated{}, nil
 	}
-	_, err := fs.Stat(creds, masterKeyCredential)
+	_, err := fs.Stat(creds, mainKeyCredential)
 	switch {
 	case err == nil:
-		return FromCredential{Name: masterKeyCredential}, nil
+		return FromCredential{Name: mainKeyCredential}, nil
 	case errors.Is(err, fs.ErrNotExist):
 		return Generated{}, nil
 	default:

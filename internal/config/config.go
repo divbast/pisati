@@ -89,9 +89,9 @@ type Telemetry struct {
 
 // Keys says where Pisati's keys come from.
 type Keys struct {
-	// MasterKey is never nil in a Config that Load returns without an
+	// MainKey is never nil in a Config that Load returns without an
 	// error.
-	MasterKey SecretSource
+	MainKey SecretSource
 }
 
 // Dev holds settings for development alone.

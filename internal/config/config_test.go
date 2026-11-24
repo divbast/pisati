@@ -47,7 +47,7 @@ otlp_endpoint = "http://collector.file:4318"
 pprof = "on"
 
 [keys]
-master_key_file = "/run/file/key"
+main_key_file = "/run/file/key"
 
 [dev]
 vite_url = ""
@@ -103,7 +103,7 @@ func describe(c config.Config) map[string]string {
 		"log.format":              c.Log.Format.String(),
 		"telemetry.otlp_endpoint": optional(c.Telemetry.OTLPEndpoint),
 		"telemetry.pprof":         c.Telemetry.Pprof.String(),
-		"keys.master_key":         source(c.Keys.MasterKey),
+		"keys.main_key":           source(c.Keys.MainKey),
 		"dev.vite_url":            optional(c.Dev.ViteURL),
 		"dev.vite_cert_file":      c.Dev.ViteCertFile,
 		"dev.vite_key_file":       c.Dev.ViteKeyFile,
@@ -178,7 +178,7 @@ func TestLoadDefaults(t *testing.T) {
 		"log.format":              "json",
 		"telemetry.otlp_endpoint": "unset",
 		"telemetry.pprof":         "off",
-		"keys.master_key":         "generated",
+		"keys.main_key":           "generated",
 		"dev.vite_url":            "unset",
 		"dev.vite_cert_file":      "",
 		"dev.vite_key_file":       "",
@@ -254,7 +254,7 @@ level = "debug"
 		"log.format":              "text",
 		"telemetry.otlp_endpoint": "unset",
 		"telemetry.pprof":         "off",
-		"keys.master_key":         "generated",
+		"keys.main_key":           "generated",
 		"dev.vite_url":            "unset",
 	})
 
@@ -291,7 +291,7 @@ func TestEnvWinsOverFiles(t *testing.T) {
 		"log.format":              "text",
 		"telemetry.otlp_endpoint": "http://collector.file:4318",
 		"telemetry.pprof":         "on",
-		"keys.master_key":         "file /run/file/key",
+		"keys.main_key":           "file /run/file/key",
 		"dev.vite_url":            "unset",
 		"dev.vite_cert_file":      "/srv/file/vite.pem",
 		"dev.vite_key_file":       "/srv/file/vite-key.pem",
@@ -308,7 +308,7 @@ func TestEnvWinsOverFiles(t *testing.T) {
 		"PISATI_LOG_FORMAT":              "json",
 		"PISATI_TELEMETRY_OTLP_ENDPOINT": "https://collector.env/v1/traces",
 		"PISATI_TELEMETRY_PPROF":         "off",
-		"PISATI_KEYS_MASTER_KEY_FILE":    "/run/env/key",
+		"PISATI_KEYS_MAIN_KEY_FILE":      "/run/env/key",
 		"PISATI_DEV_VITE_URL":            "http://localhost:5173",
 		"PISATI_DEV_VITE_CERT_FILE":      "/srv/env/vite.pem",
 		"PISATI_DEV_VITE_KEY_FILE":       "/srv/env/vite-key.pem",
@@ -327,7 +327,7 @@ func TestEnvWinsOverFiles(t *testing.T) {
 		"log.format":              "json",
 		"telemetry.otlp_endpoint": "https://collector.env/v1/traces",
 		"telemetry.pprof":         "off",
-		"keys.master_key":         "file /run/env/key",
+		"keys.main_key":           "file /run/env/key",
 		"dev.vite_url":            "http://localhost:5173",
 		"dev.vite_cert_file":      "/srv/env/vite.pem",
 		"dev.vite_key_file":       "/srv/env/vite-key.pem",
@@ -340,29 +340,29 @@ func TestFileVariable(t *testing.T) {
 	const secret = "correct-horse-battery-staple"
 
 	cfg, err := setup{env: env{
-		"PISATI_SERVER_BASE_URL":      baseURL,
-		"PISATI_KEYS_MASTER_KEY_FILE": "/run/secrets/pisati-master-key",
+		"PISATI_SERVER_BASE_URL":    baseURL,
+		"PISATI_KEYS_MAIN_KEY_FILE": "/run/secrets/pisati-main-key",
 	}}.load(t.Context())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := source(cfg.Keys.MasterKey); got != "file /run/secrets/pisati-master-key" {
-		t.Errorf("master key from %s, want the file", got)
+	if got := source(cfg.Keys.MainKey); got != "file /run/secrets/pisati-main-key" {
+		t.Errorf("main key from %s, want the file", got)
 	}
 
 	tests := map[string]setup{
 		"both forms": {env: env{
-			"PISATI_SERVER_BASE_URL":      baseURL,
-			"PISATI_KEYS_MASTER_KEY":      secret,
-			"PISATI_KEYS_MASTER_KEY_FILE": "/run/secrets/pisati-master-key",
+			"PISATI_SERVER_BASE_URL":    baseURL,
+			"PISATI_KEYS_MAIN_KEY":      secret,
+			"PISATI_KEYS_MAIN_KEY_FILE": "/run/secrets/pisati-main-key",
 		}},
 		"the value alone": {env: env{
 			"PISATI_SERVER_BASE_URL": baseURL,
-			"PISATI_KEYS_MASTER_KEY": secret,
+			"PISATI_KEYS_MAIN_KEY":   secret,
 		}},
 		"an empty value": {env: env{
 			"PISATI_SERVER_BASE_URL": baseURL,
-			"PISATI_KEYS_MASTER_KEY": "",
+			"PISATI_KEYS_MAIN_KEY":   "",
 		}},
 	}
 	for name, s := range tests {
@@ -370,7 +370,7 @@ func TestFileVariable(t *testing.T) {
 			t.Parallel()
 
 			_, err := s.load(t.Context())
-			refused(t, err, config.ErrInvalid, "(PISATI_KEYS_MASTER_KEY)", "(PISATI_KEYS_MASTER_KEY_FILE)")
+			refused(t, err, config.ErrInvalid, "(PISATI_KEYS_MAIN_KEY)", "(PISATI_KEYS_MAIN_KEY_FILE)")
 			if strings.Contains(err.Error(), secret) {
 				t.Errorf("error %q holds the secret", err)
 			}
@@ -381,10 +381,10 @@ func TestFileVariable(t *testing.T) {
 		t.Parallel()
 
 		_, err := setup{
-			files: fstest.MapFS{"pisati.toml": tomlFile("[keys]\nmaster_key = \"" + secret + "\"\n")},
+			files: fstest.MapFS{"pisati.toml": tomlFile("[keys]\nmain_key = \"" + secret + "\"\n")},
 			env:   env{"PISATI_SERVER_BASE_URL": baseURL},
 		}.load(t.Context())
-		refused(t, err, config.ErrInvalid, "keys.master_key ", "keys.master_key_file", "PISATI_KEYS_MASTER_KEY_FILE")
+		refused(t, err, config.ErrInvalid, "keys.main_key ", "keys.main_key_file", "PISATI_KEYS_MAIN_KEY_FILE")
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("error %q holds the secret", err)
 		}
@@ -394,10 +394,10 @@ func TestFileVariable(t *testing.T) {
 		t.Parallel()
 
 		_, err := setup{env: env{
-			"PISATI_SERVER_BASE_URL":      baseURL,
-			"PISATI_KEYS_MASTER_KEY_FILE": "secrets/key",
+			"PISATI_SERVER_BASE_URL":    baseURL,
+			"PISATI_KEYS_MAIN_KEY_FILE": "secrets/key",
 		}}.load(t.Context())
-		refused(t, err, config.ErrInvalid, "PISATI_KEYS_MASTER_KEY_FILE", "absolute")
+		refused(t, err, config.ErrInvalid, "PISATI_KEYS_MAIN_KEY_FILE", "absolute")
 	})
 
 	// The key itself, given by mistake where its file's path belongs, is
@@ -405,11 +405,11 @@ func TestFileVariable(t *testing.T) {
 	key := strings.Repeat("q7Zx+9kP", 4) + "=="
 	for name, s := range map[string]setup{
 		"the key in the variable": {env: env{
-			"PISATI_SERVER_BASE_URL":      baseURL,
-			"PISATI_KEYS_MASTER_KEY_FILE": key,
+			"PISATI_SERVER_BASE_URL":    baseURL,
+			"PISATI_KEYS_MAIN_KEY_FILE": key,
 		}},
 		"the key in a file": {
-			files: fstest.MapFS{"pisati.toml": tomlFile("[keys]\nmaster_key_file = \"" + key + "\"\n")},
+			files: fstest.MapFS{"pisati.toml": tomlFile("[keys]\nmain_key_file = \"" + key + "\"\n")},
 			env:   env{"PISATI_SERVER_BASE_URL": baseURL},
 		},
 	} {
@@ -417,7 +417,7 @@ func TestFileVariable(t *testing.T) {
 			t.Parallel()
 
 			_, err := s.load(t.Context())
-			refused(t, err, config.ErrInvalid, "keys.master_key_file (PISATI_KEYS_MASTER_KEY_FILE)", "absolute")
+			refused(t, err, config.ErrInvalid, "keys.main_key_file (PISATI_KEYS_MAIN_KEY_FILE)", "absolute")
 			if strings.Contains(err.Error(), key[:8]) {
 				t.Errorf("error %q repeats the value", err)
 			}
@@ -500,14 +500,14 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 
 		const secret = "correct-horse-battery-staple"
 		for name, file := range map[string]string{
-			"before the failure": "[keys]\nmaster_key = \"" + secret + "\"\n[server\n",
-			"the failure itself": "[keys]\nmaster_key = [\"" + secret + "\"]\n",
+			"before the failure": "[keys]\nmain_key = \"" + secret + "\"\n[server\n",
+			"the failure itself": "[keys]\nmain_key = [\"" + secret + "\"]\n",
 		} {
 			_, err := setup{
 				files: fstest.MapFS{"pisati.toml": tomlFile(file)},
 				env:   env{"PISATI_SERVER_BASE_URL": baseURL},
 			}.load(t.Context())
-			refused(t, err, config.ErrInvalid, "pisati.toml: keys.master_key (PISATI_KEYS_MASTER_KEY)", "keys.master_key_file (PISATI_KEYS_MASTER_KEY_FILE)")
+			refused(t, err, config.ErrInvalid, "pisati.toml: keys.main_key (PISATI_KEYS_MAIN_KEY)", "keys.main_key_file (PISATI_KEYS_MAIN_KEY_FILE)")
 			if strings.Contains(err.Error(), secret) {
 				t.Errorf("%s: error %q holds the secret", name, err)
 			}
@@ -520,7 +520,7 @@ var knownEnv = []string{
 	"PISATI_SERVER_BASE_URL", "PISATI_SERVER_LISTEN", "PISATI_SERVER_INTERNAL_LISTEN",
 	"PISATI_SERVER_TRUSTED_PROXIES", "PISATI_SERVER_HSTS", "PISATI_STORAGE_STATE_DIR",
 	"PISATI_LOG_LEVEL", "PISATI_LOG_FORMAT", "PISATI_TELEMETRY_OTLP_ENDPOINT",
-	"PISATI_TELEMETRY_PPROF", "PISATI_KEYS_MASTER_KEY", "PISATI_KEYS_MASTER_KEY_FILE",
+	"PISATI_TELEMETRY_PPROF", "PISATI_KEYS_MAIN_KEY", "PISATI_KEYS_MAIN_KEY_FILE",
 	"PISATI_DEV_VITE_URL", "PISATI_DEV_VITE_CERT_FILE", "PISATI_DEV_VITE_KEY_FILE",
 }
 
@@ -530,7 +530,7 @@ func TestUnknownEnv(t *testing.T) {
 	names := []string{
 		"HOME", "PISATI", "PISATI_NOPE", "PISATI_SERVER_BASE_URL",
 		"pisati_server_base_url", "PISATI_NOPE", "PISATI_",
-		"PISATI_KEYS_MASTER_KEY", "PISATI_KEYS_MASTER_KEY_FILE",
+		"PISATI_KEYS_MAIN_KEY", "PISATI_KEYS_MAIN_KEY_FILE",
 	}
 	before := slices.Clone(names)
 	got := config.UnknownEnv(names)
@@ -852,12 +852,12 @@ func TestStateDirFromSystemd(t *testing.T) {
 	}
 }
 
-func TestMasterKeySourceOrder(t *testing.T) {
+func TestMainKeySourceOrder(t *testing.T) {
 	t.Parallel()
 
 	key := &fstest.MapFile{Data: bytes.Repeat([]byte{7}, 32), Mode: 0o400}
-	withKey := fstest.MapFS{"pisati-master-key": key, "other": key}
-	keyFile := fstest.MapFS{"pisati.toml": tomlFile("[keys]\nmaster_key_file = \"/etc/pisati/master.key\"\n")}
+	withKey := fstest.MapFS{"pisati-main-key": key, "other": key}
+	keyFile := fstest.MapFS{"pisati.toml": tomlFile("[keys]\nmain_key_file = \"/etc/pisati/main.key\"\n")}
 
 	tests := map[string]struct {
 		s    setup
@@ -865,11 +865,11 @@ func TestMasterKeySourceOrder(t *testing.T) {
 	}{
 		"nothing given":       {s: setup{}, want: "generated"},
 		"another credential":  {s: setup{creds: fstest.MapFS{"other": key}}, want: "generated"},
-		"the credential":      {s: setup{creds: withKey}, want: "credential pisati-master-key"},
-		"a file setting wins": {s: setup{creds: withKey, files: keyFile}, want: "file /etc/pisati/master.key"},
+		"the credential":      {s: setup{creds: withKey}, want: "credential pisati-main-key"},
+		"a file setting wins": {s: setup{creds: withKey, files: keyFile}, want: "file /etc/pisati/main.key"},
 		"a variable wins": {
-			s:    setup{creds: withKey, files: keyFile, env: env{"PISATI_KEYS_MASTER_KEY_FILE": "/run/secrets/master.key"}},
-			want: "file /run/secrets/master.key",
+			s:    setup{creds: withKey, files: keyFile, env: env{"PISATI_KEYS_MAIN_KEY_FILE": "/run/secrets/main.key"}},
+			want: "file /run/secrets/main.key",
 		},
 	}
 	for name, tt := range tests {
@@ -884,8 +884,8 @@ func TestMasterKeySourceOrder(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if got := source(cfg.Keys.MasterKey); got != tt.want {
-				t.Errorf("master key from %s, want %s", got, tt.want)
+			if got := source(cfg.Keys.MainKey); got != tt.want {
+				t.Errorf("main key from %s, want %s", got, tt.want)
 			}
 		})
 	}
@@ -1167,7 +1167,7 @@ func TestSourcesThatCannotBeRead(t *testing.T) {
 		src := base.sources()
 		src.Credentials = brokenFS{err: fs.ErrPermission}
 		_, err := config.Load(t.Context(), src, "")
-		refused(t, err, fs.ErrPermission, "pisati-master-key")
+		refused(t, err, fs.ErrPermission, "pisati-main-key")
 	})
 
 	for name, files := range map[string]fstest.MapFS{
@@ -1216,7 +1216,7 @@ func TestLoadStopsWhenCancelled(t *testing.T) {
 		"pisati.toml.d/20-b.toml":  tomlFile("[log]\nformat = \"text\"\n"),
 		"pisati.toml.d/README.txt": tomlFile("not read"),
 	}
-	key := fstest.MapFS{"pisati-master-key": tomlFile("key")}
+	key := fstest.MapFS{"pisati-main-key": tomlFile("key")}
 
 	// Each case cancels when Load opens the file named, and must stop
 	// before reading anything after it.
@@ -1274,8 +1274,8 @@ func TestLoadStopsWhenCancelled(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if cfg.Log.Level != slog.LevelDebug || cfg.Log.Format != config.LogText || source(cfg.Keys.MasterKey) != "credential pisati-master-key" {
-			t.Errorf("Load read %v, %v and %s, want every file and the credential", cfg.Log.Level, cfg.Log.Format, source(cfg.Keys.MasterKey))
+		if cfg.Log.Level != slog.LevelDebug || cfg.Log.Format != config.LogText || source(cfg.Keys.MainKey) != "credential pisati-main-key" {
+			t.Errorf("Load read %v, %v and %s, want every file and the credential", cfg.Log.Level, cfg.Log.Format, source(cfg.Keys.MainKey))
 		}
 	})
 }
@@ -1337,8 +1337,8 @@ func FuzzLoad(f *testing.F) {
 	f.Add("", "", "PISATI_SERVER_BASE_URL=http://localhost:8080\nPISATI_DEV_VITE_URL=http://localhost:5173", "/var/lib/private/pisati", true)
 	f.Add("[dev]\nvite_url = \"https://localhost:5173\"\nvite_cert_file = \"/c.pem\"\n", "", "PISATI_SERVER_BASE_URL=http://[::1]:8080\nPISATI_DEV_VITE_KEY_FILE=/k.pem", "", false)
 	f.Add("[server]\nbase_url = \"https://blog.example.org/\"\ntrusted_proxies = [\"10.0.0.1\"]\n", "[server]\ntrusted_proxies = []\n",
-		"PISATI_SERVER_TRUSTED_PROXIES=192.0.2.0/24, 2001:db8::/32\nPISATI_KEYS_MASTER_KEY_FILE=/run/k", "", true)
-	f.Add("[keys]\nmaster_key = \"x\"\n[nope]\n", "x = [", "PISATI_NOPE=1\nPISATI_LOG_LEVEL=loud", "relative", false)
+		"PISATI_SERVER_TRUSTED_PROXIES=192.0.2.0/24, 2001:db8::/32\nPISATI_KEYS_MAIN_KEY_FILE=/run/k", "", true)
+	f.Add("[keys]\nmain_key = \"x\"\n[nope]\n", "x = [", "PISATI_NOPE=1\nPISATI_LOG_LEVEL=loud", "relative", false)
 	f.Add("server.base_url = 'https://[::1]:8443'\nserver.hsts = 'preload'", "[server]\nbase_url = \"http://127.0.0.1\"",
 		"PISATI_SERVER_LISTEN=[::1]:1\nPISATI_TELEMETRY_OTLP_ENDPOINT=https://c/v1", "/", false)
 
@@ -1356,7 +1356,7 @@ func FuzzLoad(f *testing.F) {
 			state: stateDir,
 		}
 		if credential {
-			s.creds = fstest.MapFS{"pisati-master-key": tomlFile("key")}
+			s.creds = fstest.MapFS{"pisati-main-key": tomlFile("key")}
 		}
 
 		cfg, err := s.load(t.Context())
@@ -1473,17 +1473,17 @@ func valid(t *testing.T, c config.Config) {
 			t.Errorf("Vite certificate or key file %q is not absolute and clean", p)
 		}
 	}
-	switch s := c.Keys.MasterKey.(type) {
+	switch s := c.Keys.MainKey.(type) {
 	case config.FromFile:
 		if !filepath.IsAbs(s.Path) || filepath.Clean(s.Path) != s.Path {
-			t.Errorf("master key file %q is not absolute and clean", s.Path)
+			t.Errorf("main key file %q is not absolute and clean", s.Path)
 		}
 	case config.FromCredential:
-		if s.Name != "pisati-master-key" {
-			t.Errorf("master key credential %q", s.Name)
+		if s.Name != "pisati-main-key" {
+			t.Errorf("main key credential %q", s.Name)
 		}
 	case config.Generated:
 	case nil:
-		t.Error("no master key source")
+		t.Error("no main key source")
 	}
 }

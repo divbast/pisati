@@ -31,22 +31,22 @@ const (
 
 // Rewrap wraps every data key in the database s under to in place of
 // from, in one IMMEDIATE transaction: once it returns nil, only to opens
-// the database's keyring. It returns an error wrapping ErrMasterMismatch,
+// the database's keyring. It returns an error wrapping ErrMainKeyMismatch,
 // changing nothing, unless from unwraps every key. A nil or unopened s,
-// or the zero Master for either, is refused with an error wrapping
+// or the zero MainKey for either, is refused with an error wrapping
 // ErrInvalid. The nonces of the new wrapping come from crypto/rand. A
 // Keyring opened before Rewrap still holds from, so Rotate refuses it:
 // open it again with to.
-func Rewrap(ctx context.Context, s *store.Store, from, to Master) error {
+func Rewrap(ctx context.Context, s *store.Store, from, to MainKey) error {
 	var errs []error
 	if s.DB() == nil {
 		errs = append(errs, fmt.Errorf("crypto: rewrap the data keys: %w store: it is not open", ErrInvalid))
 	}
 	if from.key == nil {
-		errs = append(errs, fmt.Errorf("crypto: rewrap the data keys: %w old master key: the zero Master holds none", ErrInvalid))
+		errs = append(errs, fmt.Errorf("crypto: rewrap the data keys: %w old main key: the zero MainKey holds none", ErrInvalid))
 	}
 	if to.key == nil {
-		errs = append(errs, fmt.Errorf("crypto: rewrap the data keys: %w new master key: the zero Master holds none", ErrInvalid))
+		errs = append(errs, fmt.Errorf("crypto: rewrap the data keys: %w new main key: the zero MainKey holds none", ErrInvalid))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return err
@@ -83,8 +83,8 @@ func Rewrap(ctx context.Context, s *store.Store, from, to Master) error {
 			rewrapped = append(rewrapped, storedb.RewrapDataKeyParams{Wrapped: wrapped, ID: row.ID})
 		}
 		if len(rewrapped) < len(rows) {
-			return fmt.Errorf("%w: the old master key unwraps %d of the %d data keys, so none is rewrapped",
-				ErrMasterMismatch, len(rewrapped), len(rows))
+			return fmt.Errorf("%w: the old main key unwraps %d of the %d data keys, so none is rewrapped",
+				ErrMainKeyMismatch, len(rewrapped), len(rows))
 		}
 		for _, p := range rewrapped {
 			n, err := q.RewrapDataKey(ctx, p)
@@ -105,7 +105,7 @@ func Rewrap(ctx context.Context, s *store.Store, from, to Master) error {
 
 // Rotate makes a new data key the current one, in one IMMEDIATE
 // transaction on s, the database k was opened on: the key that was
-// current is retired, the new one is stored wrapped by k's master and
+// current is retired, the new one is stored wrapped by k's main key and
 // created at its clock's time, and a crypto.reencrypt job is queued,
 // keyed by the new key's ID, for a Reencrypter to re-seal the registered
 // fields under it. Only once that commits does Seal use the new key: a
@@ -114,8 +114,8 @@ func Rewrap(ctx context.Context, s *store.Store, from, to Master) error {
 //
 // Rotate refuses, with an error wrapping ErrInvalid, a Keyring OpenKeyring
 // did not return, or an s other than the one it was opened on. It returns
-// an error wrapping ErrMasterMismatch when the database's keys are no
-// longer wrapped by k's master, as after a Rewrap, and an error when k's
+// an error wrapping ErrMainKeyMismatch when the database's keys are no
+// longer wrapped by k's main key, as after a Rewrap, and an error when k's
 // current key is no longer the database's: either way, open the keyring
 // again. Rotates of one Keyring run one at a time.
 func Rotate(ctx context.Context, s *store.Store, k *Keyring) error {
@@ -141,9 +141,9 @@ func Rotate(ctx context.Context, s *store.Store, k *Keyring) error {
 			return err
 		}
 		// Checked here, under the write lock: after a Rewrap, a key wrapped
-		// by the keyring's old master, beside keys wrapped by the new one,
-		// would leave no master that opens the whole keyring.
-		_, current, err := unwrapAll(k.master, rows)
+		// by the keyring's old main key, beside keys wrapped by the new one,
+		// would leave no main key that opens the whole keyring.
+		_, current, err := unwrapAll(k.mainKey, rows)
 		if err != nil {
 			return err
 		}

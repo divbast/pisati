@@ -22,7 +22,7 @@ import (
 
 func TestSealOpenRoundTrip(t *testing.T) {
 	s := newStore(t)
-	m := newMaster(t)
+	m := newMainKey(t)
 	k := openKeyring(t, s, m)
 	const plain, assoc = "a value worth keeping", "where it lives"
 
@@ -124,7 +124,7 @@ func TestSealOpenRoundTrip(t *testing.T) {
 		// keys 1 and 2 are one key under two IDs: only the header's
 		// authentication tells a value moved from one to the other.
 		s := newStore(t)
-		k, err := crypto.OpenKeyring(t.Context(), s, newMaster(t), clock, constReader(0x42))
+		k, err := crypto.OpenKeyring(t.Context(), s, newMainKey(t), clock, constReader(0x42))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -181,10 +181,10 @@ func TestZeroKeyring(t *testing.T) {
 	}
 }
 
-func TestOpenKeyringRefusesWrongMaster(t *testing.T) {
+func TestOpenKeyringRefusesWrongMainKey(t *testing.T) {
 	t.Run("a new database gets its first key", func(t *testing.T) {
 		s := newStore(t)
-		m := newMaster(t)
+		m := newMainKey(t)
 		k := openKeyring(t, s, m)
 		keys := dataKeys(t, s)
 		if len(keys) != 1 || keys[0].id != 1 || keys[0].state != "current" || keys[0].createdAt != clock().UnixMilli() {
@@ -198,9 +198,9 @@ func TestOpenKeyringRefusesWrongMaster(t *testing.T) {
 		}
 	})
 
-	t.Run("another master", func(t *testing.T) {
+	t.Run("another main key", func(t *testing.T) {
 		s := newStore(t)
-		m := newMaster(t)
+		m := newMainKey(t)
 		k := openKeyring(t, s, m)
 		if err := crypto.Rotate(t.Context(), s, k); err != nil {
 			t.Fatal(err)
@@ -208,21 +208,21 @@ func TestOpenKeyringRefusesWrongMaster(t *testing.T) {
 		sealed := seal(t, k, "value", "assoc")
 		before := dataKeys(t, s)
 
-		other, err := crypto.OpenKeyring(t.Context(), s, newMaster(t), clock, rand.Reader)
-		if !errors.Is(err, crypto.ErrMasterMismatch) || other != nil {
-			t.Fatalf("OpenKeyring with another master: %v, %v; want ErrMasterMismatch", other, err)
+		other, err := crypto.OpenKeyring(t.Context(), s, newMainKey(t), clock, rand.Reader)
+		if !errors.Is(err, crypto.ErrMainKeyMismatch) || other != nil {
+			t.Fatalf("OpenKeyring with another main key: %v, %v; want ErrMainKeyMismatch", other, err)
 		}
 		if after := dataKeys(t, s); !sameKeys(before, after) {
-			t.Errorf("OpenKeyring with another master changed the data keys: %+v, was %+v", after, before)
+			t.Errorf("OpenKeyring with another main key changed the data keys: %+v, was %+v", after, before)
 		}
 		wantOpens(t, openKeyring(t, s, m), sealed, "assoc", "value")
 	})
 
 	t.Run("a restored database without its key", func(t *testing.T) {
-		// What serve meets on a database restored without its master key:
+		// What serve meets on a database restored without its main key:
 		// none is given, so Pisati generates one, which wraps nothing.
 		s := newStore(t)
-		seal(t, openKeyring(t, s, newMaster(t)), "value", "assoc")
+		seal(t, openKeyring(t, s, newMainKey(t)), "value", "assoc")
 		before := dataKeys(t, s)
 		state, err := os.OpenRoot(t.TempDir())
 		if err != nil {
@@ -233,21 +233,21 @@ func TestOpenKeyringRefusesWrongMaster(t *testing.T) {
 				t.Error(err)
 			}
 		}()
-		generated, err := crypto.LoadMaster(t.Context(), config.Generated{}, nil, state, discard())
+		generated, err := crypto.LoadMainKey(t.Context(), config.Generated{}, nil, state, discard())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := crypto.OpenKeyring(t.Context(), s, generated, clock, rand.Reader); !errors.Is(err, crypto.ErrMasterMismatch) {
-			t.Fatalf("OpenKeyring with a generated master: %v, want ErrMasterMismatch", err)
+		if _, err := crypto.OpenKeyring(t.Context(), s, generated, clock, rand.Reader); !errors.Is(err, crypto.ErrMainKeyMismatch) {
+			t.Fatalf("OpenKeyring with a generated main key: %v, want ErrMainKeyMismatch", err)
 		}
 		if after := dataKeys(t, s); !sameKeys(before, after) {
-			t.Errorf("OpenKeyring with a generated master changed the data keys: %+v, was %+v", after, before)
+			t.Errorf("OpenKeyring with a generated main key changed the data keys: %+v, was %+v", after, before)
 		}
 	})
 
 	t.Run("a wrapped key moved to another row", func(t *testing.T) {
 		s := newStore(t)
-		m := newMaster(t)
+		m := newMainKey(t)
 		if err := crypto.Rotate(t.Context(), s, openKeyring(t, s, m)); err != nil {
 			t.Fatal(err)
 		}
@@ -257,8 +257,8 @@ func TestOpenKeyringRefusesWrongMaster(t *testing.T) {
 		setWrapped(t, s, 1, keys[1].wrapped)
 		setWrapped(t, s, 2, keys[0].wrapped)
 		swapped := dataKeys(t, s)
-		if _, err := crypto.OpenKeyring(t.Context(), s, m, clock, rand.Reader); !errors.Is(err, crypto.ErrMasterMismatch) {
-			t.Fatalf("OpenKeyring with the wrapped keys swapped: %v, want ErrMasterMismatch", err)
+		if _, err := crypto.OpenKeyring(t.Context(), s, m, clock, rand.Reader); !errors.Is(err, crypto.ErrMainKeyMismatch) {
+			t.Fatalf("OpenKeyring with the wrapped keys swapped: %v, want ErrMainKeyMismatch", err)
 		}
 		if after := dataKeys(t, s); !sameKeys(swapped, after) {
 			t.Error("OpenKeyring changed the data keys")
@@ -267,17 +267,17 @@ func TestOpenKeyringRefusesWrongMaster(t *testing.T) {
 
 	t.Run("a wrapped key changed", func(t *testing.T) {
 		s := newStore(t)
-		m := newMaster(t)
+		m := newMainKey(t)
 		openKeyring(t, s, m)
 		damageKey(t, s, 1)
-		if _, err := crypto.OpenKeyring(t.Context(), s, m, clock, rand.Reader); !errors.Is(err, crypto.ErrMasterMismatch) {
-			t.Fatalf("OpenKeyring with a wrapped key changed: %v, want ErrMasterMismatch", err)
+		if _, err := crypto.OpenKeyring(t.Context(), s, m, clock, rand.Reader); !errors.Is(err, crypto.ErrMainKeyMismatch) {
+			t.Fatalf("OpenKeyring with a wrapped key changed: %v, want ErrMainKeyMismatch", err)
 		}
 	})
 
 	t.Run("no current key", func(t *testing.T) {
 		s := newStore(t)
-		m := newMaster(t)
+		m := newMainKey(t)
 		openKeyring(t, s, m)
 		exec(t, s, `UPDATE data_keys SET state = 'retired'`)
 		if _, err := crypto.OpenKeyring(t.Context(), s, m, clock, rand.Reader); err == nil {
@@ -290,16 +290,16 @@ func TestOpenKeyringRefusesWrongMaster(t *testing.T) {
 
 	t.Run("what it is given", func(t *testing.T) {
 		s := newStore(t)
-		m := newMaster(t)
+		m := newMainKey(t)
 		for _, c := range []struct {
 			name  string
 			s     *store.Store
-			m     crypto.Master
+			m     crypto.MainKey
 			clock func() time.Time
 		}{
 			{name: "no store", m: m, clock: clock},
 			{name: "the zero store", s: new(store.Store), m: m, clock: clock},
-			{name: "the zero master", s: s, clock: clock},
+			{name: "the zero main key", s: s, clock: clock},
 			{name: "no clock", s: s, m: m},
 		} {
 			if _, err := crypto.OpenKeyring(t.Context(), c.s, c.m, c.clock, rand.Reader); !errors.Is(err, crypto.ErrInvalid) {
@@ -339,7 +339,7 @@ func damageKey(t *testing.T, s *store.Store, id int64) {
 
 func TestKeyringConcurrent(t *testing.T) {
 	s := newStore(t)
-	k := openKeyring(t, s, newMaster(t))
+	k := openKeyring(t, s, newMainKey(t))
 	const goroutines, rounds, rotations = 8, 50, 3
 
 	var wg sync.WaitGroup

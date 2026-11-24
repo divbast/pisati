@@ -46,8 +46,8 @@ type telemetryLayer struct {
 }
 
 type keysLayer struct {
-	MasterKey     *string `toml:"master_key"`
-	MasterKeyFile *string `toml:"master_key_file"`
+	MainKey     *string `toml:"main_key"`
+	MainKeyFile *string `toml:"main_key_file"`
 }
 
 type devLayer struct {
@@ -230,22 +230,22 @@ func settings() []setting {
 			},
 		},
 		{
-			key:   "keys.master_key",
-			value: "never accepted: name the file that holds the key with keys.master_key_file",
+			key:   "keys.main_key",
+			value: "never accepted: name the file that holds the key with keys.main_key_file",
 			kind: refused{
-				field:   func(l *layer) **string { return &l.Keys.MasterKey },
-				instead: "keys.master_key_file",
+				field:   func(l *layer) **string { return &l.Keys.MainKey },
+				instead: "keys.main_key_file",
 			},
 		},
 		{
 			// With none, Load looks for the credential, then falls back
 			// to Generated.
-			key:    "keys.master_key_file",
+			key:    "keys.main_key_file",
 			value:  absolutePath,
 			absent: leaveToRules,
 			kind: text{
-				field: func(l *layer) **string { return &l.Keys.MasterKeyFile },
-				apply: into(fileSource, func(c *Config) *SecretSource { return &c.Keys.MasterKey }),
+				field: func(l *layer) **string { return &l.Keys.MainKeyFile },
+				apply: into(fileSource, func(c *Config) *SecretSource { return &c.Keys.MainKey }),
 			},
 		},
 		{

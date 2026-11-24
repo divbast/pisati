@@ -29,18 +29,18 @@ import (
 	"github.com/divbast/pisati/internal/crypto"
 )
 
-// wantSameMaster fails the test unless got is the master key want is: a
+// wantSameMainKey fails the test unless got is the main key want is: a
 // keyring opened with want opens with got too.
-func wantSameMaster(t *testing.T, want, got crypto.Master) {
+func wantSameMainKey(t *testing.T, want, got crypto.MainKey) {
 	t.Helper()
 	s := newStore(t)
 	openKeyring(t, s, want)
 	if _, err := crypto.OpenKeyring(t.Context(), s, got, clock, rand.Reader); err != nil {
-		t.Fatalf("the master key loaded is not the one written: %v", err)
+		t.Fatalf("the main key loaded is not the one written: %v", err)
 	}
 }
 
-func TestGeneratedMasterAndWarning(t *testing.T) {
+func TestGeneratedMainKeyAndWarning(t *testing.T) {
 	dir := t.TempDir()
 	state, err := os.OpenRoot(dir)
 	if err != nil {
@@ -52,14 +52,14 @@ func TestGeneratedMasterAndWarning(t *testing.T) {
 		}
 	}()
 	log, rec := newLogger()
-	first, err := crypto.LoadMaster(t.Context(), config.Generated{}, nil, state, log)
+	first, err := crypto.LoadMainKey(t.Context(), config.Generated{}, nil, state, log)
 	if err != nil {
-		t.Fatalf("LoadMaster(Generated): %v", err)
+		t.Fatalf("LoadMainKey(Generated): %v", err)
 	}
 
 	keysDir := filepath.Join(dir, "keys")
-	keyPath := filepath.Join(keysDir, "master.key")
-	keyName := filepath.Join("keys", "master.key")
+	keyPath := filepath.Join(keysDir, "main.key")
+	keyName := filepath.Join("keys", "main.key")
 	for _, f := range []struct {
 		path string
 		mode fs.FileMode
@@ -101,9 +101,9 @@ func TestGeneratedMasterAndWarning(t *testing.T) {
 
 	// A later start reads the key it generated, changes nothing, and does
 	// not warn again.
-	second, err := crypto.LoadMaster(t.Context(), config.Generated{}, nil, state, log)
+	second, err := crypto.LoadMainKey(t.Context(), config.Generated{}, nil, state, log)
 	if err != nil {
-		t.Fatalf("LoadMaster(Generated) again: %v", err)
+		t.Fatalf("LoadMainKey(Generated) again: %v", err)
 	}
 	if got := len(rec.all()); got != 1 {
 		t.Errorf("%d records after the second load, want the one warning of the first", got)
@@ -115,21 +115,21 @@ func TestGeneratedMasterAndWarning(t *testing.T) {
 	if !bytes.Equal(again, text) {
 		t.Error("the second load changed the key file")
 	}
-	wantSameMaster(t, first, second)
+	wantSameMainKey(t, first, second)
 	// The generated file is a key file an operator may name too.
 	named, err := fromFile(t, keyPath, discard())
 	if err != nil {
-		t.Fatalf("LoadMaster(%s): %v", keyPath, err)
+		t.Fatalf("LoadMainKey(%s): %v", keyPath, err)
 	}
-	wantSameMaster(t, first, named)
+	wantSameMainKey(t, first, named)
 }
 
-// TestGeneratedMasterSharedWithGroup loads the generated key from a
+// TestGeneratedMainKeySharedWithGroup loads the generated key from a
 // volume its group shares, as Kubernetes mounts one with fsGroup: each
 // mount, under the default fsGroupChangePolicy, adds read and write for
 // the group to every file, and read, write, search and setgid to every
 // directory.
-func TestGeneratedMasterSharedWithGroup(t *testing.T) {
+func TestGeneratedMainKeySharedWithGroup(t *testing.T) {
 	for _, c := range []struct {
 		name          string
 		dir, file     fs.FileMode
@@ -159,11 +159,11 @@ func TestGeneratedMasterSharedWithGroup(t *testing.T) {
 					t.Error(err)
 				}
 			}()
-			first, err := crypto.LoadMaster(t.Context(), config.Generated{}, nil, state, discard())
+			first, err := crypto.LoadMainKey(t.Context(), config.Generated{}, nil, state, discard())
 			if err != nil {
-				t.Fatalf("LoadMaster(Generated): %v", err)
+				t.Fatalf("LoadMainKey(Generated): %v", err)
 			}
-			keyPath := filepath.Join(keysDir, "master.key")
+			keyPath := filepath.Join(keysDir, "main.key")
 			if fi, err := os.Lstat(keyPath); err != nil || fi.Mode() != 0o600 {
 				t.Fatalf("the key file was made with mode %v (%v), want 0600 whatever its directory's", fi.Mode(), err)
 			}
@@ -171,14 +171,14 @@ func TestGeneratedMasterSharedWithGroup(t *testing.T) {
 			chmod(t, keyPath, c.file)
 
 			log, rec := newLogger()
-			again, err := crypto.LoadMaster(t.Context(), config.Generated{}, nil, state, log)
+			again, err := crypto.LoadMainKey(t.Context(), config.Generated{}, nil, state, log)
 			if err != nil {
-				t.Fatalf("LoadMaster(Generated) with the directory %v and the file %v: %v", c.dir, c.file, err)
+				t.Fatalf("LoadMainKey(Generated) with the directory %v and the file %v: %v", c.dir, c.file, err)
 			}
 			if n := len(rec.all()); n != 0 {
 				t.Errorf("%d records logged, want none", n)
 			}
-			wantSameMaster(t, first, again)
+			wantSameMainKey(t, first, again)
 		})
 	}
 }
@@ -203,8 +203,8 @@ func chmod(t *testing.T, path string, mode fs.FileMode) {
 // as a systemd credential.
 type operatorSource struct {
 	name string
-	// load loads the master key from the file called file in dir.
-	load func(t *testing.T, dir, file string, log *slog.Logger) (crypto.Master, error)
+	// load loads the main key from the file called file in dir.
+	load func(t *testing.T, dir, file string, log *slog.Logger) (crypto.MainKey, error)
 	// named returns the attribute a warning names the file by, and its
 	// value, which an error names it by too.
 	named func(dir, file string) (key, value string)
@@ -214,22 +214,22 @@ func operatorSources() []operatorSource {
 	return []operatorSource{
 		{
 			name: "file",
-			load: func(t *testing.T, dir, file string, log *slog.Logger) (crypto.Master, error) {
+			load: func(t *testing.T, dir, file string, log *slog.Logger) (crypto.MainKey, error) {
 				return fromFile(t, filepath.Join(dir, file), log)
 			},
 			named: func(dir, file string) (string, string) { return "path", filepath.Join(dir, file) },
 		},
 		{
 			name: "credential",
-			load: func(t *testing.T, dir, file string, log *slog.Logger) (crypto.Master, error) {
-				return crypto.LoadMaster(t.Context(), config.FromCredential{Name: file}, os.DirFS(dir), nil, log)
+			load: func(t *testing.T, dir, file string, log *slog.Logger) (crypto.MainKey, error) {
+				return crypto.LoadMainKey(t.Context(), config.FromCredential{Name: file}, os.DirFS(dir), nil, log)
 			},
 			named: func(_, file string) (string, string) { return "credential", file },
 		},
 	}
 }
 
-// keyFile is a key file for a test to give LoadMaster: make writes it as
+// keyFile is a key file for a test to give LoadMainKey: make writes it as
 // file in dir, holding key in some form, with whatever else it needs.
 type keyFile struct {
 	name string
@@ -257,7 +257,7 @@ func linkedTo(name string, mode os.FileMode) keyFile {
 // asIs is the key file's usual content: the key in base64 and a newline.
 func asIs(key []byte) []byte { return keyText(key) }
 
-// testAccepts runs LoadMaster from src on each key file an operator may
+// testAccepts runs LoadMainKey from src on each key file an operator may
 // give, and checks it loads the key, warning only when others can read
 // the file.
 func testAccepts(t *testing.T, src operatorSource) {
@@ -275,16 +275,16 @@ func testAccepts(t *testing.T, src operatorSource) {
 		{keyFile: linkedTo("a symbolic link to a file others read", 0o644), warns: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			want, key := newMasterKey(t)
+			want, key := newMainKeyBytes(t)
 			dir := t.TempDir()
-			const file = "pisati-master-key"
+			const file = "pisati-main-key"
 			c.make(t, dir, file, key)
 			log, rec := newLogger()
 			got, err := src.load(t, dir, file, log)
 			if err != nil {
-				t.Fatalf("LoadMaster: %v", err)
+				t.Fatalf("LoadMainKey: %v", err)
 			}
-			wantSameMaster(t, want, got)
+			wantSameMainKey(t, want, got)
 
 			records := rec.all()
 			if !c.warns {
@@ -311,53 +311,53 @@ func testAccepts(t *testing.T, src operatorSource) {
 	}
 }
 
-func TestMasterFromFile(t *testing.T) {
+func TestMainKeyFromFile(t *testing.T) {
 	testAccepts(t, operatorSources()[0])
 }
 
-func TestMasterFromCredential(t *testing.T) {
+func TestMainKeyFromCredential(t *testing.T) {
 	testAccepts(t, operatorSources()[1])
 
 	t.Run("no credentials directory", func(t *testing.T) {
-		_, err := crypto.LoadMaster(t.Context(), config.FromCredential{Name: "pisati-master-key"}, nil, nil, discard())
+		_, err := crypto.LoadMainKey(t.Context(), config.FromCredential{Name: "pisati-main-key"}, nil, nil, discard())
 		if !errors.Is(err, crypto.ErrInvalid) {
-			t.Errorf("LoadMaster with no credentials: %v, want ErrInvalid", err)
+			t.Errorf("LoadMainKey with no credentials: %v, want ErrInvalid", err)
 		}
 	})
 	t.Run("a name that is no file's", func(t *testing.T) {
 		dir := t.TempDir()
-		for _, name := range []string{"", "../pisati-master-key", "/pisati-master-key", "a/../b"} {
-			_, err := crypto.LoadMaster(t.Context(), config.FromCredential{Name: name}, os.DirFS(dir), nil, discard())
+		for _, name := range []string{"", "../pisati-main-key", "/pisati-main-key", "a/../b"} {
+			_, err := crypto.LoadMainKey(t.Context(), config.FromCredential{Name: name}, os.DirFS(dir), nil, discard())
 			if !errors.Is(err, crypto.ErrInvalid) {
-				t.Errorf("LoadMaster(credential %q): %v, want ErrInvalid", name, err)
+				t.Errorf("LoadMainKey(credential %q): %v, want ErrInvalid", name, err)
 			}
 		}
 	})
 }
 
-func TestLoadMasterRefusesWhatItCannotUse(t *testing.T) {
+func TestLoadMainKeyRefusesWhatItCannotUse(t *testing.T) {
 	t.Run("no source", func(t *testing.T) {
-		if _, err := crypto.LoadMaster(t.Context(), nil, nil, nil, discard()); !errors.Is(err, crypto.ErrInvalid) {
-			t.Errorf("LoadMaster(nil): %v, want ErrInvalid", err)
+		if _, err := crypto.LoadMainKey(t.Context(), nil, nil, nil, discard()); !errors.Is(err, crypto.ErrInvalid) {
+			t.Errorf("LoadMainKey(nil): %v, want ErrInvalid", err)
 		}
 	})
 	t.Run("no logger", func(t *testing.T) {
-		path := writeFile(t, t.TempDir(), "master.key", keyText(randomKey(t)), 0o400)
-		if _, err := crypto.LoadMaster(t.Context(), config.FromFile{Path: path}, nil, nil, nil); !errors.Is(err, crypto.ErrInvalid) {
-			t.Errorf("LoadMaster without a logger: %v, want ErrInvalid", err)
+		path := writeFile(t, t.TempDir(), "main.key", keyText(randomKey(t)), 0o400)
+		if _, err := crypto.LoadMainKey(t.Context(), config.FromFile{Path: path}, nil, nil, nil); !errors.Is(err, crypto.ErrInvalid) {
+			t.Errorf("LoadMainKey without a logger: %v, want ErrInvalid", err)
 		}
 	})
 	t.Run("no state directory", func(t *testing.T) {
-		if _, err := crypto.LoadMaster(t.Context(), config.Generated{}, nil, nil, discard()); !errors.Is(err, crypto.ErrInvalid) {
-			t.Errorf("LoadMaster(Generated) without a state directory: %v, want ErrInvalid", err)
+		if _, err := crypto.LoadMainKey(t.Context(), config.Generated{}, nil, nil, discard()); !errors.Is(err, crypto.ErrInvalid) {
+			t.Errorf("LoadMainKey(Generated) without a state directory: %v, want ErrInvalid", err)
 		}
 	})
 	t.Run("an ended context", func(t *testing.T) {
-		path := writeFile(t, t.TempDir(), "master.key", keyText(randomKey(t)), 0o400)
+		path := writeFile(t, t.TempDir(), "main.key", keyText(randomKey(t)), 0o400)
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		if _, err := crypto.LoadMaster(ctx, config.FromFile{Path: path}, nil, nil, discard()); !errors.Is(err, context.Canceled) {
-			t.Errorf("LoadMaster with an ended context: %v, want context.Canceled", err)
+		if _, err := crypto.LoadMainKey(ctx, config.FromFile{Path: path}, nil, nil, discard()); !errors.Is(err, context.Canceled) {
+			t.Errorf("LoadMainKey with an ended context: %v, want context.Canceled", err)
 		}
 		state, err := os.OpenRoot(t.TempDir())
 		if err != nil {
@@ -368,11 +368,11 @@ func TestLoadMasterRefusesWhatItCannotUse(t *testing.T) {
 				t.Error(err)
 			}
 		}()
-		if _, err := crypto.LoadMaster(ctx, config.Generated{}, nil, state, discard()); !errors.Is(err, context.Canceled) {
-			t.Errorf("LoadMaster(Generated) with an ended context: %v, want context.Canceled", err)
+		if _, err := crypto.LoadMainKey(ctx, config.Generated{}, nil, state, discard()); !errors.Is(err, context.Canceled) {
+			t.Errorf("LoadMainKey(Generated) with an ended context: %v, want context.Canceled", err)
 		}
 		if _, err := state.Lstat("keys"); !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("LoadMaster with an ended context made the keys directory: %v", err)
+			t.Errorf("LoadMainKey with an ended context made the keys directory: %v", err)
 		}
 	})
 }
@@ -447,17 +447,17 @@ func TestRefusesBadKeyFiles(t *testing.T) {
 			} {
 				t.Run(c.name, func(t *testing.T) {
 					dir := t.TempDir()
-					const file = "pisati-master-key"
+					const file = "pisati-main-key"
 					key := randomKey(t)
 					c.make(t, dir, file, key)
 					log, rec := newLogger()
 					_, err := src.load(t, dir, file, log)
 					if !errors.Is(err, c.want) {
-						t.Fatalf("LoadMaster: %v, want %v", err, c.want)
+						t.Fatalf("LoadMainKey: %v, want %v", err, c.want)
 					}
 					_, named := src.named(dir, file)
 					if msg := err.Error(); !strings.Contains(msg, named) || !strings.Contains(msg, c.fix) {
-						t.Errorf("LoadMaster: %q; want it to name %s and say %q", msg, named, c.fix)
+						t.Errorf("LoadMainKey: %q; want it to name %s and say %q", msg, named, c.fix)
 					}
 					text := string(keyText(key)[:44])
 					if msg := err.Error(); strings.Contains(msg, text[:20]) || strings.Contains(msg, "****") {
@@ -474,14 +474,14 @@ func TestRefusesBadKeyFiles(t *testing.T) {
 	t.Run("file path", func(t *testing.T) {
 		key := cleanKeyPath(t)
 		for _, c := range []struct{ name, path string }{
-			{"relative", "secrets/master.key"},
-			{"not clean", "/run/secrets/../secrets/master.key"},
+			{"relative", "secrets/main.key"},
+			{"not clean", "/run/secrets/../secrets/main.key"},
 			{"the key itself", key},
 		} {
 			t.Run(c.name, func(t *testing.T) {
 				_, err := fromFile(t, c.path, discard())
 				if !errors.Is(err, crypto.ErrInvalid) {
-					t.Fatalf("LoadMaster(%s): %v, want ErrInvalid", c.name, err)
+					t.Fatalf("LoadMainKey(%s): %v, want ErrInvalid", c.name, err)
 				}
 				if strings.Contains(err.Error(), c.path) {
 					t.Error("the error repeats the path, which may be the key itself")
@@ -503,7 +503,7 @@ func TestRefusesBadKeyFiles(t *testing.T) {
 		}
 		goodKey := func(t *testing.T, dir string, key []byte, mode os.FileMode) {
 			t.Helper()
-			writeFile(t, dir, "master.key", keyText(key), mode)
+			writeFile(t, dir, "main.key", keyText(key), mode)
 		}
 		for _, c := range []struct {
 			name string
@@ -514,33 +514,33 @@ func TestRefusesBadKeyFiles(t *testing.T) {
 			{"the key file a symbolic link", func(t *testing.T, state string, key []byte) {
 				dir := keyDir(t, state, 0o700)
 				writeFile(t, state, "elsewhere.key", keyText(key), 0o600)
-				if err := os.Symlink("../elsewhere.key", filepath.Join(dir, "master.key")); err != nil {
+				if err := os.Symlink("../elsewhere.key", filepath.Join(dir, "main.key")); err != nil {
 					t.Fatal(err)
 				}
-			}, "keys/master.key", "symbolic link"},
+			}, "keys/main.key", "symbolic link"},
 			{"the key file readable by others", func(t *testing.T, state string, key []byte) {
 				goodKey(t, keyDir(t, state, 0o700), key, 0o604)
-			}, "keys/master.key", "chmod 0600"},
+			}, "keys/main.key", "chmod 0600"},
 			{"the key file writable by others", func(t *testing.T, state string, key []byte) {
 				goodKey(t, keyDir(t, state, 0o700), key, 0o602)
-			}, "keys/master.key", "chmod 0600"},
+			}, "keys/main.key", "chmod 0600"},
 			{"the key file executable by others", func(t *testing.T, state string, key []byte) {
 				goodKey(t, keyDir(t, state, 0o700), key, 0o601)
-			}, "keys/master.key", "chmod 0600"},
+			}, "keys/main.key", "chmod 0600"},
 			{"the key file the group shares readable by others", func(t *testing.T, state string, key []byte) {
 				goodKey(t, keyDir(t, state, fs.ModeSetgid|0o770), key, 0o664)
-			}, "keys/master.key", "chmod 0600"},
+			}, "keys/main.key", "chmod 0600"},
 			{"the key file a directory", func(t *testing.T, state string, _ []byte) {
-				if err := os.Mkdir(filepath.Join(keyDir(t, state, 0o700), "master.key"), 0o700); err != nil {
+				if err := os.Mkdir(filepath.Join(keyDir(t, state, 0o700), "main.key"), 0o700); err != nil {
 					t.Fatal(err)
 				}
-			}, "keys/master.key", "regular file"},
+			}, "keys/main.key", "regular file"},
 			{"the key file a character short", func(t *testing.T, state string, key []byte) {
-				writeFile(t, keyDir(t, state, 0o700), "master.key", keyText(key)[:43], 0o600)
-			}, "keys/master.key", "openssl rand -base64 32"},
+				writeFile(t, keyDir(t, state, 0o700), "main.key", keyText(key)[:43], 0o600)
+			}, "keys/main.key", "openssl rand -base64 32"},
 			{"the key file not base64", func(t *testing.T, state string, _ []byte) {
-				writeFile(t, keyDir(t, state, 0o700), "master.key", stars, 0o600)
-			}, "keys/master.key", "openssl rand -base64 32"},
+				writeFile(t, keyDir(t, state, 0o700), "main.key", stars, 0o600)
+			}, "keys/main.key", "openssl rand -base64 32"},
 			{"the keys directory a symbolic link", func(t *testing.T, state string, key []byte) {
 				elsewhere := filepath.Join(state, "elsewhere")
 				if err := os.Mkdir(elsewhere, 0o700); err != nil {
@@ -582,13 +582,13 @@ func TestRefusesBadKeyFiles(t *testing.T) {
 					}
 				}()
 				log, rec := newLogger()
-				_, err = crypto.LoadMaster(t.Context(), config.Generated{}, nil, state, log)
+				_, err = crypto.LoadMainKey(t.Context(), config.Generated{}, nil, state, log)
 				if !errors.Is(err, crypto.ErrKeyFile) {
-					t.Fatalf("LoadMaster(Generated): %v, want ErrKeyFile", err)
+					t.Fatalf("LoadMainKey(Generated): %v, want ErrKeyFile", err)
 				}
 				named := filepath.Join(dir, filepath.FromSlash(c.named))
 				if msg := err.Error(); !strings.Contains(msg, named) || !strings.Contains(msg, c.fix) {
-					t.Errorf("LoadMaster(Generated): %q; want it to name %s and say %q", msg, named, c.fix)
+					t.Errorf("LoadMainKey(Generated): %q; want it to name %s and say %q", msg, named, c.fix)
 				}
 				if strings.Contains(err.Error(), string(keyText(key)[:20])) || strings.Contains(err.Error(), "****") {
 					t.Error("the error shows what the file holds")
@@ -597,7 +597,7 @@ func TestRefusesBadKeyFiles(t *testing.T) {
 					t.Errorf("%d records logged for a key refused, want none", n)
 				}
 				if after := snapshot(t, dir); !maps.Equal(before, after) {
-					t.Errorf("LoadMaster(Generated) changed the state directory: %v, was %v", after, before)
+					t.Errorf("LoadMainKey(Generated) changed the state directory: %v, was %v", after, before)
 				}
 			})
 		}
@@ -665,8 +665,8 @@ func decimal(b []byte) string {
 	return strings.Join(parts, " ")
 }
 
-func TestMasterRedacts(t *testing.T) {
-	m, key := newMasterKey(t)
+func TestMainKeyRedacts(t *testing.T) {
+	m, key := newMainKeyBytes(t)
 	text := string(keyText(key)[:44])
 	leaks := map[string]string{
 		"base64":        text,
@@ -677,8 +677,8 @@ func TestMasterRedacts(t *testing.T) {
 		"decimal bytes": decimal(key),
 	}
 
-	type exported struct{ M crypto.Master }
-	type unexported struct{ m crypto.Master }
+	type exported struct{ M crypto.MainKey }
+	type unexported struct{ m crypto.MainKey }
 	var shown []string
 	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%T"} {
 		shown = append(shown,
@@ -686,7 +686,7 @@ func TestMasterRedacts(t *testing.T) {
 			fmt.Sprintf(verb, &m),
 			fmt.Sprintf(verb, exported{m}),
 			fmt.Sprintf(verb, unexported{m}),
-			fmt.Sprintf(verb, []crypto.Master{m}))
+			fmt.Sprintf(verb, []crypto.MainKey{m}))
 	}
 	shown = append(shown, m.String(), fmt.Sprint(m), fmt.Sprintln(m))
 	text2, err := m.MarshalText()
@@ -694,7 +694,7 @@ func TestMasterRedacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	shown = append(shown, string(text2))
-	for _, v := range []any{m, exported{m}, map[string]crypto.Master{"m": m}} {
+	for _, v := range []any{m, exported{m}, map[string]crypto.MainKey{"m": m}} {
 		j, err := json.Marshal(v)
 		if err != nil {
 			t.Fatal(err)
@@ -703,21 +703,21 @@ func TestMasterRedacts(t *testing.T) {
 	}
 	var logged bytes.Buffer
 	for _, h := range []slog.Handler{slog.NewJSONHandler(&logged, nil), slog.NewTextHandler(&logged, nil)} {
-		slog.New(h).Info("master key", "master", m, "within", exported{m}, "any", slog.AnyValue(m))
+		slog.New(h).Info("main key", "main", m, "within", exported{m}, "any", slog.AnyValue(m))
 	}
 	shown = append(shown, logged.String())
 
 	for _, s := range shown {
 		for form, leak := range leaks {
 			if strings.Contains(s, leak) {
-				t.Errorf("a master key shown as %q holds the key, in %s", s[:min(len(s), 12)]+"…", form)
+				t.Errorf("a main key shown as %q holds the key, in %s", s[:min(len(s), 12)]+"…", form)
 			}
 		}
 	}
 	if !strings.Contains(m.String(), "[redacted]") {
 		t.Errorf("String() = %q, want it to say [redacted]", m.String())
 	}
-	if reflect.TypeFor[crypto.Master]().Comparable() {
-		t.Error("master keys compare with ==, which would compare them in variable time")
+	if reflect.TypeFor[crypto.MainKey]().Comparable() {
+		t.Error("main keys compare with ==, which would compare them in variable time")
 	}
 }

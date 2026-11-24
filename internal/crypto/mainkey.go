@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	// keySize is the size of every key, master and data: 32 bytes, as
+	// keySize is the size of every key, main and data: 32 bytes, as
 	// XChaCha20-Poly1305 takes.
 	keySize = chacha20poly1305.KeySize
 	// nonceSize is XChaCha20-Poly1305's nonce, 24 bytes: long enough to
@@ -44,11 +44,11 @@ const (
 	keyChars = 44
 
 	// keysDir is the directory in the state directory that holds the
-	// master key Pisati generates, keyName in it.
+	// main key Pisati generates, keyName in it.
 	keysDir = "keys"
-	keyName = "master.key"
+	keyName = "main.key"
 
-	// redacted is all a Master ever shows of itself.
+	// redacted is all a MainKey ever shows of itself.
 	redacted = "[redacted]"
 )
 
@@ -60,53 +60,53 @@ const (
 	// generatedAction is what the warning on generating a key says to do.
 	generatedAction = "back up this file with the database, and restore the two together: what the database holds " +
 		"sealed cannot be opened without it. To keep the key off the data volume, give its file as " +
-		"keys.master_key_file or as the pisati-master-key credential"
+		"keys.main_key_file or as the pisati-main-key credential"
 )
 
-// Master is the master key, which wraps the data keys the database keeps.
+// MainKey is the main key, which wraps the data keys the database keeps.
 // It never shows the key: String, fmt (every verb), slog and
-// encoding/json all show [redacted], also when a Master sits in another
-// value's unexported field. Masters do not compare with ==, which would
-// compare keys in variable time. The zero Master holds no key, and
+// encoding/json all show [redacted], also when a MainKey sits in another
+// value's unexported field. MainKeys do not compare with ==, which would
+// compare keys in variable time. The zero MainKey holds no key, and
 // OpenKeyring, Rewrap and Rotate refuse it.
-type Master struct {
+type MainKey struct {
 	// A function rather than the key, as config.Secret holds one: fmt
 	// prints a function as its address, so even where it cannot call
-	// Format it prints no key. It also makes Masters incomparable.
+	// Format it prints no key. It also makes MainKeys incomparable.
 	key func() [keySize]byte
 }
 
-// newMaster returns the Master that holds key.
-func newMaster(key [keySize]byte) Master {
-	return Master{key: func() [keySize]byte { return key }}
+// newMainKey returns the MainKey that holds key.
+func newMainKey(key [keySize]byte) MainKey {
+	return MainKey{key: func() [keySize]byte { return key }}
 }
 
 // String returns [redacted].
-func (Master) String() string {
+func (MainKey) String() string {
 	return redacted
 }
 
 // Format prints [redacted], whatever the verb and flags.
-func (Master) Format(f fmt.State, _ rune) {
+func (MainKey) Format(f fmt.State, _ rune) {
 	io.WriteString(f, redacted) //nolint:errcheck // fmt.State writes into fmt's own buffer, which cannot fail, and Format has no error to return
 }
 
 // MarshalText returns [redacted], so encoding/json and slog's handlers,
 // which use it, never show the key.
-func (Master) MarshalText() ([]byte, error) {
+func (MainKey) MarshalText() ([]byte, error) {
 	return []byte(redacted), nil
 }
 
 // LogValue shows the key to slog as [redacted].
-func (Master) LogValue() slog.Value {
+func (MainKey) LogValue() slog.Value {
 	return slog.StringValue(redacted)
 }
 
 // aead returns XChaCha20-Poly1305 under m's key, or an error wrapping
-// ErrInvalid for the zero Master.
-func (m Master) aead() (cipher.AEAD, error) {
+// ErrInvalid for the zero MainKey.
+func (m MainKey) aead() (cipher.AEAD, error) {
 	if m.key == nil {
-		return nil, fmt.Errorf("%w master key: the zero Master holds none", ErrInvalid)
+		return nil, fmt.Errorf("%w main key: the zero MainKey holds none", ErrInvalid)
 	}
 	key := m.key()
 	defer clear(key[:])
@@ -133,7 +133,7 @@ func (id keyID) bytes() []byte {
 // wrap returns dk wrapped by m as the data key id: nonce, then dk
 // encrypted with id as the associated data, so that the wrapped key opens
 // only as the key of row id, never moved to another.
-func (m Master) wrap(nonce [nonceSize]byte, id keyID, dk [keySize]byte) ([]byte, error) {
+func (m MainKey) wrap(nonce [nonceSize]byte, id keyID, dk [keySize]byte) ([]byte, error) {
 	aead, err := m.aead()
 	if err != nil {
 		return nil, err
@@ -143,12 +143,12 @@ func (m Master) wrap(nonce [nonceSize]byte, id keyID, dk [keySize]byte) ([]byte,
 	return aead.Seal(out, nonce[:], dk[:], id.bytes()), nil
 }
 
-// errUnwrap is a wrapped key that does not open under the master key as
+// errUnwrap is a wrapped key that does not open under the main key as
 // the key of its row.
 var errUnwrap = errors.New("the wrapped data key does not open")
 
 // unwrap returns the data key id that m wrapped as wrapped, or errUnwrap.
-func (m Master) unwrap(id keyID, wrapped []byte) ([keySize]byte, error) {
+func (m MainKey) unwrap(id keyID, wrapped []byte) ([keySize]byte, error) {
 	aead, err := m.aead()
 	if err != nil {
 		return [keySize]byte{}, err
@@ -164,7 +164,7 @@ func (m Master) unwrap(id keyID, wrapped []byte) ([keySize]byte, error) {
 	return [keySize]byte(dk), nil
 }
 
-// LoadMaster returns the master key from where src says it is. It checks
+// LoadMainKey returns the main key from where src says it is. It checks
 // ctx as it starts, before it touches any file, and again before it opens
 // a key file to read or to write it, and returns ctx's error then. Each
 // error it returns names the file, unless the name may be the key itself.
@@ -175,24 +175,24 @@ func (m Master) unwrap(id keyID, wrapped []byte) ([keySize]byte, error) {
 // shows what the file holds.
 //
 // A file the operator names, config.FromFile or a config.FromCredential
-// that LoadMaster opens in creds, may be reached through symbolic links,
+// that LoadMainKey opens in creds, may be reached through symbolic links,
 // which it follows. The file they reach must be a regular file of the
 // right size, which neither its group nor others can write, else
 // ErrKeyFile. Its group may read it, as a Kubernetes secret mounted with
-// fsGroup and mode 0440 needs; when others can read it too, LoadMaster
+// fsGroup and mode 0440 needs; when others can read it too, LoadMainKey
 // loads the key and logs a warning naming the file and the fix. The path
 // of a config.FromFile must be absolute and clean, else ErrInvalid. creds
 // is nil when there is no credentials directory, and a
 // config.FromCredential then gets ErrInvalid.
 //
 // config.Generated has the key kept on the data volume, at
-// <state>/keys/master.key. When there is no such file, LoadMaster makes
+// <state>/keys/main.key. When there is no such file, LoadMainKey makes
 // the keys directory, mode 0700, if there is none, and generates the key
 // from crypto/rand into the file with O_EXCL, mode 0600, flushing both to
 // stable storage, and logs one warning that the key lives on the data
 // volume and must be backed up and restored with the database. Pisati
 // alone writes this file, so it is held to stricter rules than a file
-// the operator names: LoadMaster refuses, with ErrKeyFile and an error
+// the operator names: LoadMainKey refuses, with ErrKeyFile and an error
 // that says what to do, a keys directory or key file that is a symbolic
 // link or that others may use in any way, a key file that is not a
 // regular file, and one of the wrong size or content. Their group may read
@@ -203,9 +203,9 @@ func (m Master) unwrap(id keyID, wrapped []byte) ([keySize]byte, error) {
 //
 // log takes the warnings, which never hold the key; a nil log, or a nil
 // src, gets ErrInvalid.
-func LoadMaster(ctx context.Context, src config.SecretSource, creds fs.FS, state *os.Root, log *slog.Logger) (Master, error) {
+func LoadMainKey(ctx context.Context, src config.SecretSource, creds fs.FS, state *os.Root, log *slog.Logger) (MainKey, error) {
 	if log == nil {
-		return Master{}, fmt.Errorf("crypto: load the master key: %w logger: nil", ErrInvalid)
+		return MainKey{}, fmt.Errorf("crypto: load the main key: %w logger: nil", ErrInvalid)
 	}
 	switch s := src.(type) {
 	case config.FromFile:
@@ -217,75 +217,75 @@ func LoadMaster(ctx context.Context, src config.SecretSource, creds fs.FS, state
 	default:
 		// nil, or a type outside config that embeds a source: a bug,
 		// which must load no key.
-		return Master{}, fmt.Errorf("crypto: load the master key: %w source: %T", ErrInvalid, src)
+		return MainKey{}, fmt.Errorf("crypto: load the main key: %w source: %T", ErrInvalid, src)
 	}
 }
 
 // loadFile loads the key from the file at path, which the operator named.
-func loadFile(ctx context.Context, path string, log *slog.Logger) (Master, error) {
+func loadFile(ctx context.Context, path string, log *slog.Logger) (MainKey, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path || looksLikeKey(path) {
-		return Master{}, fmt.Errorf("crypto: load the master key: %w key file path: want an absolute, clean path to "+
+		return MainKey{}, fmt.Errorf("crypto: load the main key: %w key file path: want an absolute, clean path to "+
 			"the file that holds the key (the value is not shown, as it may be the key itself)", ErrInvalid)
 	}
-	where := "master key file " + path
+	where := "main key file " + path
 	if err := ctx.Err(); err != nil {
-		return Master{}, fmt.Errorf("crypto: %s: %w", where, err)
+		return MainKey{}, fmt.Errorf("crypto: %s: %w", where, err)
 	}
 	// Non-blocking, so that a named pipe in the key file's place is
 	// refused, as no regular file, rather than waited on for a writer.
 	f, err := os.OpenFile(filepath.Clean(path), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return Master{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
+		return MainKey{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
 	}
 	key, othersRead, err := readNamed(f, where)
 	defer clear(key[:])
 	if err := errors.Join(err, f.Close()); err != nil {
-		return Master{}, err
+		return MainKey{}, err
 	}
 	if othersRead {
-		log.WarnContext(ctx, "master key file readable by others", "path", path, "fix", namedFix)
+		log.WarnContext(ctx, "main key file readable by others", "path", path, "fix", namedFix)
 	}
-	return newMaster(key), nil
+	return newMainKey(key), nil
 }
 
 // loadCredential loads the key from the credential name in creds.
-func loadCredential(ctx context.Context, creds fs.FS, name string, log *slog.Logger) (Master, error) {
+func loadCredential(ctx context.Context, creds fs.FS, name string, log *slog.Logger) (MainKey, error) {
 	if creds == nil {
-		return Master{}, fmt.Errorf("crypto: load the master key: %w credential %q: there is no credentials directory", ErrInvalid, name)
+		return MainKey{}, fmt.Errorf("crypto: load the main key: %w credential %q: there is no credentials directory", ErrInvalid, name)
 	}
 	if !fs.ValidPath(name) || name == "." || strings.Contains(name, "/") {
-		return Master{}, fmt.Errorf("crypto: load the master key: %w credential name %q: want a file's name", ErrInvalid, name)
+		return MainKey{}, fmt.Errorf("crypto: load the main key: %w credential name %q: want a file's name", ErrInvalid, name)
 	}
-	where := "master key credential " + name
+	where := "main key credential " + name
 	if err := ctx.Err(); err != nil {
-		return Master{}, fmt.Errorf("crypto: %s: %w", where, err)
+		return MainKey{}, fmt.Errorf("crypto: %s: %w", where, err)
 	}
 	// Checked before it is opened, as fs.FS opens nothing non-blocking:
 	// a named pipe there is refused rather than waited on. The file it
 	// opens is checked again, as what it reads.
 	fi, err := fs.Stat(creds, name)
 	if err != nil {
-		return Master{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
+		return MainKey{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
 	}
 	if err := checkNamed(fi, where); err != nil {
-		return Master{}, err
+		return MainKey{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return Master{}, fmt.Errorf("crypto: %s: %w", where, err)
+		return MainKey{}, fmt.Errorf("crypto: %s: %w", where, err)
 	}
 	f, err := creds.Open(name)
 	if err != nil {
-		return Master{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
+		return MainKey{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
 	}
 	key, othersRead, err := readNamed(f, where)
 	defer clear(key[:])
 	if err := errors.Join(err, f.Close()); err != nil {
-		return Master{}, err
+		return MainKey{}, err
 	}
 	if othersRead {
-		log.WarnContext(ctx, "master key file readable by others", "credential", name, "fix", namedFix)
+		log.WarnContext(ctx, "main key file readable by others", "credential", name, "fix", namedFix)
 	}
-	return newMaster(key), nil
+	return newMainKey(key), nil
 }
 
 // readNamed reads the key from f, a file the operator named, once its
@@ -378,48 +378,48 @@ func pathless(err error) error {
 	return err
 }
 
-// loadGenerated loads the key Pisati keeps at <state>/keys/master.key,
+// loadGenerated loads the key Pisati keeps at <state>/keys/main.key,
 // generating it first if there is none.
-func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (Master, error) {
+func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (MainKey, error) {
 	if state == nil {
-		return Master{}, fmt.Errorf("crypto: load the master key: %w state directory: nil, so there is nowhere to keep a generated key", ErrInvalid)
+		return MainKey{}, fmt.Errorf("crypto: load the main key: %w state directory: nil, so there is nowhere to keep a generated key", ErrInvalid)
 	}
 	dirPath := filepath.Join(state.Name(), keysDir)
 	keyPath := filepath.Join(dirPath, keyName)
 	name := filepath.Join(keysDir, keyName)
-	where := "master key file " + keyPath
+	where := "main key file " + keyPath
 	if err := ctx.Err(); err != nil {
-		return Master{}, fmt.Errorf("crypto: %s: %w", where, err)
+		return MainKey{}, fmt.Errorf("crypto: %s: %w", where, err)
 	}
 	if err := keysDirectory(state, dirPath); err != nil {
-		return Master{}, err
+		return MainKey{}, err
 	}
 	fi, err := state.Lstat(name)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if err := ctx.Err(); err != nil {
-			return Master{}, fmt.Errorf("crypto: %s: %w", where, err)
+			return MainKey{}, fmt.Errorf("crypto: %s: %w", where, err)
 		}
 		return generate(ctx, state, name, keyPath, log)
 	case err != nil:
-		return Master{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
+		return MainKey{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
 	}
 	if err := checkGenerated(fi, keyPath); err != nil {
-		return Master{}, err
+		return MainKey{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return Master{}, fmt.Errorf("crypto: %s: %w", where, err)
+		return MainKey{}, fmt.Errorf("crypto: %s: %w", where, err)
 	}
 	f, err := state.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return Master{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
+		return MainKey{}, fmt.Errorf("crypto: %s: %w", where, pathless(err))
 	}
 	key, err := readGenerated(f, fi, where)
 	defer clear(key[:])
 	if err := errors.Join(err, f.Close()); err != nil {
-		return Master{}, err
+		return MainKey{}, err
 	}
-	return newMaster(key), nil
+	return newMainKey(key), nil
 }
 
 // keysDirectory makes the keys directory in state, mode 0700, when there
@@ -456,11 +456,11 @@ func keysDirectory(state *os.Root, dirPath string) error {
 // of a key file's size. Its group may read and write it, as fsGroup makes
 // it.
 func checkGenerated(fi fs.FileInfo, keyPath string) error {
-	where := "master key file " + keyPath
+	where := "main key file " + keyPath
 	switch mode := fi.Mode(); {
 	case mode&fs.ModeSymlink != 0:
 		return fmt.Errorf("crypto: %s: %w: it is a symbolic link; Pisati generated this key and never links it: "+
-			"put the key file itself in the link's place, mode 0600, or give its path as keys.master_key_file", where, ErrKeyFile)
+			"put the key file itself in the link's place, mode 0600, or give its path as keys.main_key_file", where, ErrKeyFile)
 	case !mode.IsRegular():
 		return fmt.Errorf("crypto: %s: %w: it is not a regular file; restore the key file backed up with the database",
 			where, ErrKeyFile)
@@ -490,19 +490,19 @@ func readGenerated(f *os.File, checked fs.FileInfo, where string) ([keySize]byte
 
 // generate generates a key into the file name in state, keyPath, which
 // does not exist, and logs that it did.
-func generate(ctx context.Context, state *os.Root, name, keyPath string, log *slog.Logger) (Master, error) {
+func generate(ctx context.Context, state *os.Root, name, keyPath string, log *slog.Logger) (MainKey, error) {
 	var key [keySize]byte
 	defer clear(key[:])
 	if _, err := rand.Read(key[:]); err != nil {
-		return Master{}, fmt.Errorf("crypto: generate the master key: %w", err)
+		return MainKey{}, fmt.Errorf("crypto: generate the main key: %w", err)
 	}
 	text := append(base64.StdEncoding.AppendEncode(nil, key[:]), '\n')
 	defer clear(text)
 	if err := writeKey(state, name, text); err != nil {
-		return Master{}, fmt.Errorf("crypto: generate the master key at %s: %w", keyPath, err)
+		return MainKey{}, fmt.Errorf("crypto: generate the main key at %s: %w", keyPath, err)
 	}
-	log.WarnContext(ctx, "master key generated on the data volume", "path", keyPath, "action", generatedAction)
-	return newMaster(key), nil
+	log.WarnContext(ctx, "main key generated on the data volume", "path", keyPath, "action", generatedAction)
+	return newMainKey(key), nil
 }
 
 // writeKey writes text to the new file name in state, mode 0600, and

@@ -55,7 +55,7 @@ CREATE INDEX jobs_by_state_run_at ON jobs (state, run_at);
 -- retention.
 CREATE INDEX jobs_by_state_finished_at ON jobs (state, finished_at);
 
--- The data keys, each wrapped by the master key. New data is sealed with
+-- The data keys, each wrapped by the main key. New data is sealed with
 -- the current one; a retired one only opens what it sealed.
 CREATE TABLE data_keys (
     id INTEGER PRIMARY KEY,

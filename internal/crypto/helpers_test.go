@@ -99,29 +99,29 @@ func discard() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
-// fromFile loads the master key from the key file at path.
-func fromFile(t testing.TB, path string, log *slog.Logger) (crypto.Master, error) {
+// fromFile loads the main key from the key file at path.
+func fromFile(t testing.TB, path string, log *slog.Logger) (crypto.MainKey, error) {
 	t.Helper()
-	return crypto.LoadMaster(t.Context(), config.FromFile{Path: path}, nil, nil, log)
+	return crypto.LoadMainKey(t.Context(), config.FromFile{Path: path}, nil, nil, log)
 }
 
-// newMasterKey returns a master key loaded from a key file of its own,
+// newMainKeyBytes returns a main key loaded from a key file of its own,
 // mode 0400, and the key that file holds.
-func newMasterKey(t testing.TB) (crypto.Master, []byte) {
+func newMainKeyBytes(t testing.TB) (crypto.MainKey, []byte) {
 	t.Helper()
 	key := randomKey(t)
-	path := writeFile(t, t.TempDir(), "master.key", keyText(key), 0o400)
+	path := writeFile(t, t.TempDir(), "main.key", keyText(key), 0o400)
 	m, err := fromFile(t, path, discard())
 	if err != nil {
-		t.Fatalf("LoadMaster(%s): %v", path, err)
+		t.Fatalf("LoadMainKey(%s): %v", path, err)
 	}
 	return m, key
 }
 
-// newMaster returns a master key loaded from a key file of its own.
-func newMaster(t testing.TB) crypto.Master {
+// newMainKey returns a main key loaded from a key file of its own.
+func newMainKey(t testing.TB) crypto.MainKey {
 	t.Helper()
-	m, _ := newMasterKey(t)
+	m, _ := newMainKeyBytes(t)
 	return m
 }
 
@@ -132,7 +132,7 @@ func clock() time.Time {
 }
 
 // openKeyring opens the keyring in s with m, drawing from crypto/rand.
-func openKeyring(t testing.TB, s *store.Store, m crypto.Master) *crypto.Keyring {
+func openKeyring(t testing.TB, s *store.Store, m crypto.MainKey) *crypto.Keyring {
 	t.Helper()
 	k, err := crypto.OpenKeyring(t.Context(), s, m, clock, rand.Reader)
 	if err != nil {
@@ -291,7 +291,7 @@ func (r *recorder) Handle(_ context.Context, rec slog.Record) error {
 	return nil
 }
 
-// LoadMaster logs through its logger as given, so these need do nothing
+// LoadMainKey logs through its logger as given, so these need do nothing
 // more than satisfy slog.Handler.
 func (r *recorder) WithAttrs([]slog.Attr) slog.Handler { return r }
 func (r *recorder) WithGroup(string) slog.Handler      { return r }
