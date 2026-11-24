@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -721,12 +722,68 @@ func TestKeysAreLowerCase(t *testing.T) {
 func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 	t.Parallel()
 
-	const fixed = ": invalid: it is not TOML, or not a value the setting takes (what the file holds is not shown); " +
-		"none of the file's settings are used until it decodes"
+	const fixed = ": invalid: " + notDecoded
+	// The value a key misses, on the lines after it, holds needle, or
+	// these: the error must hold none of it, and name the key that misses
+	// it.
+	user, password := "someone-Uq7Zk", "hunter2-Pq7Zk"
 	tests := []struct {
 		name, file, want string
 		value            []string // what of the file the error must not hold
+		// crlf is whether the case holds as well with CRLF line endings,
+		// the error at the same line and column.
+		crlf bool
 	}{
+		{
+			name:  "a secret on the line after its key",
+			file:  "[keys]\nmain_key =\n\"" + needle + "\"\n",
+			want:  "pisati.toml:2:11: keys.main_key" + fixed,
+			value: []string{needle},
+			crlf:  true,
+		},
+		{
+			name: "a URL with a password, indented, on the line after its key",
+			file: "[telemetry]\notlp_endpoint =\n  \"" + withUserInfo("https://", user, password, "collector.example.org") + "\"\n",
+			want: "pisati.toml:2:16: telemetry.otlp_endpoint" + fixed,
+			value: []string{
+				user, password, user + ":" + password, "collector.example.org", "https",
+			},
+			crlf: true,
+		},
+		{
+			name:  "a bare URL on the line after its key",
+			file:  "[telemetry]\notlp_endpoint =\nhttp://" + needle + "\n",
+			want:  "pisati.toml:2:16: telemetry.otlp_endpoint" + fixed,
+			value: []string{"http", needle},
+			crlf:  true,
+		},
+		{
+			name:  "a string left open before the next key",
+			file:  "[keys]\nmain_key = \"" + needle + "\nother = 1\n",
+			want:  "pisati.toml:2:" + strconv.Itoa(13+len(needle)) + ": keys.main_key" + fixed,
+			value: []string{needle, "other"},
+			crlf:  true,
+		},
+		{
+			name:  "a quoted key left open before the next",
+			file:  "[keys]\n'" + needle + "\n'zz' = 1\n",
+			want:  "pisati.toml:2:" + strconv.Itoa(2+len(needle)) + ": keys" + fixed,
+			value: []string{needle, "zz"},
+			crlf:  true,
+		},
+		{
+			name:  "a secret after blank lines, in a string of many lines",
+			file:  "[keys]\nmain_key =\n\n\n'''" + needle + "'''\n",
+			want:  "pisati.toml:2:11: keys.main_key" + fixed,
+			value: []string{needle},
+			crlf:  true,
+		},
+		{
+			name:  "a lone carriage return between two keys",
+			file:  "[keys]\nmain_key_file = \"/run/key\"\n\r" + needle + " = 1\n",
+			want:  "pisati.toml:3:1: keys" + fixed,
+			value: []string{needle},
+		},
 		{
 			name:  "an invalid escape inside a secret",
 			file:  "[keys]\nmain_key = \"ЖЩ\\ЮЯ\"\n",
@@ -813,23 +870,29 @@ func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+		endings := []string{"\n"}
+		if tt.crlf {
+			endings = append(endings, "\r\n")
+		}
+		for _, ending := range endings {
+			t.Run(fmt.Sprintf("%s, line endings %q", tt.name, ending), func(t *testing.T) {
+				t.Parallel()
 
-			_, err := setup{
-				files: fstest.MapFS{"pisati.toml": tomlFile(tt.file)},
-				env:   env{"PISATI_SERVER_BASE_URL": baseURL},
-			}.load(t.Context())
-			refused(t, err, config.ErrInvalid, tt.want)
-			if !slices.ContainsFunc(errorParts(err), func(e error) bool { return e.Error() == tt.want }) {
-				t.Errorf("error %q has no part that is exactly %q", err, tt.want)
-			}
-			for _, v := range tt.value {
-				if strings.Contains(err.Error(), v) {
-					t.Errorf("error %q holds %q, from the file", err, v)
+				_, err := setup{
+					files: fstest.MapFS{"pisati.toml": tomlFile(strings.ReplaceAll(tt.file, "\n", ending))},
+					env:   env{"PISATI_SERVER_BASE_URL": baseURL},
+				}.load(t.Context())
+				refused(t, err, config.ErrInvalid, tt.want)
+				if !slices.ContainsFunc(errorParts(err), func(e error) bool { return e.Error() == tt.want }) {
+					t.Errorf("error %q has no part that is exactly %q", err, tt.want)
 				}
-			}
-		})
+				for _, v := range tt.value {
+					if strings.Contains(err.Error(), v) {
+						t.Errorf("error %q holds %q, from the file", err, v)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -1859,6 +1922,19 @@ func FuzzLoad(f *testing.F) {
 	f.Add("", "[server]\nBAse_url=\"http://127.0.0.1\"", "PISATI_TELEMETRY_OTLP_ENDPOINT=http://A/ ", "/", false)
 	// A table and a key in another case, which go-toml alone would match.
 	f.Add("[SERVER]\nbase_url = \"https://blog.example.org\"\n", "[log]\nLEVEL = \"debug\"\n", "PISATI_SERVER_BASE_URL=https://b.example.org", "", false)
+	// Files that end where a value is missing or left open, as the value
+	// needled puts after them would be its own.
+	for _, file := range []string{
+		"[keys]\nmain_key =",
+		"[keys]\r\nmain_key =\r\n",
+		"[telemetry]\notlp_endpoint =\n  \"" + withUserInfo("https://", "someone-Uq7Zk", "hunter2-Pq7Zk", "collector.example.org") + "\"",
+		"[telemetry]\notlp_endpoint =\nhttp://x",
+		"[keys]\nmain_key = \"abc",
+		"[keys]\n'abc\n'zz' = 1",
+		"[keys]\nmain_key =\n\n\n",
+	} {
+		f.Add(file, "", "PISATI_SERVER_BASE_URL=https://b.example.org", "", false)
+	}
 
 	f.Fuzz(func(t *testing.T, file, dropIn, vars, stateDir string, credential bool) {
 		e := env{}
@@ -1877,6 +1953,7 @@ func FuzzLoad(f *testing.F) {
 			s.creds = fstest.MapFS{"pisati-main-key": tomlFile("key")}
 		}
 
+		needled(t, file)
 		cfg, err := s.load(t.Context())
 		again, errAgain := s.load(t.Context())
 		if fmt.Sprint(err) != fmt.Sprint(errAgain) || !reflect.DeepEqual(cfg, again) {
@@ -1894,6 +1971,48 @@ func FuzzLoad(f *testing.F) {
 			spelt(t, text)
 		}
 	})
+}
+
+// notDecoded is the fixed text of every error for a file that does not
+// decode, after its file, line, column and key.
+const notDecoded = "it is not TOML, or not a value the setting takes (what the file holds is not shown); " +
+	"none of the file's settings are used until it decodes"
+
+// needle is a value no fixed text holds by chance.
+const needle = "Qz9vNEEDLEq7Zk"
+
+// needled fails t when a decode error for file, followed by a line that
+// holds needle quoted, holds needle but as the key it is on that line of
+// its own. The line is the value a key the file ends with may miss, or
+// one a string or an array left open at its end may hold.
+func needled(t *testing.T, file string) {
+	t.Helper()
+	if strings.Contains(file, needle) {
+		return
+	}
+	line := strings.Count(file, "\n") + 2
+	_, err := setup{
+		files: fstest.MapFS{"pisati.toml": tomlFile(file + "\n\"" + needle + "\"\n")},
+		env:   env{"PISATI_SERVER_BASE_URL": baseURL},
+	}.load(t.Context())
+	if err == nil {
+		return
+	}
+	for _, part := range errorParts(err) {
+		msg := part.Error()
+		var row, col int
+		if _, scanErr := fmt.Sscanf(msg, "pisati.toml:%d:%d:", &row, &col); scanErr != nil || !strings.HasSuffix(msg, ": invalid: "+notDecoded) {
+			continue
+		}
+		where := fmt.Sprintf("pisati.toml:%d:%d: ", row, col)
+		key := strings.TrimSuffix(strings.TrimPrefix(msg, where), ": invalid: "+notDecoded)
+		if row == line && (key == needle || strings.HasSuffix(key, "."+needle)) {
+			continue // the line read as a key, which an error may name
+		}
+		if strings.Contains(msg, needle) {
+			t.Errorf("error %q, for %q and the line after it, holds the value on that line", msg, file)
+		}
+	}
 }
 
 // spelt fails t unless every key in text, a file Load accepted, decoded

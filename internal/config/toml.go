@@ -170,14 +170,15 @@ func failedKey(data []byte, at int) []string {
 
 // expressionAt returns where the expression of data that holds offset at
 // starts, a comment counting as one, and where the last table header
-// before it starts, or -1 when there is none.
+// before it starts, or -1 when there is none. An expression holds the
+// line ending that ends it: go-toml reports there a value that is missing,
+// a string left open and a key with no "=", and the text after it is the
+// next expression's, never this one's key.
 func expressionAt(data []byte, at int) (start, header int) {
 	header = -1
 	i := 0
 	for {
-		for i < len(data) && bytes.IndexByte([]byte(" \t\r\n"), data[i]) >= 0 {
-			i++
-		}
+		i += betweenExpressions(data[i:])
 		if i >= at || i >= len(data) {
 			return i, header
 		}
@@ -192,8 +193,27 @@ func expressionAt(data []byte, at int) (start, header int) {
 	}
 }
 
-// expressionEnd returns the offset of the line ending that ends the
-// expression starting at offset i of data, or the length of data: the
+// betweenExpressions returns how many bytes b starts with that lie between
+// expressions: spaces, tabs and line endings, LF or CRLF. A carriage return
+// alone is no line ending, and go-toml fails there: it starts no
+// expression's key.
+func betweenExpressions(b []byte) int {
+	n := 0
+	for n < len(b) {
+		switch {
+		case b[n] == ' ' || b[n] == '\t' || b[n] == '\n':
+			n++
+		case bytes.HasPrefix(b[n:], []byte("\r\n")):
+			n += 2
+		default:
+			return n
+		}
+	}
+	return n
+}
+
+// expressionEnd returns the offset just past the line ending that ends
+// the expression starting at offset i of data, or the length of data: the
 // first one outside a string and outside brackets and braces, which a
 // table header and a key-value's arrays and inline tables open, comments
 // skipped.
@@ -202,7 +222,7 @@ func expressionEnd(data []byte, i int) int {
 	for i < len(data) {
 		switch c := data[i]; {
 		case c == '\n' && depth == 0:
-			return i
+			return i + 1
 		case c == '#':
 			i = lineEnd(data, i)
 			continue
