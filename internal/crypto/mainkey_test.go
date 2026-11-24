@@ -164,8 +164,12 @@ func TestGeneratedMainKeySharedWithGroup(t *testing.T) {
 				t.Fatalf("LoadMainKey(Generated): %v", err)
 			}
 			keyPath := filepath.Join(keysDir, "main.key")
-			if fi, err := os.Lstat(keyPath); err != nil || fi.Mode() != 0o600 {
-				t.Fatalf("the key file was made with mode %v (%v), want 0600 whatever its directory's", fi.Mode(), err)
+			fi, err := os.Lstat(keyPath)
+			if err != nil {
+				t.Fatalf("the key file LoadMainKey made: %v", err)
+			}
+			if fi.Mode() != 0o600 {
+				t.Fatalf("the key file was made with mode %v, want 0600 whatever its directory's", fi.Mode())
 			}
 			chmod(t, keysDir, c.dir)
 			chmod(t, keyPath, c.file)
