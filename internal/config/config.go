@@ -15,6 +15,7 @@
 package config
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -164,8 +165,8 @@ type BaseURL struct {
 }
 
 // ParseBaseURL returns s as a BaseURL, or an error wrapping ErrInvalid
-// that says why it is not one. A path of exactly "/" is accepted and
-// left out.
+// that says why it is not one, without repeating s, which may hold a
+// password. A path of exactly "/" is accepted and left out.
 func ParseBaseURL(s string) (BaseURL, error) {
 	u, err := parseWebURL(s)
 	if err == nil {
@@ -176,7 +177,8 @@ func ParseBaseURL(s string) (BaseURL, error) {
 		}
 	}
 	if err != nil {
-		return BaseURL{}, fmt.Errorf("%w value %q: %w; want https://host[:port], or http:// on localhost, 127.0.0.1 or [::1] alone", ErrInvalid, s, err)
+		return BaseURL{}, fmt.Errorf("%w value: %w; want https://host[:port], or http:// on localhost, 127.0.0.1 or [::1] alone "+
+			"(the value is not shown, as a URL may hold a password)", ErrInvalid, err)
 	}
 	return BaseURL{
 		origin: u.Scheme + "://" + u.Host,
@@ -323,7 +325,8 @@ func (s Switch) String() string {
 }
 
 // OptionalURL is an absolute http or https URL, or nothing. A URL it
-// holds has a host and no user information, query or fragment; its host
+// holds has a host and no user information, query or fragment, and its
+// path holds no character a URL must percent-encode unescaped; its host
 // is in the same canonical form as a BaseURL's. The zero OptionalURL
 // holds nothing.
 type OptionalURL struct {
@@ -333,14 +336,15 @@ type OptionalURL struct {
 
 // ParseOptionalURL returns s as an OptionalURL: an empty s gives one that
 // holds nothing. It returns an error wrapping ErrInvalid when s is not
-// such a URL, saying why.
+// such a URL, saying why without repeating s, which may hold a password.
 func ParseOptionalURL(s string) (OptionalURL, error) {
 	if s == "" {
 		return OptionalURL{}, nil
 	}
 	u, err := parseWebURL(s)
 	if err != nil {
-		return OptionalURL{}, fmt.Errorf("%w value %q: %w; want an http or https URL", ErrInvalid, s, err)
+		return OptionalURL{}, fmt.Errorf("%w value: %w; want an http or https URL "+
+			"(the value is not shown, as a URL may hold a password)", ErrInvalid, err)
 	}
 	return OptionalURL{u: u, set: true}, nil
 }
@@ -351,13 +355,18 @@ func (o OptionalURL) Get() (url.URL, bool) {
 }
 
 // parseWebURL returns s as an absolute http or https URL with a host and
-// no user information, query or fragment, its host in canonical form.
-// Its errors say why s is not one, without repeating s.
+// no user information, query or fragment, whose path holds no character
+// a URL must percent-encode unescaped, its host in canonical form. Its
+// errors say why s is not one, without repeating s.
 func parseWebURL(s string) (url.URL, error) {
 	// Checked on the text, since url.Parse keeps no trace of an empty
-	// query or fragment.
-	if strings.ContainsAny(s, "?#") {
+	// query or fragment, and refuses a control character only as no URL
+	// at all.
+	switch {
+	case strings.ContainsAny(s, "?#"):
 		return url.URL{}, errors.New("it has a query or a fragment")
+	case strings.ContainsFunc(s, control):
+		return url.URL{}, errors.New("it holds a control character")
 	}
 	u, err := url.Parse(s)
 	switch {
@@ -369,6 +378,13 @@ func parseWebURL(s string) (url.URL, error) {
 		return url.URL{}, errors.New("it has no host")
 	case u.User != nil:
 		return url.URL{}, errors.New("it holds user information")
+	// url.Parse keeps a space in a path, as it does other characters RFC
+	// 3986 refuses there, and String then escapes them, so the URL would
+	// not be the one given. The path as given is RawPath, or, when
+	// url.Parse leaves that empty, the path's default escaping, which is
+	// EscapedPath and holds none of them.
+	case !escapedPath(cmp.Or(u.RawPath, u.EscapedPath())):
+		return url.URL{}, errors.New("its path holds a character a URL must percent-encode")
 	}
 	host, err := canonicalHost(u)
 	if err != nil {
@@ -417,6 +433,35 @@ func canonicalHost(u *url.URL) (string, error) {
 		return host, nil
 	}
 	return host + ":" + strconv.Itoa(int(port)), nil
+}
+
+// control reports whether r is an ASCII control character, which a URL
+// holds only percent-encoded.
+func control(r rune) bool {
+	return r < ' ' || r == 0x7f
+}
+
+// escapedPath reports whether p, a URL's path as given, holds only what
+// RFC 3986 lets a path hold as it is: letters, digits, "-._~", the
+// sub-delimiters "!$&'()*+,;=", ":", "@" and "/", and "%" followed by two
+// hex digits.
+func escapedPath(p string) bool {
+	for i := 0; i < len(p); i++ {
+		switch c := p[i]; {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9',
+			strings.IndexByte("-._~!$&'()*+,;=:@/", c) >= 0:
+		case c == '%' && i+2 < len(p) && hexDigit(p[i+1]) && hexDigit(p[i+2]):
+			i += 2
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// hexDigit reports whether c is a hex digit, in either case.
+func hexDigit(c byte) bool {
+	return strings.IndexByte("0123456789abcdefABCDEF", c) >= 0
 }
 
 // parsePort returns s as a port from 1 to 65535.

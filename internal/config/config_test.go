@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"unicode/utf8"
 
 	"github.com/divbast/pisati/internal/config"
 )
@@ -712,6 +713,191 @@ func TestLoadRefusesPlainHTTPBaseURL(t *testing.T) {
 	}
 }
 
+// urlKeys are the settings that hold a URL.
+var urlKeys = []string{"server.base_url", "telemetry.otlp_endpoint", "dev.vite_url"}
+
+// tomlString spells s as a TOML basic string, escaping what TOML does not
+// let one hold as it is.
+func tomlString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r < ' ' || r == 0x7f:
+			fmt.Fprintf(&b, `\u%04X`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// givenIn is where a test gives a setting: its variable or pisati.toml.
+type givenIn uint8
+
+const (
+	inVariable givenIn = iota
+	inFile
+)
+
+// everywhere is each place a setting may be given.
+var everywhere = []givenIn{inVariable, inFile}
+
+func (g givenIn) String() string {
+	if g == inFile {
+		return "in pisati.toml"
+	}
+	return "in its variable"
+}
+
+// loadURLSetting loads the URL setting key set to value, given where
+// says, with a base URL on localhost unless key is the base URL, and
+// returns what Load returns and the setting's label.
+func loadURLSetting(t *testing.T, key, value string, where givenIn) (cfg config.Config, label string, err error) {
+	t.Helper()
+	section, name, _ := strings.Cut(key, ".")
+	variable := "PISATI_" + strings.ToUpper(section+"_"+name)
+	s := setup{env: env{}}
+	if key != "server.base_url" {
+		s.env["PISATI_SERVER_BASE_URL"] = "http://localhost:8080"
+	}
+	switch where {
+	case inVariable:
+		s.env[variable] = value
+	case inFile:
+		s.files = fstest.MapFS{"pisati.toml": tomlFile("[" + section + "]\n" + name + " = " + tomlString(value) + "\n")}
+	}
+	cfg, err = s.load(t.Context())
+	return cfg, key + " (" + variable + ")", err
+}
+
+// TestURLSettingsRefuseUnescapedCharacters holds every URL setting to
+// RFC 3986: a character a URL holds only percent-encoded is refused, from
+// a variable or a file, in an error that names the setting and says why
+// but does not repeat the value; the percent-encoded form is accepted.
+func TestURLSettingsRefuseUnescapedCharacters(t *testing.T) {
+	t.Parallel()
+
+	const (
+		encode  = "a character a URL must percent-encode"
+		control = "a control character"
+	)
+	tests := []struct {
+		name, value, reason string
+	}{
+		// What fuzzing found: a path of one space.
+		{"a path of one space", "http://A/ ", encode},
+		{"a space", "http://localhost:5173/pa th-q7z", encode},
+		{"a tab", "http://localhost:5173/pa\tth-q7z", control},
+		{"a NUL", "http://localhost:5173/pa\x00th-q7z", control},
+		{"a newline", "http://localhost:5173/pa\nth-q7z", control},
+		{"DEL", "http://localhost:5173/pa\x7fth-q7z", control},
+		{"a double quote", `http://localhost:5173/pa"th-q7z`, encode},
+		{"a less-than sign", "http://localhost:5173/pa<th-q7z", encode},
+		{"a greater-than sign", "http://localhost:5173/pa>th-q7z", encode},
+		{"a backslash", `http://localhost:5173/pa\th-q7z`, encode},
+		{"a caret", "http://localhost:5173/pa^th-q7z", encode},
+		{"a grave accent", "http://localhost:5173/pa`th-q7z", encode},
+		{"a brace", "http://localhost:5173/pa{th}-q7z", encode},
+		{"a vertical bar", "http://localhost:5173/pa|th-q7z", encode},
+		{"a bracket", "http://localhost:5173/pa[th]-q7z", encode},
+		{"a letter outside ASCII", "http://localhost:5173/paéth-q7z", encode},
+		{"a byte outside UTF-8", "http://localhost:5173/pa\xffth-q7z", encode},
+	}
+	for _, key := range urlKeys {
+		for _, tt := range tests {
+			for _, where := range everywhere {
+				if where == inFile && !utf8.ValidString(tt.value) {
+					continue // a TOML file is UTF-8, so it cannot hold this value
+				}
+				t.Run(fmt.Sprintf("%s, %s, %v", key, tt.name, where), func(t *testing.T) {
+					t.Parallel()
+
+					_, label, err := loadURLSetting(t, key, tt.value, where)
+					refused(t, err, config.ErrInvalid, label+": invalid", tt.reason)
+					if strings.Contains(err.Error(), tt.value) || strings.Contains(err.Error(), "q7z") {
+						t.Errorf("error %q repeats the value", err)
+					}
+				})
+			}
+		}
+	}
+
+	accepted := []struct{ value, want string }{
+		{"http://LOCALHOST/%20", "http://localhost/%20"},
+		{"http://localhost:5173/pa%20th%09%22%5B%5D%7C%C3%A9", "http://localhost:5173/pa%20th%09%22%5B%5D%7C%C3%A9"},
+		{"http://localhost:5173/a-._~!$&'()*+,;=:@b/%2F", "http://localhost:5173/a-._~!$&'()*+,;=:@b/%2F"},
+	}
+	for _, key := range []string{"telemetry.otlp_endpoint", "dev.vite_url"} {
+		for _, tt := range accepted {
+			for _, where := range everywhere {
+				t.Run(fmt.Sprintf("%s, %s, %v", key, tt.value, where), func(t *testing.T) {
+					t.Parallel()
+
+					cfg, _, err := loadURLSetting(t, key, tt.value, where)
+					if err != nil {
+						t.Fatalf("Load: %v", err)
+					}
+					got := map[string]config.OptionalURL{"telemetry.otlp_endpoint": cfg.Telemetry.OTLPEndpoint, "dev.vite_url": cfg.Dev.ViteURL}[key]
+					if s := optional(got); s != tt.want {
+						t.Errorf("%s = %q, want %q", key, s, tt.want)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestURLErrorsHideUserInformation refuses a URL setting's value that
+// holds user information, from a variable or a file, in an error that
+// names the setting and says why; and no error for any URL setting's
+// value holding a password, whatever else is wrong with it, shows the
+// password.
+func TestURLErrorsHideUserInformation(t *testing.T) {
+	t.Parallel()
+
+	const (
+		secret   = "pw-q7Zx9kP"
+		userInfo = "it holds user information"
+	)
+	tests := []struct {
+		value, reason string
+	}{
+		{"http://someone:" + secret + "@localhost:4318", userInfo},
+		{"https://someone:" + secret + "@blog.example.org/v1", userInfo},
+		{"http://" + secret + "@localhost", userInfo},
+		{"http://someone:" + secret + "@", ""},
+		{"http://someone:" + secret + "@localhost:0", ""},
+		{"http://someone:" + secret + "@localhost/pa th", ""},
+		{"http://someone:" + secret + "@localhost/?x=1", ""},
+		{"http://someone:" + secret + "@localhost#top", ""},
+		{"http://someone:" + secret + "^@localhost", ""},
+		{"http://someone:" + secret + "@local\thost", ""},
+		{"ftp://someone:" + secret + "@localhost", ""},
+		{"someone:" + secret + "@localhost", ""},
+		{"//someone:" + secret + "@localhost", ""},
+	}
+	for _, key := range urlKeys {
+		for _, tt := range tests {
+			for _, where := range everywhere {
+				t.Run(fmt.Sprintf("%s=%q, %v", key, tt.value, where), func(t *testing.T) {
+					t.Parallel()
+
+					_, label, err := loadURLSetting(t, key, tt.value, where)
+					refused(t, err, config.ErrInvalid, label+": invalid", tt.reason)
+					if strings.Contains(err.Error(), secret) {
+						t.Errorf("error %q shows the password", err)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestSettingRules(t *testing.T) {
 	t.Parallel()
 
@@ -1341,6 +1527,10 @@ func FuzzLoad(f *testing.F) {
 	f.Add("[keys]\nmain_key = \"x\"\n[nope]\n", "x = [", "PISATI_NOPE=1\nPISATI_LOG_LEVEL=loud", "relative", false)
 	f.Add("server.base_url = 'https://[::1]:8443'\nserver.hsts = 'preload'", "[server]\nbase_url = \"http://127.0.0.1\"",
 		"PISATI_SERVER_LISTEN=[::1]:1\nPISATI_TELEMETRY_OTLP_ENDPOINT=https://c/v1", "/", false)
+	// The two inputs that found a path of one space, which no URL holds
+	// unescaped, accepted and then spelt back as %20.
+	f.Add("", "[server]\nBAse_url=\"http://127.0.0.1\"", "PISATI_TELEMETRY_OTLP_ENDPOINT=http://A/ ", "/", true)
+	f.Add("", "[server]\nBAse_url=\"http://127.0.0.1\"", "PISATI_TELEMETRY_OTLP_ENDPOINT=http://A/ ", "/", false)
 
 	f.Fuzz(func(t *testing.T, file, dropIn, vars, stateDir string, credential bool) {
 		e := env{}
