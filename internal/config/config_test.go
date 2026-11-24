@@ -1195,25 +1195,26 @@ func TestURLErrorsHideUserInformation(t *testing.T) {
 	t.Parallel()
 
 	const (
+		user     = "someone-Uq7Zk"
 		secret   = "pw-q7Zx9kP"
 		userInfo = "it holds user information"
 	)
 	tests := []struct {
 		value, reason string
 	}{
-		{withUserInfo("http://", "someone", secret, "localhost:4318"), userInfo},
-		{withUserInfo("https://", "someone", secret, "blog.example.org/v1"), userInfo},
+		{withUserInfo("http://", user, secret, "localhost:4318"), userInfo},
+		{withUserInfo("https://", user, secret, "blog.example.org/v1"), userInfo},
 		{"http://" + secret + "@localhost", userInfo},
-		{withUserInfo("http://", "someone", secret, ""), ""},
-		{withUserInfo("http://", "someone", secret, "localhost:0"), ""},
-		{withUserInfo("http://", "someone", secret, "localhost/pa th"), ""},
-		{withUserInfo("http://", "someone", secret, "localhost/?x=1"), ""},
-		{withUserInfo("http://", "someone", secret, "localhost#top"), ""},
-		{withUserInfo("http://", "someone", secret+"^", "localhost"), ""},
-		{withUserInfo("http://", "someone", secret, "local\thost"), ""},
-		{withUserInfo("ftp://", "someone", secret, "localhost"), ""},
-		{withUserInfo("", "someone", secret, "localhost"), ""},
-		{withUserInfo("//", "someone", secret, "localhost"), ""},
+		{withUserInfo("http://", user, secret, ""), ""},
+		{withUserInfo("http://", user, secret, "localhost:0"), ""},
+		{withUserInfo("http://", user, secret, "localhost/pa th"), ""},
+		{withUserInfo("http://", user, secret, "localhost/?x=1"), ""},
+		{withUserInfo("http://", user, secret, "localhost#top"), ""},
+		{withUserInfo("http://", user, secret+"^", "localhost"), ""},
+		{withUserInfo("http://", user, secret, "local\thost"), ""},
+		{withUserInfo("ftp://", user, secret, "localhost"), ""},
+		{withUserInfo("", user, secret, "localhost"), ""},
+		{withUserInfo("//", user, secret, "localhost"), ""},
 	}
 	for _, key := range urlKeys {
 		for _, tt := range tests {
@@ -1223,8 +1224,10 @@ func TestURLErrorsHideUserInformation(t *testing.T) {
 
 					_, label, err := loadURLSetting(t, key, tt.value, where)
 					refused(t, err, config.ErrInvalid, label+": invalid", tt.reason)
-					if strings.Contains(err.Error(), secret) {
-						t.Errorf("error %q shows the password", err)
+					for _, part := range []string{secret, user, user + ":" + secret} {
+						if strings.Contains(err.Error(), part) {
+							t.Errorf("error %q shows %q, of the user information", err, part)
+						}
 					}
 				})
 			}
@@ -1623,6 +1626,20 @@ type devViteURL struct {
 	Valid      bool    `json:"valid"`
 }
 
+// userInfo returns what of c's user information an error must not hold:
+// the user, the password and the two as a URL joins them, for each that
+// c has.
+func (c devViteURL) userInfo() []string {
+	var parts []string
+	if c.User != nil && *c.User != "" {
+		parts = append(parts, *c.User)
+	}
+	if c.Password != nil {
+		parts = append(parts, *c.Password, *c.User+":"+*c.Password)
+	}
+	return parts
+}
+
 // value returns the URL c gives, assembled from its parts when it has
 // them, and whether c is well formed: a URL whole or in parts, not both.
 func (c devViteURL) value() (string, bool) {
@@ -1684,8 +1701,10 @@ func TestDevViteURLs(t *testing.T) {
 				return
 			}
 			refused(t, err, config.ErrInvalid, "dev.vite_url (PISATI_DEV_VITE_URL): invalid")
-			if url != "" && strings.Contains(err.Error(), url) || c.Password != nil && strings.Contains(err.Error(), *c.Password) {
-				t.Errorf("error %q repeats the value", err)
+			for _, part := range append(c.userInfo(), url) {
+				if part != "" && strings.Contains(err.Error(), part) {
+					t.Errorf("error %q repeats %q, of the value", err, part)
+				}
 			}
 		})
 	}

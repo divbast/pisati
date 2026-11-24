@@ -62,6 +62,15 @@ function assembled({ url, scheme, user, password, host }: DevViteURL): string {
   return `${scheme ?? ""}://${user}${password === undefined ? "" : `:${password}`}@${host ?? ""}`;
 }
 
+// What of a case's user information an error must not hold: the user,
+// the password and the two as a URL joins them, for each it has.
+function userInfo({ user, password }: DevViteURL): string[] {
+  return [
+    ...(user === undefined || user === "" ? [] : [user]),
+    ...(password === undefined ? [] : [password, `${user ?? ""}:${password}`]),
+  ];
+}
+
 // Each URL of the table, but for those whose verdict hangs on the base
 // URL, so that Vite refuses PISATI_DEV_VITE_URL exactly when Pisati
 // refuses dev.vite_url, and never repeats it, as it may hold a password.
@@ -75,8 +84,9 @@ it.each(devViteURLs.filter(({ pisatiOnly }) => pisatiOnly !== true))(
       return;
     }
     expect(check).toThrow("PISATI_DEV_VITE_URL: ");
-    expect(check).not.toThrow(url);
-    expect(check).not.toThrow(testCase.password ?? url);
+    for (const part of [url, ...userInfo(testCase)]) {
+      expect(check).not.toThrow(part);
+    }
   },
 );
 
@@ -88,8 +98,12 @@ it("refuses to load the configuration with a URL Pisati refuses", async () => {
   vi.stubEnv("PISATI_DEV_VITE_URL", assembled(withPassword ?? { valid: false }));
   vi.resetModules();
   try {
-    await expect(import("./vite.config.ts")).rejects.toThrow("it holds user information");
-    await expect(import("./vite.config.ts")).rejects.not.toThrow(withPassword?.password ?? "");
+    const loading = import("./vite.config.ts");
+    await expect(loading).rejects.toThrow("it holds user information");
+    const message = await loading.then(() => "", String);
+    for (const part of userInfo(withPassword ?? { valid: false })) {
+      expect(message).not.toContain(part);
+    }
   } finally {
     vi.unstubAllEnvs();
     vi.resetModules();
