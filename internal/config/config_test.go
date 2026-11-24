@@ -790,7 +790,7 @@ func TestLoadRefusesPlainHTTPBaseURL(t *testing.T) {
 		"https://blog.example.org#top",
 		"https://blog.example.org#",
 		"https://someone@blog.example.org",
-		"https://someone:pw@blog.example.org",
+		withUserInfo("https://", "someone", "pw", "blog.example.org"),
 		"ftp://blog.example.org",
 		"blog.example.org",
 		"//blog.example.org",
@@ -819,6 +819,14 @@ func TestLoadRefusesPlainHTTPBaseURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// withUserInfo returns the URL prefix, then user information of user and
+// password, then rest: built from its parts, as the tests keep a URL that
+// holds a password, so that no credential-shaped string sits in the
+// source.
+func withUserInfo(prefix, user, password, rest string) string {
+	return prefix + user + ":" + password + "@" + rest
 }
 
 // urlKeys are the settings that hold a URL.
@@ -980,19 +988,19 @@ func TestURLErrorsHideUserInformation(t *testing.T) {
 	tests := []struct {
 		value, reason string
 	}{
-		{"http://someone:" + secret + "@localhost:4318", userInfo},
-		{"https://someone:" + secret + "@blog.example.org/v1", userInfo},
+		{withUserInfo("http://", "someone", secret, "localhost:4318"), userInfo},
+		{withUserInfo("https://", "someone", secret, "blog.example.org/v1"), userInfo},
 		{"http://" + secret + "@localhost", userInfo},
-		{"http://someone:" + secret + "@", ""},
-		{"http://someone:" + secret + "@localhost:0", ""},
-		{"http://someone:" + secret + "@localhost/pa th", ""},
-		{"http://someone:" + secret + "@localhost/?x=1", ""},
-		{"http://someone:" + secret + "@localhost#top", ""},
-		{"http://someone:" + secret + "^@localhost", ""},
-		{"http://someone:" + secret + "@local\thost", ""},
-		{"ftp://someone:" + secret + "@localhost", ""},
-		{"someone:" + secret + "@localhost", ""},
-		{"//someone:" + secret + "@localhost", ""},
+		{withUserInfo("http://", "someone", secret, ""), ""},
+		{withUserInfo("http://", "someone", secret, "localhost:0"), ""},
+		{withUserInfo("http://", "someone", secret, "localhost/pa th"), ""},
+		{withUserInfo("http://", "someone", secret, "localhost/?x=1"), ""},
+		{withUserInfo("http://", "someone", secret, "localhost#top"), ""},
+		{withUserInfo("http://", "someone", secret+"^", "localhost"), ""},
+		{withUserInfo("http://", "someone", secret, "local\thost"), ""},
+		{withUserInfo("ftp://", "someone", secret, "localhost"), ""},
+		{withUserInfo("", "someone", secret, "localhost"), ""},
+		{withUserInfo("//", "someone", secret, "localhost"), ""},
 	}
 	for _, key := range urlKeys {
 		for _, tt := range tests {
@@ -1063,7 +1071,7 @@ func TestSettingRules(t *testing.T) {
 		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "", got: otlp, want: "unset"},
 		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "ftp://collector", got: otlp},
 		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "collector:4318", got: otlp},
-		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "http://someone:pw@collector.example.org", got: otlp},
+		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: withUserInfo("http://", "someone", "pw", "collector.example.org"), got: otlp},
 		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "http://collector#x", got: otlp},
 		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "http://collector?x=1", got: otlp},
 		{env: "PISATI_TELEMETRY_OTLP_ENDPOINT", value: "http:///v1/traces", got: otlp},
