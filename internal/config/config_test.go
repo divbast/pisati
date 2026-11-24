@@ -676,6 +676,24 @@ func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 			value: []string{"U+", "\x01"},
 		},
 		{
+			name:  "a bad value on a later line of an array",
+			file:  "[server]\ntrusted_proxies = [ # a ] here closes nothing\n  \"10.0.0.0/8\",\n  Ж,\n]\n",
+			want:  "pisati.toml:4:3: server.trusted_proxies" + fixed,
+			value: []string{"Ж", "Ð", "U+"},
+		},
+		{
+			name:  "an invalid escape in a string of many lines, under lines like a table and a comment",
+			file:  "[keys]\nmain_key = \"\"\"\n[log]\n# a ' and a \"\n\\q\"\"\"\n",
+			want:  "pisati.toml:5:1: keys.main_key" + fixed,
+			value: []string{"'q'", "U+"},
+		},
+		{
+			name:  "a bad value after a string of many lines and a table with a comment",
+			file:  "[log]\nlevel = '''\n\"\"\"\n'''\n[keys] # the key\nmain_key = Жx\n",
+			want:  "pisati.toml:6:12: keys.main_key" + fixed,
+			value: []string{"Ж", "Ð", "U+"},
+		},
+		{
 			name:  "a table name left open",
 			file:  "[keys\n",
 			want:  "pisati.toml:1:6: keys" + fixed,

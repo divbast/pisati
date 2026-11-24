@@ -7,83 +7,123 @@ import (
 	"bytes"
 	"slices"
 
-	"github.com/pelletier/go-toml/v2/unstable"
+	"github.com/pelletier/go-toml/v2"
 )
 
 // failedKey returns the key of the expression data fails to parse in, as
 // TOML, at offset at, with the table that holds it: as much of the key as
 // reads, or the table alone when no key does or the failure is in a
-// comment. It returns nil when data parses, or when nothing names the
-// place. go-toml's errors name the key for a value it cannot decode, but
+// comment. go-toml's errors name the key for a value it cannot decode, but
 // none for text that does not parse.
+//
+// Every expression before the one that fails is valid TOML, so a scan that
+// follows only lines, strings, brackets and comments finds where each
+// starts, and so where the failing one does and the table it is in.
 func failedKey(data []byte, at int) []string {
-	var p unstable.Parser
-	p.Reset(data)
+	start, header := expressionAt(data, at)
 	var table []string
-	end := 0
-	for p.NextExpression() {
-		// Each expression ends its line, but for a comment: a table
-		// header after its key, a key-value after its value.
-		e := p.Expression()
-		if header(e.Kind) {
-			table = keyOf(e)
-			end = lineEnd(data, keyEnd(e))
-		} else {
-			end = lineEnd(data, int(e.Raw.Offset+e.Raw.Length))
-		}
+	if header >= 0 {
+		table = headerKey(data[header:])
 	}
-	if p.Error() == nil {
-		return nil
+	rest := data[start:]
+	switch {
+	case len(rest) == 0 || rest[0] == '#':
+		return table
+	case rest[0] == '[':
+		return headerKey(rest)
 	}
-	rest := data[expressionStart(data, end, at):]
-	if h, ok := bytes.CutPrefix(rest, []byte("[")); ok {
-		h = bytes.TrimPrefix(h, []byte("["))
-		return keyParts(h[blanks(h):])
-	}
-	return append(slices.Clone(table), keyParts(rest)...)
+	return append(table, keyParts(rest)...)
 }
 
-// header reports whether an expression of kind k is a table header.
-func header(k unstable.Kind) bool {
-	return k == unstable.Table || k == unstable.ArrayTable
-}
-
-// expressionStart returns where the expression that fails at offset at
-// starts: past the white space, line endings and comments from offset
-// from on, but not past at. A failure in a comment so ends the comment's
-// line, where no key starts.
-func expressionStart(data []byte, from, at int) int {
-	i := from
-	for i < at && i < len(data) {
-		switch data[i] {
-		case ' ', '\t', '\r', '\n':
+// expressionAt returns where the expression of data that holds offset at
+// starts, a comment counting as one, and where the last table header
+// before it starts, or -1 when there is none.
+func expressionAt(data []byte, at int) (start, header int) {
+	header = -1
+	i := 0
+	for {
+		for i < len(data) && bytes.IndexByte([]byte(" \t\r\n"), data[i]) >= 0 {
 			i++
-		case '#':
-			i = lineEnd(data, i)
-		default:
+		}
+		if i >= at || i >= len(data) {
+			return i, header
+		}
+		end := expressionEnd(data, i)
+		if at < end {
+			return i, header
+		}
+		if data[i] == '[' {
+			header = i
+		}
+		i = end
+	}
+}
+
+// expressionEnd returns the offset of the line ending that ends the
+// expression starting at offset i of data, or the length of data: the
+// first one outside a string and outside brackets and braces, which a
+// table header and a key-value's arrays and inline tables open, comments
+// skipped.
+func expressionEnd(data []byte, i int) int {
+	depth := 0
+	for i < len(data) {
+		switch c := data[i]; {
+		case c == '\n' && depth == 0:
 			return i
+		case c == '#':
+			i = lineEnd(data, i)
+			continue
+		case c == '"' || c == '\'':
+			i = stringEnd(data, i)
+			continue
+		case c == '[' || c == '{':
+			depth++
+		case (c == ']' || c == '}') && depth > 0:
+			depth--
+		}
+		i++
+	}
+	return len(data)
+}
+
+// stringEnd returns the offset just past the string that starts at offset
+// i of data, basic or literal, on one line or many; or where the text
+// ends, or the line does for a string on one line, when it is not closed.
+func stringEnd(data []byte, i int) int {
+	q := data[i]
+	delim := []byte{q, q, q}
+	if bytes.HasPrefix(data[i:], delim) {
+		for j := i + 3; j < len(data); j++ {
+			switch {
+			case q == '"' && data[j] == '\\':
+				j++ // the escaped character, which cannot end the string
+			case bytes.HasPrefix(data[j:], delim):
+				// Up to two more quotes are the string's, before its end.
+				end := j + 3
+				for n := 0; n < 2 && end < len(data) && data[end] == q; n++ {
+					end++
+				}
+				return end
+			}
+		}
+		return len(data)
+	}
+	for j := i + 1; j < len(data) && data[j] != '\n'; j++ {
+		switch {
+		case q == '"' && data[j] == '\\':
+			j++
+		case data[j] == q:
+			return j + 1
 		}
 	}
-	return i
+	return lineEnd(data, i)
 }
 
-// keyOf returns the parts of the key of e, a table header or a key-value,
-// as TOML reads them: a quoted part without its quotes and escapes.
-func keyOf(e *unstable.Node) []string {
-	var parts []string
-	for it := e.Key(); it.Next(); {
-		parts = append(parts, string(it.Node().Data))
-	}
-	return parts
-}
-
-// keyEnd returns the offset just past the last part of e's key.
-func keyEnd(e *unstable.Node) int {
-	end := 0
-	for it := e.Key(); it.Next(); {
-		end = int(it.Node().Raw.Offset + it.Node().Raw.Length)
-	}
-	return end
+// headerKey returns the parts of the key of the table header b starts
+// with, as far as it reads.
+func headerKey(b []byte) []string {
+	b = bytes.TrimPrefix(bytes.TrimPrefix(b, []byte("[")), []byte("["))
+	return keyParts(b[blanks(b):])
 }
 
 // lineEnd returns the offset of the newline that ends the line holding
@@ -96,19 +136,27 @@ func lineEnd(data []byte, i int) int {
 }
 
 // keyParts returns the parts of the key b starts with, as far as it reads
-// as one, or nil when it starts with none.
+// as one, or nil when it starts with none: a quoted part without its
+// quotes and escapes, as go-toml reads it.
 func keyParts(b []byte) []string {
 	n := keyLength(b)
 	if n == 0 {
 		return nil
 	}
-	// The key alone, made a whole expression for the parser to read.
-	var p unstable.Parser
-	p.Reset(append(slices.Clone(b[:n]), " = 0"...))
-	if !p.NextExpression() || p.Expression().Kind != unstable.KeyValue {
+	// The key alone, made a whole document for go-toml to decode, as
+	// nested tables down to the one value.
+	var doc map[string]any
+	if err := toml.Unmarshal(append(slices.Clone(b[:n]), " = 0"...), &doc); err != nil {
 		return nil
 	}
-	return keyOf(p.Expression())
+	var parts []string
+	for table, ok := doc, true; ok && len(table) == 1; {
+		for name, v := range table {
+			parts = append(parts, name)
+			table, ok = v.(map[string]any)
+		}
+	}
+	return parts
 }
 
 // keyLength returns the length of the dotted key b starts with, as TOML
