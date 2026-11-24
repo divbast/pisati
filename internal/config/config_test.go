@@ -1661,10 +1661,22 @@ func TestDevViteURLs(t *testing.T) {
 		t.Run(fmt.Sprintf("%q beside %q", url, c.Base), func(t *testing.T) {
 			t.Parallel()
 
-			_, err := setup{env: env{
-				"PISATI_SERVER_BASE_URL": cmp.Or(c.Base, "http://localhost:8080"), "PISATI_DEV_VITE_URL": url,
-				"PISATI_DEV_VITE_CERT_FILE": "/certs/localhost.pem", "PISATI_DEV_VITE_KEY_FILE": "/certs/localhost-key.pem",
-			}}.load(t.Context())
+			load := func(base string) error {
+				_, err := setup{env: env{
+					"PISATI_SERVER_BASE_URL": base, "PISATI_DEV_VITE_URL": url,
+					"PISATI_DEV_VITE_CERT_FILE": "/certs/localhost.pem", "PISATI_DEV_VITE_KEY_FILE": "/certs/localhost-key.pem",
+				}}.load(t.Context())
+				return err
+			}
+			const local = "http://localhost:8080"
+			err := load(cmp.Or(c.Base, local))
+			// The mark says the verdict hangs on the base URL: a case
+			// marked is taken otherwise beside one on localhost, and one
+			// not marked is taken the same.
+			if hangs := (err == nil) != (load(local) == nil); hangs != c.PisatiOnly {
+				t.Errorf("pisatiOnly is %v, but beside %s the case is taken %s", c.PisatiOnly, local,
+					map[bool]string{true: "otherwise", false: "the same"}[hangs])
+			}
 			if c.Valid {
 				if err != nil {
 					t.Fatalf("Load: %v", err)
