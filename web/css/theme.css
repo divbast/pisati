@@ -45,7 +45,9 @@
     /*
      * Selected text of every kind, muted text among it, reads in
      * --color-text on the selection, as base.css's ::selection sets
-     * it, and --color-text keeps 4.5:1 on it in both schemes.
+     * it, and --color-text keeps 4.5:1 on it in both schemes. iOS
+     * Safari ignores ::selection altogether and shows the system's own
+     * highlight, whose contrast is outside the page's control.
      */
     --color-selection: light-dark(
       oklch(88% 0.06 var(--accent-hue)),

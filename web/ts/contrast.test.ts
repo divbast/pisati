@@ -108,9 +108,9 @@ function clamp(v: number): number {
 }
 
 // Linear sRGB of an oklch colour, each channel clipped to sRGB, as
-// browsers show a colour outside the screen's gamut. CSS Color 4 asks for
-// the chroma to be reduced instead, but browsers ship clipping, so the
-// test measures the colour they show.
+// browsers show a colour outside sRGB on an sRGB screen. CSS Color 4 asks
+// for the chroma to be reduced instead, but browsers ship clipping, so
+// the test measures the colour they show there.
 function rgb([l, c, h]: readonly [number, number, number]): Rgb {
   const [r, g, b] = linear([l, c, h]);
   return [clamp(r), clamp(g), clamp(b)];
@@ -240,9 +240,9 @@ it.each(["gray-2", "Hint", "x_y"])("reads --color-%s whatever its name", (name) 
   ]);
 });
 
-// Browsers show a colour outside sRGB by clipping each channel to it, not
-// by reducing its chroma as CSS Color 4 describes: the worst a screen
-// shows, which the test therefore measures.
+// Browsers show a colour outside sRGB on an sRGB screen by clipping each
+// channel to it, not by reducing its chroma as CSS Color 4 describes, so
+// the test measures that.
 it("clips a colour outside sRGB per channel, as browsers show it", () => {
   expect(rgb([0.7, 0.4, 30])).toEqual([1, 0, 0]);
 });
