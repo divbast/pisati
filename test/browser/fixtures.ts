@@ -70,8 +70,9 @@ export const themeCookie = "pisati-theme";
 
 /**
  * Waits until no animation or transition runs on page, so that what is
- * checked is the page at rest: Chromium, for one, moves the theme
- * buttons from its own button colour to the stylesheet's as a page loads.
+ * checked is the page at rest, once something a test did has set
+ * something moving: a button under the pointer changes its colour as the
+ * pointer arrives.
  */
 export async function settle(page: Page): Promise<void> {
   await page.evaluate(async () => {
@@ -80,12 +81,29 @@ export async function settle(page: Page): Promise<void> {
 }
 
 /**
- * Fails the test on any axe-core violation on page once it is at rest,
- * naming each rule and the elements that break it. Every rule axe-core
- * runs by default is checked: WCAG 2.2 A and AA, and its best practices.
+ * Fails the test unless nothing on page moves: no animation or transition
+ * runs. A page appears in its final colours, from its first paint, so a
+ * test can check it as soon as it has loaded, with nothing to wait for.
+ */
+export async function expectAtRest(page: Page): Promise<void> {
+  const moving = await page.evaluate(() =>
+    document.getAnimations().map((animation) => {
+      const target = animation.effect instanceof KeyframeEffect ? animation.effect.target : null;
+      return `${animation.constructor.name} on ${target?.nodeName ?? "nothing"}`;
+    }),
+  );
+  expect(moving).toEqual([]);
+}
+
+/**
+ * Fails the test on any axe-core violation on page, naming each rule and
+ * the elements that break it, once it has checked that page is at rest
+ * (expectAtRest): a colour axe-core measures mid-change is no colour the
+ * reader sees. Every rule axe-core runs by default is checked: WCAG 2.2 A
+ * and AA, and its best practices.
  */
 export async function expectNoAxeViolations(page: Page): Promise<void> {
-  await settle(page);
+  await expectAtRest(page);
   const results = await new AxeBuilder({ page }).analyze();
   const found = results.violations.map(({ id, nodes }) => ({
     id,

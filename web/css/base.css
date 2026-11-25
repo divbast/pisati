@@ -230,11 +230,17 @@
     background-color: var(--color-accent);
     border: var(--border-width) solid transparent;
     border-radius: var(--radius-s);
-    transition: background-color var(--duration-fast) var(--ease-out);
 
-    /* A disabled button stays as it is under the pointer. */
+    /*
+     * A disabled button stays as it is under the pointer. The colour
+     * moves only as the pointer arrives: with the transition on every
+     * button, Chromium faded each one in from its own grey as a page it
+     * had cached appeared, as it styles a button once before the
+     * stylesheet applies. Leaving, the colour changes at once.
+     */
     &:hover:not(:disabled) {
       background-color: var(--color-accent-strong);
+      transition: background-color var(--duration-fast) var(--ease-out);
     }
 
     &:disabled {

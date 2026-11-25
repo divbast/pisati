@@ -7,7 +7,14 @@
 
 import type { Page } from "@playwright/test";
 
-import { expectNoAxeViolations, expect, test, themeCookie } from "./fixtures.ts";
+import {
+  expectAtRest,
+  expectNoAxeViolations,
+  expect,
+  settle,
+  test,
+  themeCookie,
+} from "./fixtures.ts";
 
 /** A page a reader can reach by its address. */
 interface Visited {
@@ -84,7 +91,24 @@ for (const theme of themes) {
       await page.getByRole("button", { name: "Sign in" }).click();
       expect((await answer).status()).toBe(501);
       await expect(page.getByRole("heading", { level: 1 })).toHaveText("Not available yet");
+      // The pointer still rests where it clicked, and a button the new
+      // page has there takes its hover colour.
+      await settle(page);
       await expectNoAxeViolations(page);
     });
+  });
+}
+
+// A page appears in its final colours at once, whether the browser loads
+// it afresh or from its cache, which is where Chromium showed every button
+// fading in from its own grey.
+for (const visit of visited) {
+  test(`the ${visit.name} page appears in its final colours`, async ({ page }) => {
+    await page.goto(visit.path);
+    await expectAtRest(page);
+    await page.goto(visit.path);
+    await expectAtRest(page);
+    await page.reload();
+    await expectAtRest(page);
   });
 }
