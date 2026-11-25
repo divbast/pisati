@@ -116,7 +116,8 @@ _goleak-in-step:
 # tracked anywhere or present at the root, where they read one: an ignore
 # file (.betterleaksignore, .gitleaksignore), or a configuration file of
 # rules and allowlists (.betterleaks.toml, .gitleaks.toml). Each pattern
-# brackets one character, so that this recipe never matches itself. Only
+# brackets one character, so that this recipe never matches itself, and
+# names match in any case, as macOS's file system does. Only
 # grep's "no match" may end a search without failing the recipe: the file
 # list is read on its own, so that a git that fails fails the gate.
 
@@ -128,7 +129,7 @@ _one-suppression:
         -e '#[n]osec' -e 'gitleaks[:]allow' -e 'betterleaks[:]allow' || [[ $? -eq 1 ]])
     files=$(git ls-files)
     files+=$'\n'$(ls -A)
-    ignores=$(grep -E '(^|/)[.](git|better)leaks([.]toml|ignore)$' <<<"${files}" | sort -u || [[ $? -eq 1 ]])
+    ignores=$(grep -i -E '(^|/)[.](git|better)leaks([.]toml|ignore)$' <<<"${files}" | sort -u || [[ $? -eq 1 ]])
     status=0
     if [[ -n "${hits}" ]]; then
         while IFS=: read -r file line what; do
