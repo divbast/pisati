@@ -51,7 +51,7 @@
       }
     },
     {
-      "description": "pnpm as mise.toml installs it and as package.json's packageManager names it move in one PR, after the same 7 days, so the pnpm that installs locally and in CI is the one Renovate updates the lockfile with.",
+      "description": "pnpm as mise.toml installs it, as package.json's packageManager names it, and as build/pnpm/package.json pins it for the Containerfile's Node stage move in one PR, after the same 7 days, so the pnpm that installs locally, in CI and in the image build is the one Renovate updates the lockfile with.",
       "matchManagers": ["mise", "npm"],
       "matchDepNames": ["pnpm"],
       "groupName": "pnpm",
