@@ -52,10 +52,10 @@ type sessionKey struct{}
 func SessionMiddleware(sessions *app.Sessions, log *slog.Logger) httpx.Middleware {
 	name := sessions.CookieName()
 	if name == "" {
-		panic("web: SessionMiddleware needs Sessions made by app.NewSessions")
+		panic("web.SessionMiddleware was given Sessions that app.NewSessions did not make, which is a bug in Pisati")
 	}
 	if log == nil {
-		panic("web: SessionMiddleware needs a logger")
+		panic("web.SessionMiddleware was given no logger, which is a bug in Pisati")
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +82,8 @@ func SessionMiddleware(sessions *app.Sessions, log *slog.Logger) httpx.Middlewar
 				if errors.Is(err, context.Canceled) {
 					return
 				}
-				log.ErrorContext(r.Context(), "session load failed", "error", err)
+				log.ErrorContext(r.Context(), "session not read from the database, so the request was answered with "+
+					"status 500", "error", err)
 				w.Header().Set("Cache-Control", "no-store")
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return

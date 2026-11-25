@@ -67,7 +67,7 @@ func (s *Site) notFound(w http.ResponseWriter, r *http.Request) {
 // nothing of it.
 func (s *Site) serverError(w http.ResponseWriter, r *http.Request, err error) {
 	l := msg.English
-	s.log.ErrorContext(r.Context(), "request failed", "error", err)
+	s.log.ErrorContext(r.Context(), "request answered with status 500, because of an error in Pisati", "error", err)
 	s.problem(w, r, http.StatusInternalServerError, msg.ServerErrorTitle(l), msg.ServerErrorBody(l))
 }
 

@@ -709,14 +709,14 @@ func TestLoadWithTheWriteLockHeld(t *testing.T) {
 	if took := time.Since(began); took > time.Second {
 		t.Errorf("Load with no touch due took %s: it waited for the write lock", took)
 	}
-	wantLogged(t, logs, "session touch failed", "WARN", 0, c.Value)
+	wantLogged(t, logs, "session's last-seen time not saved", "WARN", 0, c.Value)
 
 	clock.set(start.Add(time.Minute))
 	sess, ok, err := sessions.Load(t.Context(), tok)
 	if user, _ := sess.User(); err != nil || !ok || user != 6 {
 		t.Errorf("Load with a touch due, past the busy timeout = user %d, %t, %v; want user 6's session", user, ok, err)
 	}
-	wantLogged(t, logs, "session touch failed", "WARN", 1, c.Value)
+	wantLogged(t, logs, "session's last-seen time not saved", "WARN", 1, c.Value)
 	if !strings.Contains(logs.String(), "locked") {
 		t.Errorf("the failed touch's record does not say the database was locked:\n%s", logs)
 	}
@@ -761,7 +761,7 @@ func TestLoadServesTheSessionWhenTheTouchFails(t *testing.T) {
 
 	clock.set(start.Add(time.Minute))
 	wantUser(t, sessions, c.Value, 4, "a touch due, which fails")
-	wantLogged(t, logs, "session touch failed", "WARN", 1, c.Value)
+	wantLogged(t, logs, "session's last-seen time not saved", "WARN", 1, c.Value)
 	if r := mustRow(t, s, c.Value, "after the failed touch"); r.lastSeen != ms(start) {
 		t.Errorf("row last seen at %+d ms, want unchanged", r.lastSeen-ms(start))
 	}
@@ -780,7 +780,7 @@ func TestLoadSignsOutWhenTheExpiredDeleteFails(t *testing.T) {
 
 	clock.set(start.Add(auth.IdleLimit))
 	wantNoSession(t, sessions, c.Value, "idle for a week, its delete failing")
-	wantLogged(t, logs, "expired session delete failed", "WARN", 1, c.Value)
+	wantLogged(t, logs, "expired session not deleted", "WARN", 1, c.Value)
 	mustRow(t, s, c.Value, "after the failed delete")
 
 	exec(t, s, `DROP TRIGGER refuse_delete`)

@@ -33,10 +33,12 @@ var (
 	// that is not one Vite writes, or that names a file the build lacks,
 	// a file outside it, one too big, one of a type Assets does not serve,
 	// or an entry that would load files a page could not check.
-	ErrBuild = errors.New("unusable front-end build")
+	ErrBuild = errors.New("the front end built into this Pisati cannot be served, which is a fault in how this " +
+		"Pisati was built")
 	// ErrDevServer is dev mode with the Vite dev server or the base URL
 	// away from localhost, 127.0.0.1 and [::1].
-	ErrDevServer = errors.New("the Vite dev server is for development on localhost alone")
+	ErrDevServer = errors.New("the Vite dev server is for development on this machine only, which config.Load " +
+		"ensures, so this is a bug in Pisati")
 )
 
 const (
@@ -67,7 +69,7 @@ var dist embed.FS
 func Dist() fs.FS {
 	sub, err := fs.Sub(dist, "dist")
 	if err != nil {
-		panic("web: fs.Sub refused dist, which is a valid path: " + err.Error())
+		panic("fs.Sub refused the path dist, which is a valid path, so this is a bug in Pisati: " + err.Error())
 	}
 	return sub
 }
@@ -304,9 +306,10 @@ func (a *Assets) Handler() http.Handler {
 // served at base, or an error wrapping ErrDevServer unless both are on
 // localhost, 127.0.0.1 or [::1].
 func devOrigin(base config.BaseURL, vite config.Origin) (string, error) {
+	// The error shows neither URL: no URL is ever shown.
 	if !base.IsLocal() || !vite.IsLocal() {
-		return "", fmt.Errorf("%w: the dev server %s and the base URL %q must both be on localhost, 127.0.0.1 or [::1]",
-			ErrDevServer, vite.String(), base.String())
+		return "", fmt.Errorf("%w: web.NewAssets was given a Vite dev server and a base URL that are not both on "+
+			"localhost, 127.0.0.1 or [::1]", ErrDevServer)
 	}
 	return vite.String(), nil
 }
@@ -342,23 +345,25 @@ func parseManifest(raw []byte) (manifest, error) {
 	dec.DisallowUnknownFields()
 	var m manifest
 	if err := dec.Decode(&m); err != nil {
-		return nil, fmt.Errorf("%w: %s: %w", ErrBuild, manifestPath, err)
+		return nil, fmt.Errorf("%w: Vite's manifest, %s, cannot be read as one: %w", ErrBuild, manifestPath, err)
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("%w: %s holds more than one JSON value", ErrBuild, manifestPath)
+		return nil, fmt.Errorf("%w: Vite's manifest, %s, holds more than one JSON value", ErrBuild, manifestPath)
 	}
 	if m == nil {
-		return nil, fmt.Errorf("%w: %s is null, not an object", ErrBuild, manifestPath)
+		return nil, fmt.Errorf("%w: Vite's manifest, %s, is null, not a JSON object", ErrBuild, manifestPath)
 	}
 	var errs []error
 	for _, key := range slices.Sorted(maps.Keys(m)) {
 		c := m[key]
 		if c.IsEntry && len(c.Imports)+len(c.DynamicImports)+len(c.CSS) > 0 {
-			errs = append(errs, fmt.Errorf("%w: entry %q imports other files, which its tag would load unchecked", ErrBuild, key))
+			errs = append(errs, fmt.Errorf("%w: the entry %q of Vite's manifest loads other files, which a page could "+
+				"not check", ErrBuild, key))
 		}
 		for _, name := range c.files() {
 			if err := servable(name); err != nil {
-				errs = append(errs, fmt.Errorf("%w: %q names %q: %w", ErrBuild, key, name, err))
+				errs = append(errs, fmt.Errorf("%w: the entry %q of Vite's manifest names the file %q, but %w", ErrBuild,
+					key, name, err))
 			}
 		}
 	}
@@ -366,7 +371,8 @@ func parseManifest(raw []byte) (manifest, error) {
 	// manifest says the inputs build to.
 	for _, want := range [...]struct{ input, ext string }{{styleInput, ".css"}, {scriptInput, ".js"}} {
 		if c, ok := m[want.input]; ok && c.IsEntry && path.Ext(c.File) != want.ext {
-			errs = append(errs, fmt.Errorf("%w: the input %q builds to %q, not a %s file", ErrBuild, want.input, c.File, want.ext))
+			errs = append(errs, fmt.Errorf("%w: Vite's manifest says the input %q builds to %q, which is not a %s file",
+				ErrBuild, want.input, c.File, want.ext))
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
@@ -399,11 +405,11 @@ func (m manifest) served() []string {
 func servable(name string) error {
 	switch _, typed := contentType(name); {
 	case !fs.ValidPath(name) || name == ".":
-		return errors.New("it is not a clean path inside the build")
+		return errors.New("that is not a clean path inside the build")
 	case name == ".vite" || strings.HasPrefix(name, ".vite/"):
-		return errors.New("it is the manifest's own directory")
+		return errors.New("that is in the manifest's own directory, .vite")
 	case !typed:
-		return errors.New("Assets serves no file of its type")
+		return errors.New("that is a file of a type that Pisati does not serve: it serves stylesheets and scripts only")
 	}
 	return nil
 }
@@ -412,7 +418,7 @@ func servable(name string) error {
 func readBuilt(ctx context.Context, fsys fs.FS, name string) (file, error) {
 	data, err := readFile(ctx, fsys, name, maxFile)
 	if errors.Is(err, fs.ErrNotExist) {
-		return file{}, fmt.Errorf("%w: the manifest names %q, which the build lacks: %w", ErrBuild, name, err)
+		return file{}, fmt.Errorf("%w: Vite's manifest names the file %q, which is not in the build: %w", ErrBuild, name, err)
 	}
 	if err != nil {
 		return file{}, err
@@ -440,7 +446,8 @@ func readFile(ctx context.Context, fsys fs.FS, name string, limit int64) (data [
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("%w: %q is bigger than %d bytes", ErrBuild, name, limit)
+		return nil, fmt.Errorf("%w: the file %q of the build is larger than %d bytes, more than Pisati serves", ErrBuild,
+			name, limit)
 	}
 	return data, nil
 }

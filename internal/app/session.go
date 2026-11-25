@@ -163,19 +163,19 @@ type Sessions struct {
 func NewSessions(s *store.Store, clock func() time.Time, rnd io.Reader, base config.BaseURL, log *slog.Logger) (*Sessions, error) {
 	var errs []error
 	if s.DB() == nil {
-		errs = append(errs, errors.New("app: sessions need a store made by store.Open"))
+		errs = append(errs, errors.New("app.NewSessions was given a store that store.Open did not return, "+bug))
 	}
 	if clock == nil {
-		errs = append(errs, errors.New("app: sessions need a clock"))
+		errs = append(errs, errors.New("app.NewSessions was given no clock, "+bug))
 	}
 	if rnd == nil {
-		errs = append(errs, errors.New("app: sessions need a random source"))
+		errs = append(errs, errors.New("app.NewSessions was given no random source, "+bug))
 	}
 	if base == (config.BaseURL{}) {
-		errs = append(errs, errors.New("app: sessions need the base URL, and the zero BaseURL is none"))
+		errs = append(errs, errors.New("app.NewSessions was given the zero BaseURL, "+bug))
 	}
 	if log == nil {
-		errs = append(errs, errors.New("app: sessions need a logger"))
+		errs = append(errs, errors.New("app.NewSessions was given no logger, "+bug))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
@@ -222,7 +222,7 @@ func (s *Sessions) cookie(value string, maxAge int) http.Cookie {
 // made returns an error for Sessions that NewSessions did not make.
 func (s *Sessions) made() error {
 	if s == nil || s.store == nil {
-		return errors.New("app: the Sessions was not made by NewSessions")
+		return errors.New("app.Sessions was used without app.NewSessions, " + bug)
 	}
 	return nil
 }
@@ -277,7 +277,7 @@ func (s *Sessions) Load(ctx context.Context, t Token) (Session, bool, error) {
 		return Session{}, false, nil
 	}
 	if err != nil {
-		return Session{}, false, fmt.Errorf("app: load a session: %w", err)
+		return Session{}, false, fmt.Errorf("the session cannot be read from the database: %w", err)
 	}
 
 	now := s.clock()
@@ -296,19 +296,20 @@ func (s *Sessions) Load(ctx context.Context, t Token) (Session, bool, error) {
 				IDHash:      key,
 				TouchBefore: now.Add(-auth.TouchInterval).UnixMilli(),
 			}); err != nil && ctx.Err() == nil {
-				s.log.WarnContext(ctx, "session touch failed", "error", err)
+				s.log.WarnContext(ctx, "session's last-seen time not saved", "error", err)
 			}
 		}
 		return sessionOf(row), true, nil
 	case auth.IdleExpired, auth.AbsoluteExpired:
 		if err := q.DeleteSession(ctx, key); err != nil && ctx.Err() == nil {
-			s.log.WarnContext(ctx, "expired session delete failed", "error", err)
+			s.log.WarnContext(ctx, "expired session not deleted", "error", err)
 		}
 		return Session{}, false, nil
 	default:
 		// Only a type outside auth that embeds a state reaches here: a
 		// bug, which must sign no one in.
-		return Session{}, false, fmt.Errorf("app: load a session: auth.Evaluate returned an unknown %T", state)
+		return Session{}, false, fmt.Errorf("auth.Evaluate returned a session state of the type %T, which "+
+			"app.Sessions.Load does not know, %s", state, bug)
 	}
 }
 
@@ -324,15 +325,17 @@ func (s *Sessions) Renew(ctx context.Context, user auth.UserID) (http.Cookie, er
 		return http.Cookie{}, err
 	}
 	if user <= 0 {
-		return http.Cookie{}, fmt.Errorf("app: start a session: user ID %d is not positive", user)
+		return http.Cookie{}, fmt.Errorf("app.Sessions.Renew was given the user ID %d, but a user ID is above 0, %s",
+			user, bug)
 	}
 	var id sessionID
 	if _, err := io.ReadFull(s.rnd, id[:]); err != nil {
-		return http.Cookie{}, fmt.Errorf("app: draw a session ID: %w", err)
+		return http.Cookie{}, fmt.Errorf("no random bytes can be read for a new session's ID: %w", err)
 	}
 	// All zero is what a source that never filled the buffer leaves.
 	if id == (sessionID{}) {
-		return http.Cookie{}, errors.New("app: draw a session ID: the random source gave all zero bytes")
+		return http.Cookie{}, errors.New("the random source gave only zero bytes for a new session's ID, so no " +
+			"session is started")
 	}
 	now := s.clock().UnixMilli()
 	if err := s.store.Queries().InsertSession(ctx, storedb.InsertSessionParams{
@@ -342,7 +345,7 @@ func (s *Sessions) Renew(ctx context.Context, user auth.UserID) (http.Cookie, er
 		LastSeenAt: now,
 		ExpiresAt:  expiresAt(now, now),
 	}); err != nil {
-		return http.Cookie{}, fmt.Errorf("app: store a session: %w", err)
+		return http.Cookie{}, fmt.Errorf("the new session cannot be saved in the database: %w", err)
 	}
 	return s.cookie(idEncoding().EncodeToString(id[:]), liveMaxAge), nil
 }
@@ -356,7 +359,7 @@ func (s *Sessions) Destroy(ctx context.Context, t Token) (http.Cookie, error) {
 	}
 	if key, ok := t.key(); ok {
 		if err := s.store.Queries().DeleteSession(ctx, key); err != nil {
-			return http.Cookie{}, fmt.Errorf("app: destroy a session: %w", err)
+			return http.Cookie{}, fmt.Errorf("the session cannot be deleted from the database: %w", err)
 		}
 	}
 	return s.Clear(), nil
@@ -369,10 +372,11 @@ func (s *Sessions) DestroyAllForUser(ctx context.Context, user auth.UserID) erro
 		return err
 	}
 	if user <= 0 {
-		return fmt.Errorf("app: destroy a user's sessions: user ID %d is not positive", user)
+		return fmt.Errorf("app.Sessions.DestroyAllForUser was given the user ID %d, but a user ID is above 0, %s",
+			user, bug)
 	}
 	if _, err := s.store.Queries().DeleteUserSessions(ctx, sql.NullInt64{Int64: int64(user), Valid: true}); err != nil {
-		return fmt.Errorf("app: destroy a user's sessions: %w", err)
+		return fmt.Errorf("the user's sessions cannot be deleted from the database: %w", err)
 	}
 	return nil
 }
@@ -396,7 +400,7 @@ func (s *Sessions) Sweep(ctx context.Context) (int, error) {
 			return err
 		})
 		if err != nil {
-			return removed, fmt.Errorf("app: sweep sessions: %w", err)
+			return removed, fmt.Errorf("the expired sessions cannot be deleted from the database: %w", err)
 		}
 		removed += int(n)
 		if n < sweepBatch {
@@ -419,7 +423,8 @@ func (s *Sessions) SweepEvery(ctx context.Context, every time.Duration) error {
 		return err
 	}
 	if every <= 0 {
-		return fmt.Errorf("app: sweep sessions every %v: the interval must be positive", every)
+		return fmt.Errorf("app.Sessions.SweepEvery was given the interval %v, but it must be longer than 0, %s",
+			every, bug)
 	}
 	tick := time.NewTicker(every)
 	defer tick.Stop()

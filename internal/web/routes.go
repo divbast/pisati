@@ -61,7 +61,7 @@ const noBody httpx.ByteLimit = 0
 // panics on it, as the site's routes are registered once, at start.
 func Route(mux *http.ServeMux, pattern string, a Access, iso httpx.Isolation, limit httpx.ByteLimit, h http.Handler) {
 	if mux == nil || h == nil {
-		panic("web: Route " + pattern + " needs a mux and a handler")
+		panic("web.Route was given no mux or no handler for " + pattern + ", which is a bug in Pisati")
 	}
 	inner := httpx.BodyLimit(limit)(h)
 	switch a.(type) {
@@ -69,7 +69,7 @@ func Route(mux *http.ServeMux, pattern string, a Access, iso httpx.Isolation, li
 	case *SignedIn:
 		inner = signedIn(inner)
 	default:
-		panic("web: Route " + pattern + " declares no Access")
+		panic("web.Route was given no Access for " + pattern + ", which is a bug in Pisati")
 	}
 	isolated := iso.Middleware()(inner)
 	mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -115,20 +115,21 @@ type Site struct {
 // NewSite panics on it.
 func NewSite(assets *Assets, base config.BaseURL, reports *httpx.Limiter, ip httpx.ClientIP, log *slog.Logger) (*Site, error) {
 	var errs []error
+	const bug = "which is a bug in Pisati"
 	if assets == nil {
-		errs = append(errs, errors.New("web: the site needs the front end's assets"))
+		errs = append(errs, errors.New("web.NewSite was given no assets of the front end, "+bug))
 	}
 	if base == (config.BaseURL{}) {
-		errs = append(errs, errors.New("web: the site needs the base URL, and the zero BaseURL is none"))
+		errs = append(errs, errors.New("web.NewSite was given the zero BaseURL, so no base URL, "+bug))
 	}
 	if reports == nil {
-		errs = append(errs, errors.New("web: the site needs a limiter for CSP reports"))
+		errs = append(errs, errors.New("web.NewSite was given no limiter for CSP reports, "+bug))
 	}
 	if ip == nil {
-		errs = append(errs, errors.New("web: the site needs a ClientIP"))
+		errs = append(errs, errors.New("web.NewSite was given no ClientIP, "+bug))
 	}
 	if log == nil {
-		errs = append(errs, errors.New("web: the site needs a logger"))
+		errs = append(errs, errors.New("web.NewSite was given no logger, "+bug))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
@@ -166,7 +167,7 @@ func (s *Site) routes() *http.ServeMux {
 // made panics unless NewSite made s.
 func (s *Site) made() {
 	if s == nil || s.handler == nil {
-		panic("web: the Site was not made by NewSite")
+		panic("web.Site was used without web.NewSite, which is a bug in Pisati")
 	}
 }
 
@@ -204,7 +205,7 @@ func (s *Site) render(w http.ResponseWriter, r *http.Request, status int, title 
 	//nolint:contextcheck // templ's generated components take their context from Render, which this call passes; contextcheck reads the closures they are built from as functions that drop it
 	if err := layout(s.page(r, title)).Render(templ.WithChildren(ctx, content), &b); err != nil {
 		if !errors.Is(err, context.Canceled) {
-			s.log.ErrorContext(ctx, "page render failed", "error", err)
+			s.log.ErrorContext(ctx, "page not rendered, so the request was answered with status 500", "error", err)
 		}
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return

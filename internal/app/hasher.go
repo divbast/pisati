@@ -13,6 +13,9 @@ import (
 	"github.com/divbast/pisati/internal/core/auth"
 )
 
+// bug ends the message of what only a mistake in Pisati's code does.
+const bug = "which is a bug in Pisati"
+
 // hashSlots is how many argon2id calls run at once: one. Each takes
 // 64 MiB and four threads for tens of milliseconds, so a burst of
 // sign-ins run all at once could exhaust the server's memory; one at a
@@ -38,22 +41,22 @@ type Hasher struct {
 // returns an error for a nil rnd, when rnd fails, or when ctx has ended.
 func NewHasher(ctx context.Context, rnd io.Reader) (*Hasher, error) {
 	if rnd == nil {
-		return nil, errors.New("app: the Hasher needs a random source")
+		return nil, errors.New("app.NewHasher was given no random source, " + bug)
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("app: make the Hasher: %w", err)
+		return nil, fmt.Errorf("making the password hasher was stopped before it began: %w", err)
 	}
 	var secret [32]byte
 	if _, err := io.ReadFull(rnd, secret[:]); err != nil {
-		return nil, fmt.Errorf("app: draw the decoy's password: %w", err)
+		return nil, fmt.Errorf("no random bytes can be read for the password hasher's decoy: %w", err)
 	}
 	p, err := auth.ParsePassword(base64.RawURLEncoding.EncodeToString(secret[:]))
 	if err != nil {
-		return nil, fmt.Errorf("app: make the decoy's password: %w", err)
+		return nil, fmt.Errorf("the password hasher's decoy password cannot be made, %s: %w", bug, err)
 	}
 	decoy, err := hashWith(rnd, p)
 	if err != nil {
-		return nil, fmt.Errorf("app: make the decoy: %w", err)
+		return nil, fmt.Errorf("the password hasher's decoy cannot be made: %w", err)
 	}
 	return &Hasher{slots: make(chan struct{}, hashSlots), rnd: rnd, decoy: decoy}, nil
 }
@@ -99,11 +102,11 @@ func (h *Hasher) Verify(ctx context.Context, p auth.Password, stored auth.Hash) 
 func hashWith(rnd io.Reader, p auth.Password) (auth.Hash, error) {
 	var salt auth.Salt
 	if _, err := io.ReadFull(rnd, salt[:]); err != nil {
-		return auth.Hash{}, fmt.Errorf("app: draw a salt: %w", err)
+		return auth.Hash{}, fmt.Errorf("no random bytes can be read for a password's salt: %w", err)
 	}
 	hash, err := auth.HashPassword(p, salt, auth.DefaultParams())
 	if err != nil {
-		return auth.Hash{}, fmt.Errorf("app: hash a password: %w", err)
+		return auth.Hash{}, fmt.Errorf("the password cannot be hashed: %w", err)
 	}
 	return hash, nil
 }
@@ -112,18 +115,18 @@ func hashWith(rnd io.Reader, p auth.Password) (auth.Hash, error) {
 // Hasher NewHasher did not make, and ctx's when it has ended.
 func (h *Hasher) acquire(ctx context.Context) error {
 	if h == nil || h.slots == nil {
-		return errors.New("app: the Hasher was not made by NewHasher")
+		return errors.New("app.Hasher was used without app.NewHasher, " + bug)
 	}
 	// A context that has already ended never takes a free slot, which
 	// select would pick at random.
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("app: wait to hash: %w", err)
+		return fmt.Errorf("the wait to hash a password was cut short: %w", err)
 	}
 	select {
 	case h.slots <- struct{}{}:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("app: wait to hash: %w", ctx.Err())
+		return fmt.Errorf("the wait to hash a password was cut short: %w", ctx.Err())
 	}
 }
 

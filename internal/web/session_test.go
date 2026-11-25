@@ -282,7 +282,7 @@ func TestSessionMiddlewareDatabaseError(t *testing.T) {
 		t.Errorf("Cache-Control %q, want no-store", cc)
 	}
 	wantNoCookie(t, resp, "a database error")
-	if n := strings.Count(logged, `"msg":"session load failed"`); n != 1 || strings.Count(logged, "\n") != 1 {
+	if n := strings.Count(logged, `"msg":"session not read from the database, so the request was answered with status 500"`); n != 1 || strings.Count(logged, "\n") != 1 {
 		t.Errorf("logged %d session failures, want exactly 1 record:\n%s", n, logged)
 	}
 	if !strings.Contains(logged, `"level":"ERROR"`) {
@@ -325,7 +325,7 @@ func TestSessionMiddlewareServesWhenTheTouchFails(t *testing.T) {
 	resp, got, logged := st.serve(t.Context(), t, &c)
 	wantSignedIn(t, resp, got, 8, "a touch due, which fails")
 	wantNoCookie(t, resp, "a touch due, which fails")
-	if strings.Count(logged, `"msg":"session touch failed"`) != 1 || strings.Count(logged, "\n") != 1 ||
+	if strings.Count(logged, `"msg":"session's last-seen time not saved"`) != 1 || strings.Count(logged, "\n") != 1 ||
 		!strings.Contains(logged, `"level":"WARN"`) {
 		t.Errorf("want exactly one warning of the failed touch:\n%s", logged)
 	}
