@@ -8,7 +8,7 @@ ARG PISATI_VERSION=0.1.0
 # built.
 #
 # The newest stable Go. Only the binary leaves this stage.
-ARG GO_IMAGE=dhi.io/golang:1.27.4-debian13-dev@sha256:2f58c6928a851f0b6059f1a63514828a788a748d88b218a1bc9ae23c3b540140
+ARG GO_IMAGE=dhi.io/golang:1.27.4-debian13-dev@sha256:a56385e6b77b61ccaf807d5ea72d8593ad7a390fdd1c6552c4e127a90730b05f
 # Node's LTS, in the -dev variant, which builds the stylesheets and
 # scripts under web/. Only the build's output leaves this stage.
 ARG NODE_IMAGE=dhi.io/node:26.13.1-debian13-dev@sha256:1e91de4150a2814738074722988b0d17e025a1f5fd615e5a678207466cfa9fb3
