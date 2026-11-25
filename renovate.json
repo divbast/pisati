@@ -58,6 +58,18 @@
       "minimumReleaseAge": "7 days"
     },
     {
+      "description": "Go as mise.toml installs it and as the constraints of the regeneration tasks above pin it, which Renovate updates as well, move in one PR, so the tasks run the Go that is used locally and in CI.",
+      "matchManagers": ["mise", "renovate-config"],
+      "matchDepNames": ["core:go", "golang"],
+      "groupName": "go"
+    },
+    {
+      "description": "Node as mise.toml installs it and as the lucide-static task's constraint pins it, which Renovate updates as well, move in one PR, so the task runs the Node that is used locally and in CI.",
+      "matchManagers": ["mise", "renovate-config"],
+      "matchDepNames": ["core:node", "node"],
+      "groupName": "node"
+    },
+    {
       "description": "Playwright and axe-core never merge by themselves. A new Playwright brings new builds of Chromium, Firefox and WebKit, which can move pixels in the approved screenshot baselines, and a new axe-core can find what the last one did not, and no pull request's checks run the browser suite. So an update waits for approval on the Dependency Dashboard, and once approved it does not automerge: a person runs just browser, has any new baselines approved, and merges it.",
       "matchManagers": ["npm"],
       "matchDepNames": [
