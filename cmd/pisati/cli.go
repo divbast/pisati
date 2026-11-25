@@ -22,7 +22,6 @@ import (
 
 	"github.com/divbast/pisati/internal/config"
 	"github.com/divbast/pisati/internal/crypto"
-	"github.com/divbast/pisati/internal/jobs"
 	"github.com/divbast/pisati/internal/store"
 )
 
@@ -48,10 +47,6 @@ type Host struct {
 	// ends at the first. serve then stops at once, without finishing its
 	// drain. Nil means it never closes.
 	Halt <-chan struct{}
-	// Jobs are kinds of job, each with its handler, that serve's job
-	// worker runs beside Pisati's own: a test's fakes. The process gives
-	// none. A kind of Pisati's own given here is refused.
-	Jobs map[jobs.Kind]jobs.Handler
 }
 
 // The codes run exits with.

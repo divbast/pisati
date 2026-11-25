@@ -375,14 +375,7 @@ func start(ctx context.Context, h Host, cfg config.Config, creds fs.FS, st *stat
 	}
 	opts := jobs.DefaultOptions()
 	opts.Drain = drain
-	handlers := map[jobs.Kind]jobs.Handler{reencrypt.Kind(): reencrypt.Handle}
-	for kind, handle := range h.Jobs {
-		if _, ok := handlers[kind]; ok {
-			return nil, fmt.Errorf("the job kind %s is Pisati's own, and given again, which is a bug in Pisati", kind)
-		}
-		handlers[kind] = handle
-	}
-	worker, err := jobs.NewWorker(st.db, handlers, h.Clock, h.Rand, log, opts)
+	worker, err := jobs.NewWorker(st.db, map[jobs.Kind]jobs.Handler{reencrypt.Kind(): reencrypt.Handle}, h.Clock, h.Rand, log, opts)
 	if err != nil {
 		return nil, err
 	}

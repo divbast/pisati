@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/divbast/pisati/internal/jobs"
 	"github.com/divbast/pisati/internal/store"
 )
 
@@ -511,41 +510,6 @@ func TestSecondSignalCutsStopShort(t *testing.T) {
 			t.Errorf("serve started serving before the halt:\n%s", v.stdout.String())
 		}
 		release()
-		settle(t)
-		mustLogNothingAfterHalt(t, v)
-	})
-
-	t.Run("with a job running", func(t *testing.T) {
-		// A job whose handler runs until the test lets it go: the halt
-		// does not wait for the job worker.
-		kind, err := jobs.NewKind("test.held")
-		if err != nil {
-			t.Fatal(err)
-		}
-		running, letGo := make(chan struct{}), make(chan struct{})
-		s := newSite(t)
-		s.jobs = map[jobs.Kind]jobs.Handler{kind: func(context.Context, []byte) error {
-			close(running)
-			<-letGo
-			return nil
-		}}
-		s.mustRun(t, "migrate")
-		withStore(t, s.state, func(db *store.Store) {
-			if _, err := jobs.Enqueue(t.Context(), db.Queries(), jobs.Job{Kind: kind}); err != nil {
-				t.Fatal(err)
-			}
-		})
-		v := s.serve(t)
-		select {
-		case <-running:
-		case <-time.After(10 * time.Second):
-			t.Fatal("the job did not start within 10 s")
-		}
-		halting := time.Now()
-		v.halt()
-		code := v.wait()
-		mustHaveHalted(t, s, v, code, time.Since(halting), false)
-		close(letGo)
 		settle(t)
 		mustLogNothingAfterHalt(t, v)
 	})

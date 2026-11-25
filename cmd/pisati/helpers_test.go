@@ -27,7 +27,6 @@ import (
 
 	"go.uber.org/goleak"
 
-	"github.com/divbast/pisati/internal/jobs"
 	"github.com/divbast/pisati/internal/store"
 	"github.com/divbast/pisati/internal/store/storedb"
 )
@@ -117,8 +116,6 @@ type site struct {
 	state            string
 	public, internal int
 	env              map[string]string
-	// jobs are fake job kinds serve runs beside its own: Host.Jobs.
-	jobs map[jobs.Kind]jobs.Handler
 }
 
 // newSite returns a site whose environment sets what every command needs:
@@ -178,7 +175,6 @@ func (s *site) host(args ...string) (Host, *stream, *stream) {
 		Rand:     rand.Reader,
 		Stdout:   stdout,
 		Stderr:   stderr,
-		Jobs:     s.jobs,
 	}, stdout, stderr
 }
 
