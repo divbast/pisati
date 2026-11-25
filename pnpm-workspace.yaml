@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
+
+# How pnpm installs the front end's packages. There is one package, the
+# repository's root: this file holds pnpm's settings alone.
+
+# A release is installed only once it is 7 days old, which gives a bad one
+# time to be found and pulled first. Set here, the rule is strict: when no
+# release in range is old enough, the install fails rather than take a
+# newer one.
+minimumReleaseAge: 10080
+
+# No package's install script runs unless it is allowed here, and an
+# install that meets one nobody has ruled on fails. None of the packages
+# needs one: each native binary comes prebuilt, as an optional package for
+# its platform.
+strictDepBuilds: true
+allowBuilds: {}
+
+# pnpm exec, which every recipe runs the tools through, fails when the
+# installed packages no longer match the lockfile, so a stale install never
+# runs: just setup brings it back in step.
+verifyDepsBeforeRun: error

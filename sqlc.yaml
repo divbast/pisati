@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
+
+# sqlc generates internal/store/storedb from the queries, checked against
+# the schema the goose migrations build; it ignores their Down sections.
+# Regenerate with `go tool -modfile=tools/go.mod sqlc generate`, and commit
+# what it writes.
+version: "2"
+sql:
+  - engine: sqlite
+    schema: internal/store/migrations
+    queries: internal/store/queries
+    gen:
+      go:
+        package: storedb
+        out: internal/store/storedb

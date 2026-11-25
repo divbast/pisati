@@ -1,0 +1,20 @@
+{
+  "name": "pisati-web",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.65.1",
+    "browserslist": "4.29.6",
+    "happy-dom": "21.0.4",
+    "lightningcss": "1.33.0",
+    "lucide-static": "1.74.0",
+    "stylelint": "18.0.0",
+    "typescript": "7.0.2",
+    "vite-plus": "1.7.0"
+  },
+  "browserslist": [
+    "last 2 years"
+  ],
+  "packageManager": "pnpm@12.21.0"
+}

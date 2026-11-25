@@ -1,0 +1,19 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee> */
+
+/*
+ * The stylesheet every page links, and the one place the cascade layers
+ * are ordered. A declaration in a later layer beats one in an earlier
+ * layer whatever their selectors, so specificity never decides between
+ * layers and nothing needs !important. Each file below puts every rule in
+ * the layer it names.
+ *
+ * custom comes last and Pisati ships nothing in it: it holds a blog's own
+ * stylesheet, which therefore overrides everything here.
+ */
+@layer reset, tokens, base, layout, components, utilities, custom;
+
+@import "./tokens.css";
+@import "./theme.css";
+@import "./base.css";
+@import "./components.css";

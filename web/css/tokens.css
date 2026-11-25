@@ -1,0 +1,111 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee> */
+
+/*
+ * The design tokens: the fonts, sizes, spaces, weights, radii and
+ * durations the other rules use, as custom properties on :root, so a
+ * blog's settings and its own stylesheet restyle a page by setting tokens
+ * alone. The colours live in theme.css. What stays literal in the rules is
+ * mechanics no setting would change: a visually hidden element's single
+ * pixel, a percentage of the text colour, or a container query's width,
+ * which no custom property can set.
+ */
+
+/*
+ * The hue every colour in theme.css is built on, which a blog's accent
+ * colour setting changes: an angle, such as 250deg, or a number of
+ * degrees, as oklch() takes either. It is registered so that a value of
+ * any other type falls back to this initial value, where an unregistered property
+ * would leave every colour built on it invalid. A registration applies to
+ * the whole document, so it sits outside the layers.
+ */
+@property --accent-hue {
+  syntax: "<angle> | <number>";
+  inherits: true;
+  initial-value: 250;
+}
+
+@layer tokens {
+  :root {
+    /*
+     * System font stacks alone, so a page never fetches a font file.
+     * --font-body is the one text uses; a post's font setting points it
+     * at another stack.
+     */
+    --font-sans:
+      system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+    --font-serif:
+      ui-serif, Charter, "Bitstream Charter", "Sitka Text", Cambria, "Noto Serif", Georgia, serif;
+    --font-mono:
+      ui-monospace, "SF Mono", "Cascadia Code", "Segoe UI Mono", Menlo, Consolas,
+      "DejaVu Sans Mono", "Liberation Mono", monospace;
+    --font-body: var(--font-sans);
+
+    /*
+     * The type scale: step 0 is body text, and each step is 1.2 times the
+     * one below on a 20rem screen, growing smoothly to 1.25 times on an
+     * 80rem one. Every bound is in rem, so text still follows the
+     * reader's own font size and zoom.
+     */
+    --step--1: clamp(0.8333rem, 0.8111rem + 0.1111vi, 0.9rem);
+    --step-0: clamp(1rem, 0.9583rem + 0.2083vi, 1.125rem);
+    --step-1: clamp(1.2rem, 1.1312rem + 0.3438vi, 1.4062rem);
+    --step-2: clamp(1.44rem, 1.3341rem + 0.5297vi, 1.7578rem);
+    --step-3: clamp(1.728rem, 1.5716rem + 0.7821vi, 2.1973rem);
+    --step-4: clamp(2.0736rem, 1.8493rem + 1.1216vi, 2.7466rem);
+
+    --leading-tight: 1.2;
+    --leading-body: 1.6;
+    --weight-strong: 600;
+    /* Code sits a little smaller than the text around it, to look its size. */
+    --size-code: 0.9em;
+    --underline-offset: 0.15em;
+    --underline-hover: 0.12em;
+
+    /* The space scale, fluid between the same screen sizes as the type. */
+    --space-3xs: clamp(0.25rem, 0.2396rem + 0.0521vi, 0.2812rem);
+    --space-2xs: clamp(0.5rem, 0.4792rem + 0.1042vi, 0.5625rem);
+    --space-xs: clamp(0.75rem, 0.7188rem + 0.1562vi, 0.8438rem);
+    --space-s: clamp(1rem, 0.9583rem + 0.2083vi, 1.125rem);
+    --space-m: clamp(1.5rem, 1.4375rem + 0.3125vi, 1.6875rem);
+    --space-l: clamp(2rem, 1.9167rem + 0.4167vi, 2.25rem);
+    --space-xl: clamp(3rem, 2.875rem + 0.625vi, 3.375rem);
+    --space-2xl: clamp(4rem, 3.8333rem + 0.8333vi, 4.5rem);
+
+    /*
+     * The widest a column of text grows, which a blog's content width
+     * setting changes: about 66 characters a line reads best.
+     */
+    --content-width: 66ch;
+
+    --radius-s: 0.25rem;
+    --radius-m: 0.5rem;
+    --border-width: 1px;
+    --border-width-strong: 0.25rem;
+    /* An invalid field's border where forced colours paint it. */
+    --border-width-invalid: calc(var(--border-width) * 3);
+    /* An icon beside a label, a little taller than its letters. */
+    --size-icon: 1.25em;
+    /* The skip link, once focused, is drawn above the page. */
+    --layer-skip-link: 1;
+    --focus-width: 3px;
+    --focus-offset: 2px;
+    --opacity-disabled: 0.6;
+    /* A text box opens six lines tall. */
+    --rows-text-box: 6lh;
+
+    --duration-fast: 120ms;
+    --duration-slow: 240ms;
+    --ease-out: cubic-bezier(0.2, 0, 0, 1);
+
+    /*
+     * Every transition and animation takes its duration from the tokens
+     * above, so a reader who asks for less motion gets none, with no
+     * rule needing to override another.
+     */
+    @media (prefers-reduced-motion: reduce) {
+      --duration-fast: 0s;
+      --duration-slow: 0s;
+    }
+  }
+}

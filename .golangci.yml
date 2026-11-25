@@ -1,0 +1,299 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
+
+# This configuration implements the Go Development Principles in CLAUDE.md,
+# set exactly as the maintainer specified them. It is never weakened to get
+# a gate green: fix the finding. The one way to suppress a finding is a
+# //nolint naming the linter, with the reason beside it.
+
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - containedctx
+    - contextcheck
+    - depguard
+    - errcheck
+    - errorlint
+    - exhaustive
+    - forbidigo
+    - gochecknoglobals
+    - gochecknoinits
+    - gochecksumtype
+    - gomoddirectives
+    - gosec
+    - govet
+    - iface
+    - ireturn
+    - musttag
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - reassign
+    - revive
+    - rowserrcheck
+    - sloglint
+    - staticcheck
+    - testpackage
+    - usetesting
+  settings:
+    govet:
+      enable:
+        - nilness
+      disable:
+        - hostport # go fix owns it
+        - inline # go fix owns it
+    gomoddirectives:
+      go-version-pattern: '^1\.\d+\.0$'
+      toolchain-pattern: '^go1\.\d+\.\d+$'
+    gochecksumtype:
+      default-signifies-exhaustive: false
+    revive:
+      rules:
+        - name: flag-parameter
+        - name: context-as-argument
+        - name: exported
+    ireturn:
+      allow:
+        - error
+        - stdlib
+        - generic
+        - 'github\.com/divbast/pisati/internal/config\.SecretSource$'
+        - 'github\.com/divbast/pisati/internal/jobs\.Outcome$'
+        - 'github\.com/divbast/pisati/internal/core/auth\.(Verdict|SessionState)$'
+        - 'github\.com/divbast/pisati/internal/app\.Error$'
+    iface:
+      enable:
+        - identical
+        - unused
+    reassign:
+      patterns:
+        - ".*"
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^time\.(Now|Since|Until)$'
+          pkg: '^time$'
+          msg: read the clock in main and pass it down
+        - pattern: '^os\.(Getenv|LookupEnv|Environ|ExpandEnv|Setenv|Unsetenv|Clearenv)$'
+          pkg: '^os$'
+          msg: read the environment in main and pass values down
+        - pattern: '^(fmt\.Print(|f|ln)|print|println)$'
+          msg: write to an injected io.Writer or logger
+        # These return as soon as two values differ, so a comparison of
+        # secrets with them takes time that depends on the secrets. They
+        # are forbidden in internal/core/auth alone: the exclusion rule
+        # that names this msg drops these findings everywhere else.
+        - pattern: '^bytes\.(Equal|Compare)$'
+          pkg: '^bytes$'
+          msg: compare secrets in internal/core/auth in constant time, with crypto/subtle
+        - pattern: '^slices\.(Equal|Compare)$'
+          pkg: '^slices$'
+          msg: compare secrets in internal/core/auth in constant time, with crypto/subtle
+        - pattern: '^reflect\.DeepEqual$'
+          pkg: '^reflect$'
+          msg: compare secrets in internal/core/auth in constant time, with crypto/subtle
+        # Every route of the site is registered with web.Route, which
+        # declares who may use it, whether it is isolated and its body
+        # limit in one place. Registering on a mux, or on
+        # http.DefaultServeMux, is forbidden everywhere else: only Route
+        # itself, and telemetry's Pprof on the internal listener, are
+        # excluded below. The commands' main packages are exempt from
+        # forbidigo, so the internal listener's mux in cmd/pisati is too.
+        - pattern: '^http\.(ServeMux\.)?Handle(Func)?$'
+          pkg: '^net/http$'
+          msg: register a route only with web.Route
+    sloglint:
+      no-global: all
+      context: scope
+      static-msg: true
+      kv-only: true
+      forbidden-keys:
+        - time
+        - level
+        - msg
+        - source
+    errcheck:
+      check-blank: true
+      check-type-assertions: true
+    depguard:
+      rules:
+        core:
+          list-mode: strict
+          files:
+            - "**/internal/core/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/divbast/pisati/internal/core
+            - golang.org/x/crypto/argon2 # pure: bytes in, a key out, and its goroutines end before it returns
+          deny:
+            - pkg: context
+              desc: the core takes no context
+            - pkg: crypto/rand
+              desc: randomness comes from the shell
+            - pkg: database/sql
+              desc: the core does no I/O
+            - pkg: log
+              desc: the core does not log
+            - pkg: net
+              desc: the core does no I/O
+            - pkg: os
+              desc: the core does no I/O
+        shell:
+          list-mode: strict
+          files:
+            - $all
+            - "!$test"
+            - "!**/internal/core/**"
+            - "!**/cmd/genicons/**"
+          allow:
+            - $gostd
+            - github.com/divbast/pisati
+            - github.com/ncruces/go-sqlite3
+            - github.com/pelletier/go-toml/v2
+            - github.com/pressly/goose/v3
+            # Exactly the two templ packages the generated pages import:
+            # templ itself and its runtime
+            - github.com/a-h/templ$
+            - github.com/a-h/templ/runtime$
+            - golang.org/x/crypto/chacha20poly1305 # XChaCha20-Poly1305, which seals fields and wraps the data keys
+            - github.com/alecthomas/kong$ # the command line's parser, which the design names
+            - golang.org/x/sync/errgroup # serve's goroutines, which stop together
+            - go.opentelemetry.io/otel$ # SetErrorHandler alone, which serve sets once, so the SDK's errors reach the log
+            # The OpenTelemetry SDK and its exporters, for metrics and traces
+            - go.opentelemetry.io/otel/attribute
+            - go.opentelemetry.io/otel/codes
+            - go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp
+            - go.opentelemetry.io/otel/exporters/prometheus
+            - go.opentelemetry.io/otel/propagation # W3C trace headers, read from trusted proxies alone
+            - go.opentelemetry.io/otel/sdk/metric # and its exemplar package
+            - go.opentelemetry.io/otel/sdk/resource
+            - go.opentelemetry.io/otel/sdk/trace
+            - go.opentelemetry.io/otel/semconv/v1.43.0 # and its httpconv package
+            - go.opentelemetry.io/otel/trace # and its noop package
+            # Exactly these two: the registry OTel's exporter fills, and the
+            # handler that serves it; promauto, which registers globally, stays out
+            - github.com/prometheus/client_golang/prometheus$
+            - github.com/prometheus/client_golang/prometheus/promhttp
+          deny:
+            - pkg: log$
+              desc: use log/slog
+        tests:
+          list-mode: strict
+          files:
+            - $test
+            - "!**/cmd/genicons/**"
+          allow:
+            - $gostd
+            - github.com/divbast/pisati
+            - go.uber.org/goleak
+            - github.com/divbast/ci # the acceptance suite's harness and contract
+            - github.com/pelletier/go-toml/v2 # decodes a file Load accepted as a map, to check each key it holds
+            - golang.org/x/crypto/chacha20poly1305 # checks the sealed format against the cipher itself
+            - go.opentelemetry.io/proto/otlp # decodes what the OTLP exporter sends, to check it
+            - google.golang.org/protobuf/proto # the same
+            - golang.org/x/net/html # parses a page as a browser does, to check every element it holds
+        # cmd/genicons writes Go source, and its tests check that what it
+        # writes is Go, formatted. $gostd leaves out the go/ packages, so
+        # these two rules allow the ones it needs, there alone. Between them
+        # they cover every Go file under cmd/genicons, at any depth.
+        genicons:
+          list-mode: strict
+          files:
+            - "**/cmd/genicons/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - go/format
+            - github.com/divbast/pisati/cmd/genicons/internal/icongen$
+          deny:
+            - pkg: log$
+              desc: use log/slog
+        genicons-tests:
+          list-mode: strict
+          files:
+            - "**/cmd/genicons/*_test.go"
+            - "**/cmd/genicons/**/*_test.go"
+          allow:
+            - $gostd
+            - go/format
+            - go/parser
+            - go/token
+            - github.com/divbast/pisati/cmd/genicons/internal/icongen$
+            - go.uber.org/goleak
+    gosec:
+      excludes:
+        - G101 # secrets: betterleaks
+        - G104 # unchecked errors: errcheck
+        - G107 # http.Get with a variable URL: noctx bans the call
+        - G109 # Atoi narrowing: G115
+        - G118 # lost cancel, detached goroutine context: govet, contextcheck
+        - G501 # import blocklists: G401, G405 and G406 report the use
+        - G502
+        - G503
+        - G505
+        - G506
+        - G507
+      config:
+        global:
+          nosec: true
+    usetesting:
+      context-background: true
+      context-todo: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    rules:
+      # The commands' main packages, where main wires everything once, and
+      # the tests. A package under a command, as cmd/genicons/internal/,
+      # is linted like any other.
+      - path: '^cmd/[^/]+/[^/]+\.go$|_test\.go$'
+        linters:
+          - forbidigo
+          - gochecknoglobals
+          - gochecknoinits
+          - reassign
+      # forbidigo's constant-time rule holds only in internal/core/auth,
+      # where secrets are compared: outside it, its findings, matched by
+      # their msg, are dropped, and every other forbidigo finding is kept.
+      - path-except: '^internal/core/auth/'
+        text: 'compare secrets in internal/core/auth in constant time, with crypto/subtle'
+        linters:
+          - forbidigo
+      # Route is the one place a route of the site is registered, and
+      # Pprof mounts pprof's handlers on the internal listener's mux.
+      - path: '^internal/(web/routes|telemetry/pprof)\.go$'
+        text: 'register a route only with web\.Route'
+        linters:
+          - forbidigo
+      # The acceptance suite is a module of its own, built against the
+      # checkout of divbast/ci that just setup makes: its replace of
+      # github.com/divbast/ci, and the go line ci's module forces on it, are
+      # not this repository's to choose. Only those two findings are
+      # excluded: every other directive there, and every other linter, is
+      # still checked.
+      - path: '^test/acceptance/go\.mod$'
+        text: '^go directive \(1\.\d+\.\d+\) doesn''t match the pattern '
+        linters:
+          - gomoddirectives
+      - path: '^test/acceptance/go\.mod$'
+        text: '^local replacement are not allowed: github\.com/divbast/ci$'
+        linters:
+          - gomoddirectives
+
+formatters:
+  enable:
+    - gofumpt
+
+# Show every finding. By default golangci-lint shows at most three with the
+# same text, 50 from one linter and one on each line, so fixing what it
+# shows can reveal more.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: false

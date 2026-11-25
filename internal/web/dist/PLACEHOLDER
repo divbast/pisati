@@ -1,0 +1,7 @@
+SPDX-License-Identifier: AGPL-3.0-only
+SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
+
+This directory holds the front end's build, which `just fe-build` writes
+here and go:embed compiles into the binary. Everything else in it is
+build output and never committed; this file keeps go:embed compiling on a
+fresh clone, before anything is built.

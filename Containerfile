@@ -1,50 +1,90 @@
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
-# The app's own version, which tags the image: app-publish.yml reads it from
-# this line, by the name build.yml gives as version-arg
-ARG TEMPLATE_VERSION=0.2.0
-# The runtime: static-debian13, since the binary is static, with nothing in
-# it but CA certificates, time zones and /etc/passwd. CI verifies its
-# signature by the distroless project before anything is built.
-ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
+# The app's own version, stamped into the binary and the image's version label
+ARG PISATI_VERSION=0.1.0
+# Every image below is a Docker Hardened Image on Debian 13, pinned by
+# digest, and CI verifies Docker's signature on each before anything is
+# built.
+#
+# The newest stable Go. Only the binary leaves this stage.
+ARG GO_IMAGE=dhi.io/golang:1.27.4-debian13-dev@sha256:2f58c6928a851f0b6059f1a63514828a788a748d88b218a1bc9ae23c3b540140
+# Node's LTS, in the -dev variant, which builds the stylesheets and
+# scripts under web/. Only the build's output leaves this stage.
+ARG NODE_IMAGE=dhi.io/node:26.13.1-debian13-dev@sha256:1e91de4150a2814738074722988b0d17e025a1f5fd615e5a678207466cfa9fb3
+# The runtime: Docker Hardened Images' static, since the binary is static,
+# with nothing in it but CA certificates, time zones and the nonroot user
+# 65532: no shell and no package manager.
+ARG RUNTIME_IMAGE=dhi.io/static:20250419-debian13@sha256:4749130e822c145dbdf9ca11ec0cc2f694b5fe687fd74268a2b62160e6726f39
 
-# The newest stable Go, by digest. Only the binary leaves this stage.
-FROM golang:1.27.4-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d AS build
-ARG TEMPLATE_VERSION
+FROM ${NODE_IMAGE} AS web
+# The Node image has npm and no pnpm, so npm installs pnpm first, exactly
+# as build/pnpm's lockfile records it, checked by integrity. No package's
+# install script runs, in either install: pnpm's own only puts its native
+# binary in place of the script that starts it.
+WORKDIR /opt/pnpm
+COPY build/pnpm/package.json build/pnpm/package-lock.json ./
+RUN npm ci --ignore-scripts
+ENV PATH=/opt/pnpm/node_modules/.bin:${PATH}
 WORKDIR /src
-# go.mod's replace names ./.ci, which the build context leaves out: the app
-# imports nothing from divbast/ci, so Go never looks for it
-COPY go.mod ./
+# Exactly the packages pnpm-lock.yaml records, or the build fails
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --ignore-scripts
+COPY tsconfig.json vite.config.ts vite.devserver.ts ./
+COPY web/ web/
+# Writes internal/web/dist: the hashed files, and the manifest that names them
+RUN pnpm exec vp build
+
+FROM ${GO_IMAGE} AS build
+ARG PISATI_VERSION
+ENV GOTOOLCHAIN=local GOFLAGS=-mod=readonly
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
-RUN CGO_ENABLED=0 GOFLAGS=-mod=readonly GOTOOLCHAIN=local \
-    go build -trimpath -ldflags="-s -w -X main.version=${TEMPLATE_VERSION}" -o /out/template ./cmd/template
+# go:embed compiles the front end's build into the binary: the one the
+# stage above made, and nothing a local build left in the build context.
+RUN rm -rf internal/web/dist
+COPY --from=web /src/internal/web/dist/ internal/web/dist/
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${PISATI_VERSION}" -o /out/pisati ./cmd/pisati \
+    && mkdir -p /out/lib/pisati
 
 FROM ${RUNTIME_IMAGE}
-ARG TEMPLATE_VERSION
+ARG PISATI_VERSION
 
 # Root-owned, and never written
-COPY --from=build /out/template /usr/local/bin/template
+COPY --from=build /out/pisati /usr/local/bin/pisati
+# The lockfile of the npm packages that built the stylesheets and scripts
+# compiled into the binary: the image holds no node_modules that names them
+COPY --from=web /src/pnpm-lock.yaml /usr/share/doc/pisati/pnpm-lock.yaml
+# The state directory, empty, and Pisati's user's alone. The root is
+# read-only, so Pisati refuses to start until a volume is mounted here; an
+# empty volume starts out with this directory's owner and mode. It is
+# copied as what /out/lib holds, so that --chmod sets its own mode under
+# every builder: buildah sets none on a directory it makes to copy into.
+COPY --from=build --chown=65532:65532 --chmod=0700 /out/lib/ /var/lib/
 
-LABEL org.opencontainers.image.source="https://github.com/divbast/oci-image-template" \
-    org.opencontainers.image.url="https://github.com/divbast/oci-image-template" \
-    org.opencontainers.image.title="oci-image-template" \
-    org.opencontainers.image.version="${TEMPLATE_VERSION}" \
-    org.opencontainers.image.licenses="BSD-2-Clause"
+LABEL org.opencontainers.image.source="https://github.com/divbast/pisati" \
+    org.opencontainers.image.url="https://github.com/divbast/pisati" \
+    org.opencontainers.image.title="pisati" \
+    org.opencontainers.image.version="${PISATI_VERSION}" \
+    org.opencontainers.image.licenses="AGPL-3.0-only"
+# Names the lockfile above to divbast/ci's scan, which then scans the npm
+# packages it records along with the image's own
+LABEL io.github.divbast.scan.lockfiles="/usr/share/doc/pisati/pnpm-lock.yaml"
 
 EXPOSE 8080 8081
 # Exec form: the shell form would need /bin/sh, which the image lacks.
-# --timeout must clear template health's own budget: it allows each of its
-# two exchanges 4 s and runs them one after the other, so a listener that
-# accepts and never answers costs 8 s. A shorter timeout kills the probe
-# mid-flight and records a bare engine timeout instead of the probe's own
-# line, which is the only diagnostic there is. Podman reads no HEALTHCHECK
-# from an image published as an OCI index: its users pass the same array
-# as --health-cmd.
+# --timeout must clear pisati health's own budget, 4 s for its one
+# request: a shorter timeout kills the probe mid-flight and records a bare
+# engine timeout instead of the probe's own line, which is the only
+# diagnostic there is. Podman reads no HEALTHCHECK from an image published
+# as an OCI index: its users pass the same array as --health-cmd.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD ["/usr/local/bin/template", "health"]
+    CMD ["/usr/local/bin/pisati", "health"]
 USER 65532:65532
-# The server itself, as PID 1: the image has no state to prepare and no
-# environment to read, so nothing runs before it
-ENTRYPOINT ["/usr/local/bin/template", "serve"]
+# The server itself, as PID 1: nothing runs before it. Pisati reads its
+# settings and checks its state directory itself as it starts, and
+# refuses to start when either is wrong.
+ENTRYPOINT ["/usr/local/bin/pisati", "serve"]

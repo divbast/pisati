@@ -1,0 +1,86 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee> */
+
+/*
+ * The parts every page shares, by their semantic classes: the skip link,
+ * the header, and the theme switch in it.
+ */
+@layer components {
+  /*
+   * Focus shows the skip link in the header's grid cell, where the
+   * header, which comes later, would paint over it. So it is drawn over
+   * the page's corner instead, above everything, on the page's own
+   * background, and nothing else moves.
+   */
+  .skip-link:is(:focus-within, :active) {
+    position: absolute;
+    inset-block-start: var(--space-2xs);
+    inset-inline-start: var(--space-2xs);
+    z-index: var(--layer-skip-link);
+    padding-block: var(--space-3xs);
+    padding-inline: var(--space-xs);
+    background-color: var(--color-canvas);
+    border: var(--border-width) solid currentcolor;
+    border-radius: var(--radius-s);
+  }
+
+  /*
+   * The site's name at the start and the theme switch at the end, which
+   * wraps below it where the header is too narrow for both.
+   */
+  .site-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs);
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .site-name {
+    font-size: var(--step-1);
+    font-weight: var(--weight-strong);
+    text-decoration: none;
+  }
+
+  /*
+   * The theme switch is one row of buttons, each an icon beside its
+   * label. The theme the page has is filled; the others are outlined.
+   */
+  .theme-switch {
+    grid-auto-flow: column;
+    gap: var(--space-3xs);
+    justify-content: start;
+
+    button {
+      display: inline-flex;
+      gap: var(--space-3xs);
+      align-items: center;
+
+      &[aria-pressed="false"] {
+        color: var(--color-accent);
+        background-color: transparent;
+        border-color: currentcolor;
+
+        &:hover {
+          color: var(--color-on-accent);
+          background-color: var(--color-accent-strong);
+        }
+      }
+
+      /*
+       * Forced colours paint every button alike, so there the chosen one
+       * has a thicker border instead.
+       */
+      @media (forced-colors: active) {
+        &[aria-pressed="true"] {
+          border-width: var(--border-width-strong);
+        }
+      }
+    }
+
+    svg {
+      inline-size: var(--size-icon);
+      block-size: var(--size-icon);
+    }
+  }
+}

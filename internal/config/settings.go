@@ -1,0 +1,401 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
+
+package config
+
+import (
+	"log/slog"
+	"net/netip"
+	"path/filepath"
+	"strings"
+
+	"github.com/divbast/pisati/internal/explain"
+)
+
+// layer is what one source gives, still as text: each file decodes
+// strictly into one, and the environment is read into another. A nil
+// field is a setting the source leaves alone. Only the settings table
+// reaches these fields, and a test holds their tags to its keys.
+type layer struct {
+	Server    serverLayer    `toml:"server"`
+	Storage   storageLayer   `toml:"storage"`
+	Log       logLayer       `toml:"log"`
+	Telemetry telemetryLayer `toml:"telemetry"`
+	Keys      keysLayer      `toml:"keys"`
+	Dev       devLayer       `toml:"dev"`
+}
+
+type serverLayer struct {
+	BaseURL        *string   `toml:"base_url"`
+	Listen         *string   `toml:"listen"`
+	InternalListen *string   `toml:"internal_listen"`
+	TrustedProxies *[]string `toml:"trusted_proxies"`
+	HSTS           *string   `toml:"hsts"`
+}
+
+type storageLayer struct {
+	StateDir *string `toml:"state_dir"`
+}
+
+type logLayer struct {
+	Level  *string `toml:"level"`
+	Format *string `toml:"format"`
+}
+
+type telemetryLayer struct {
+	OTLPEndpoint *string `toml:"otlp_endpoint"`
+	Pprof        *string `toml:"pprof"`
+}
+
+type keysLayer struct {
+	MainKey     *string `toml:"main_key"`
+	MainKeyFile *string `toml:"main_key_file"`
+}
+
+type devLayer struct {
+	ViteURL      *string `toml:"vite_url"`
+	ViteCertFile *string `toml:"vite_cert_file"`
+	ViteKeyFile  *string `toml:"vite_key_file"`
+}
+
+// setting is one row of the settings table.
+type setting struct {
+	// key is the TOML key, section.name. The variable is envName(key).
+	key string
+	// value is what the setting takes, as what follows "Set it to" in a
+	// message that says it is missing.
+	value string
+	// absent is what build does when no source gives the setting, and
+	// def the default, spelt as a source would give it, that it applies
+	// when absent is applyDefault. A refused setting has neither.
+	absent whenAbsent
+	def    string
+	kind   kind
+}
+
+// env returns the variable that sets s.
+func (s setting) env() string {
+	return envName(s.key)
+}
+
+// label names s in an error, by its TOML key and its variable.
+func (s setting) label() string {
+	return s.key + " (" + s.env() + ")"
+}
+
+// whenAbsent is what build does with a setting no source gives.
+type whenAbsent uint8
+
+const (
+	// applyDefault applies the setting's default.
+	applyDefault whenAbsent = iota
+	// reportMissing reports the setting missing, as it has no default.
+	// A source giving it empty counts as not giving it.
+	reportMissing
+	// leaveToRules leaves the setting's field to a rule Load applies
+	// after the table.
+	leaveToRules
+)
+
+// kind is what a setting's value is, and where it goes.
+//
+//sumtype:decl
+type kind interface {
+	isKind()
+}
+
+// text is a setting whose value is one string: field reaches it in a
+// layer, and apply checks it and stores it in a Config.
+type text struct {
+	field func(*layer) **string
+	apply func(*Config, string) error
+}
+
+// list is a setting whose value is a list of strings: an array in TOML,
+// and comma-separated in a variable. apply returns one error for each
+// item it refuses.
+type list struct {
+	field func(*layer) **[]string
+	apply func(*Config, []string) []error
+}
+
+// refused is a setting known only to be refused: a secret given in
+// place, where the setting instead should name the file that holds it.
+// Its value is never read.
+type refused struct {
+	field   func(*layer) **string
+	instead string
+}
+
+func (text) isKind()    {}
+func (list) isKind()    {}
+func (refused) isKind() {}
+
+// settings is the settings table: every setting Pisati knows, in the
+// order of the layer's fields. Decoding files, reading the environment,
+// UnknownEnv and build all go by it. dev.vite_url comes after
+// server.base_url, as its rule reads the base URL build has stored.
+func settings() []setting {
+	hsts := oneOf(HSTSScope.String, HSTSHostOnly, HSTSIncludeSubdomains, HSTSPreload)
+	levels := oneOf(levelName, slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError)
+	formats := oneOf(LogFormat.String, LogJSON, LogText)
+	switches := oneOf(Switch.String, Off, On)
+	fullPath := `a full path, which starts with "/"`
+	return []setting{
+		{
+			key:    "server.base_url",
+			value:  "the address the blog is served at: " + strings.TrimPrefix(baseURLFix, "Set it to "),
+			absent: reportMissing,
+			kind: text{
+				field: func(l *layer) **string { return &l.Server.BaseURL },
+				apply: into(ParseBaseURL, func(c *Config) *BaseURL { return &c.Server.BaseURL }),
+			},
+		},
+		{
+			key:   "server.listen",
+			value: strings.TrimPrefix(listenFix, "Set it to "),
+			def:   ":8080",
+			kind: text{
+				field: func(l *layer) **string { return &l.Server.Listen },
+				apply: into(ParseListenAddr, func(c *Config) *ListenAddr { return &c.Server.Listen }),
+			},
+		},
+		{
+			key:   "server.internal_listen",
+			value: strings.TrimPrefix(listenFix, "Set it to "),
+			def:   ":8081",
+			kind: text{
+				field: func(l *layer) **string { return &l.Server.InternalListen },
+				apply: into(ParseListenAddr, func(c *Config) *ListenAddr { return &c.Server.InternalListen }),
+			},
+		},
+		{
+			key: "server.trusted_proxies",
+			value: "IP addresses, such as 192.0.2.1, and ranges in CIDR form, such as 192.0.2.0/24: a list in " +
+				"square brackets in a file, or separated by commas in the variable",
+			def: "",
+			kind: list{
+				field: func(l *layer) **[]string { return &l.Server.TrustedProxies },
+				apply: applyTrustedProxies,
+			},
+		},
+		{
+			key:   "server.hsts",
+			value: "one of " + hsts.spelling(),
+			def:   HSTSHostOnly.String(),
+			kind: text{
+				field: func(l *layer) **string { return &l.Server.HSTS },
+				apply: into(hsts.parse, func(c *Config) *HSTSScope { return &c.Server.HSTS }),
+			},
+		},
+		{
+			key:   "storage.state_dir",
+			value: fullPath,
+			def:   defaultStateDir,
+			kind: text{
+				field: func(l *layer) **string { return &l.Storage.StateDir },
+				apply: into(ParseStateDir, func(c *Config) *StateDir { return &c.Storage.StateDir }),
+			},
+		},
+		{
+			key:   "log.level",
+			value: "one of " + levels.spelling(),
+			def:   levelName(slog.LevelInfo),
+			kind: text{
+				field: func(l *layer) **string { return &l.Log.Level },
+				apply: into(levels.parse, func(c *Config) *slog.Level { return &c.Log.Level }),
+			},
+		},
+		{
+			key:   "log.format",
+			value: "one of " + formats.spelling(),
+			def:   LogJSON.String(),
+			kind: text{
+				field: func(l *layer) **string { return &l.Log.Format },
+				apply: into(formats.parse, func(c *Config) *LogFormat { return &c.Log.Format }),
+			},
+		},
+		{
+			key: "telemetry.otlp_endpoint",
+			value: "the URL of an OpenTelemetry collector, which starts with https:// or http://; or nothing, to send " +
+				"no traces",
+			def: "",
+			kind: text{
+				field: func(l *layer) **string { return &l.Telemetry.OTLPEndpoint },
+				apply: into(ParseOptionalURL, func(c *Config) *OptionalURL { return &c.Telemetry.OTLPEndpoint }),
+			},
+		},
+		{
+			key:   "telemetry.pprof",
+			value: "one of " + switches.spelling(),
+			def:   Off.String(),
+			kind: text{
+				field: func(l *layer) **string { return &l.Telemetry.Pprof },
+				apply: into(switches.parse, func(c *Config) *Switch { return &c.Telemetry.Pprof }),
+			},
+		},
+		{
+			key: "keys.main_key",
+			value: "nothing: Pisati never takes the main key itself as a setting. Set keys.main_key_file to the " +
+				"full path of the file that holds it",
+			kind: refused{
+				field:   func(l *layer) **string { return &l.Keys.MainKey },
+				instead: "keys.main_key_file",
+			},
+		},
+		{
+			// With none, Load looks for the credential, then falls back
+			// to Generated.
+			key:    "keys.main_key_file",
+			value:  "the full path of the file that holds the main key",
+			absent: leaveToRules,
+			kind: text{
+				field: func(l *layer) **string { return &l.Keys.MainKeyFile },
+				apply: into(fileSource, func(c *Config) *SecretSource { return &c.Keys.MainKey }),
+			},
+		},
+		{
+			key: "dev.vite_url",
+			value: "a URL on localhost, 127.0.0.1 or [::1], which starts with https:// or http://, with " +
+				"server.base_url on one of them too; or nothing, for no Vite dev server",
+			def: "",
+			kind: text{
+				field: func(l *layer) **string { return &l.Dev.ViteURL },
+				apply: applyViteURL,
+			},
+		},
+		{
+			// Required when dev.vite_url is https, and used only then.
+			key:    "dev.vite_cert_file",
+			value:  "the full path of the certificate file that the Vite dev server serves https with",
+			absent: leaveToRules,
+			kind: text{
+				field: func(l *layer) **string { return &l.Dev.ViteCertFile },
+				apply: into(filePath, func(c *Config) *string { return &c.Dev.ViteCertFile }),
+			},
+		},
+		{
+			key:    "dev.vite_key_file",
+			value:  "the full path of the file that holds that certificate's private key",
+			absent: leaveToRules,
+			kind: text{
+				field: func(l *layer) **string { return &l.Dev.ViteKeyFile },
+				apply: into(filePath, func(c *Config) *string { return &c.Dev.ViteKeyFile }),
+			},
+		},
+	}
+}
+
+// into returns an apply that parses a value with parse and stores what it
+// gives in the field of the Config that field reaches.
+func into[T any](parse func(string) (T, error), field func(*Config) *T) func(*Config, string) error {
+	return func(c *Config, s string) error {
+		v, err := parse(s)
+		if err != nil {
+			return err
+		}
+		*field(c) = v
+		return nil
+	}
+}
+
+// applyTrustedProxies stores items, each a bare address or a CIDR prefix
+// with no host bits set, as the trusted proxies.
+func applyTrustedProxies(c *Config, items []string) []error {
+	var errs []error
+	c.Server.TrustedProxies = make([]netip.Prefix, 0, len(items))
+	for _, item := range items {
+		p, err := parsePrefix(item)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		c.Server.TrustedProxies = append(c.Server.TrustedProxies, p)
+	}
+	return errs
+}
+
+// applyViteURL stores s as the Vite dev server's URL. A URL is accepted
+// only on localhost, 127.0.0.1 or [::1], with a base URL there too; c
+// already holds the base URL, unless it was refused. Its errors never
+// repeat either URL, and one that names the base URL names its setting
+// too.
+func applyViteURL(c *Config, s string) error {
+	vite, err := ParseOptionalURL(s)
+	if err != nil {
+		return err
+	}
+	u, set := vite.Get()
+	if !set || c.Server.BaseURL == (BaseURL{}) {
+		c.Dev.ViteURL = vite
+		return nil
+	}
+	const (
+		local     = "localhost, 127.0.0.1 or [::1]"
+		devOnly   = "The Vite dev server is for development on this machine only"
+		passwords = "Pisati does not show the values, because a URL may hold a password"
+	)
+	viteLabel, baseLabel := label("dev.vite_url"), label("server.base_url")
+	switch viteLocal, baseLocal := loopback(u.Hostname()), c.Server.BaseURL.local; {
+	case !viteLocal && !baseLocal:
+		return explain.New(ErrInvalid, "%s and %s are both set to URLs that are not on %s. %s: set both to URLs on %s, or "+
+			"set dev.vite_url to nothing. %s", viteLabel, baseLabel, local, devOnly, local, passwords)
+	case !viteLocal:
+		return &badValue{
+			hidden: whyURLHidden, why: "is not on " + local,
+			fix: devOnly + ": set it to a URL on " + local + ", or to nothing",
+		}
+	case !baseLocal:
+		return explain.New(ErrInvalid, "%s is set, but %s is set to a URL that is not on %s. %s: set dev.vite_url to "+
+			"nothing, or set server.base_url to a URL on %s. %s", viteLabel, baseLabel, local, devOnly, local, passwords)
+	}
+	c.Dev.ViteURL = vite
+	return nil
+}
+
+// fileSource returns the file s names as a secret's source. Its error
+// never repeats s, which may be the secret itself, given by mistake in
+// place of its file's path.
+func fileSource(s string) (SecretSource, error) {
+	p, err := filePath(s)
+	if err != nil {
+		return nil, err
+	}
+	return FromFile{Path: p}, nil
+}
+
+// filePath returns s, the path of a file that holds a secret or goes with
+// one, when it is absolute and clean. Its error never repeats s, which may
+// be the secret itself, given by mistake in place of its file's path.
+func filePath(s string) (string, error) {
+	if why, fix := pathRule(s); why != "" {
+		return "", &badValue{hidden: "it may be a secret, such as a key, given in place of a path", why: why, fix: fix}
+	}
+	return s, nil
+}
+
+// pathRule returns the rule of an absolute, clean path that s breaks, as
+// what follows "which", and what to do about it, or "" for both when s
+// is one: filepath.Clean would change it otherwise.
+func pathRule(s string) (why, fix string) {
+	switch {
+	case cleanAbsolute(s):
+		return "", ""
+	case s == "":
+		return "is empty", `Set it to a full path, which starts with "/"`
+	case !filepath.IsAbs(s):
+		return "is not a full path", `Set it to a full path, which starts with "/"`
+	case strings.Contains(s, "//"):
+		return `has "//" in it`, `Write one "/" there instead`
+	case strings.HasSuffix(s, "/"):
+		return `ends with "/"`, `Remove the "/" at the end`
+	}
+	return `has "." or ".." as one of its directory names`,
+		`Set it to the full path that it names, written with no "." or ".." in it`
+}
+
+// cleanAbsolute reports whether s is an absolute path that filepath.Clean
+// leaves as it is.
+func cleanAbsolute(s string) bool {
+	return filepath.IsAbs(s) && filepath.Clean(s) == s
+}
