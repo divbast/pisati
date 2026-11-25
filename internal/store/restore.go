@@ -48,8 +48,9 @@ const restoreSuffix = ".restore"
 // The copy is built beside the database, flushed to stable storage and
 // renamed over it, so that the state directory holds the old database or
 // the whole of the new one, never part of either. The old database's
-// write-ahead log, its index and any rollback journal are removed first:
-// SQLite would read them as the new database's own. The restored file has
+// write-ahead log, its index and any rollback journal are removed first,
+// and their removal flushed to stable storage before the rename: SQLite
+// would read them as the new database's own, after a power cut too. The restored file has
 // mode 0600. src must be absolute; Restore stops, failing, when ctx ends.
 func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	defer func() {
@@ -124,6 +125,11 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	}
 	if err := removeFiles(ctx, root, sidecars(name)...); err != nil {
 		return err
+	}
+	// The rename could otherwise reach the disk first: after a power cut,
+	// the new database would find the old one's log beside it.
+	if err := syncDir(ctx, root); err != nil {
+		return explain.New(err, "Pisati cannot make sure that the directory %s is written to disk: %s", dir, pathless(err))
 	}
 	if err := root.Rename(tmp, name); err != nil {
 		return explain.New(err, "Pisati cannot rename the copy %s to %s: %s", tmpPath, filepath.Join(dir.String(), name),
