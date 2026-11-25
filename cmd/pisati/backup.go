@@ -11,6 +11,7 @@ import (
 	"os"
 	"sync/atomic"
 
+	"github.com/divbast/pisati/internal/explain"
 	"github.com/divbast/pisati/internal/store"
 )
 
@@ -62,11 +63,11 @@ func notRemoved(err error, why, dest string) error {
 	for _, p := range separate(err) {
 		pe, ok := errors.AsType[*fs.PathError](p.err)
 		if !ok {
-			errs = append(errs, explain(p.err, "%s. No backup was made, but Pisati cannot remove what the unfinished "+
+			errs = append(errs, explain.New(p.err, "%s. No backup was made, but Pisati cannot remove what the unfinished "+
 				"copy wrote at %s: %s. Remove it", why, dest, p.msg))
 			continue
 		}
-		errs = append(errs, explain(p.err, "%s. No backup was made, but Pisati cannot remove the file %s, which the "+
+		errs = append(errs, explain.New(p.err, "%s. No backup was made, but Pisati cannot remove the file %s, which the "+
 			"unfinished copy wrote: %s. Remove it", why, pe.Path, pe.Err))
 	}
 	return errors.Join(errs...)
@@ -84,7 +85,7 @@ func (c backupCmd) backup(ctx context.Context, h Host, dest string, made func(re
 	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("there is no database to back up at %s. Nothing was written", path)
 	case err != nil:
-		return explain(err, "Pisati cannot read the database %s: %s", path, reason(err))
+		return explain.New(err, "Pisati cannot read the database %s: %s", path, reason(err))
 	}
 	db, err := store.Open(ctx, path)
 	if err != nil {

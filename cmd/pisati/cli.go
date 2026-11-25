@@ -22,6 +22,7 @@ import (
 
 	"github.com/divbast/pisati/internal/config"
 	"github.com/divbast/pisati/internal/crypto"
+	"github.com/divbast/pisati/internal/explain"
 	"github.com/divbast/pisati/internal/store"
 )
 
@@ -304,22 +305,6 @@ func say(w io.Writer, format string, args ...any) {
 	fmt.Fprintf(w, format, args...) //nolint:errcheck // stderr itself failed, and there is nowhere left to say so
 }
 
-// plainError is an error whose message is Pisati's own, worded for the
-// operator, around the error that caused it. errors.Is and errors.AsType
-// still find the cause, so a stop by a signal is still seen as one.
-type plainError struct {
-	msg   string
-	cause error
-}
-
-func (e *plainError) Error() string { return e.msg }
-func (e *plainError) Unwrap() error { return e.cause }
-
-// explain returns cause behind a message of Pisati's own.
-func explain(cause error, format string, args ...any) error {
-	return &plainError{msg: fmt.Sprintf(format, args...), cause: cause}
-}
-
 // configError is the configuration Pisati refuses: every problem
 // config.Load found, and every problem with the directories it reads
 // from, joined.
@@ -442,7 +427,7 @@ func directoryRule(v string) string {
 func absolute(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", explain(err, "Pisati cannot find the full path of %s, because it cannot read the current directory: %s. "+
+		return "", explain.New(err, "Pisati cannot find the full path of %s, because it cannot read the current directory: %s. "+
 			`Give the full path instead, starting with "/"`, path, reason(err))
 	}
 	return abs, nil
@@ -514,10 +499,10 @@ func checkStateDir(dir string) error {
 	info, err := os.Stat(dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return explain(err, "the state directory %s does not exist. Create it, and give the user that runs Pisati permission "+
+		return explain.New(err, "the state directory %s does not exist. Create it, and give the user that runs Pisati permission "+
 			"to write to it. Or set %s to another directory", dir, stateDirSetting)
 	case err != nil:
-		return explain(err, "Pisati cannot read the state directory %s: %s. Set %s to a directory that the user that "+
+		return explain.New(err, "Pisati cannot read the state directory %s: %s. Set %s to a directory that the user that "+
 			"runs Pisati can read and write", dir, reason(err), stateDirSetting)
 	case !info.IsDir():
 		return fmt.Errorf("the state directory %s is not a directory. Set %s to a directory", dir, stateDirSetting)
@@ -525,34 +510,34 @@ func checkStateDir(dir string) error {
 	f, err := os.CreateTemp(dir, checkFile+"*")
 	switch {
 	case errors.Is(err, syscall.EROFS):
-		return explain(err, "Pisati cannot write to the state directory %s, because it is on a read-only file system. "+
+		return explain.New(err, "Pisati cannot write to the state directory %s, because it is on a read-only file system. "+
 			"Mount a writable volume at %s, or set %s to a writable directory", dir, dir, stateDirSetting)
 	case errors.Is(err, fs.ErrPermission):
-		return explain(err, "Pisati cannot write to the state directory %s, because the user that runs Pisati does not "+
+		return explain.New(err, "Pisati cannot write to the state directory %s, because the user that runs Pisati does not "+
 			"have permission to. Give that user permission to write to %s, or set %s to a directory it can write to",
 			dir, dir, stateDirSetting)
 	case errors.Is(err, syscall.ENOSPC):
-		return explain(err, "Pisati cannot write to the state directory %s, because its disk is full. Free some space "+
+		return explain.New(err, "Pisati cannot write to the state directory %s, because its disk is full. Free some space "+
 			"on that disk, or set %s to a directory on another disk", dir, stateDirSetting)
 	case errors.Is(err, syscall.EDQUOT):
-		return explain(err, "Pisati cannot write to the state directory %s, because a disk quota is full: the quota "+
+		return explain.New(err, "Pisati cannot write to the state directory %s, because a disk quota is full: the quota "+
 			"of the user or the group that runs Pisati, or of the directory itself, allows no more data on that disk. "+
 			"Delete files that count against that quota, or raise the quota", dir)
 	case err != nil:
-		return explain(err, "Pisati cannot write to the state directory %s: %s. Set %s to a directory that the user "+
+		return explain.New(err, "Pisati cannot write to the state directory %s: %s. Set %s to a directory that the user "+
 			"that runs Pisati can write to", dir, reason(err), stateDirSetting)
 	}
 	name := f.Name()
 	var errs []error
 	if err := f.Close(); err != nil {
-		errs = append(errs, explain(err, "Pisati made the file %s to check that it can write to the state directory %s, "+
+		errs = append(errs, explain.New(err, "Pisati made the file %s to check that it can write to the state directory %s, "+
 			"and closing that file failed: %s. The file system that holds %s reported this as the file was closed, so "+
 			"Pisati cannot be sure that it can write there. Fix what the file system reports, or set %s to a directory "+
 			"on another file system", name, dir, reason(err), dir, stateDirSetting))
 	}
 	// A check file that something else has removed leaves nothing behind.
 	if err := os.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		errs = append(errs, explain(err, "Pisati made the file %s to check that it can write to the state directory %s, "+
+		errs = append(errs, explain.New(err, "Pisati made the file %s to check that it can write to the state directory %s, "+
 			"but cannot remove it: %s. Remove that file", name, dir, reason(err)))
 	}
 	return errors.Join(errs...)
@@ -563,7 +548,7 @@ func checkStateDir(dir string) error {
 func lockState(ctx context.Context, dir string) (store.Lock, error) {
 	lock, err := store.AcquireLock(ctx, dir)
 	if errors.Is(err, store.ErrLocked) {
-		return store.Lock{}, explain(err, "another Pisati process is using the state directory %s. "+
+		return store.Lock{}, explain.New(err, "another Pisati process is using the state directory %s. "+
 			"Only one Pisati process can use it at a time. Stop the other process, then run this command again", dir)
 	}
 	return lock, err
@@ -639,18 +624,18 @@ func mainKeyMismatch(cause error, src config.SecretSource, dir string, origin ke
 			what = fmt.Sprintf("there was no main key in %s, so Pisati created one on this start. "+
 				"That new key cannot decrypt the data keys in this database. ", path)
 		}
-		return explain(cause, "%s%sReplace the file %s with that key, or %s, or put it in the credential pisati-main-key",
+		return explain.New(cause, "%s%sReplace the file %s with that key, or %s, or put it in the credential pisati-main-key",
 			what, needs, path, other)
 	case config.FromFile:
-		return explain(cause, "the main key in %[1]s cannot decrypt the data keys in this database. "+
+		return explain.New(cause, "the main key in %[1]s cannot decrypt the data keys in this database. "+
 			"keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE names that file. %[2]sReplace the file %[1]s with that key, "+
 			"or %[3]s", s.Path, needs, other)
 	case config.FromCredential:
-		return explain(cause, "the main key in the credential %[1]s cannot decrypt the data keys in this database. "+
+		return explain.New(cause, "the main key in the credential %[1]s cannot decrypt the data keys in this database. "+
 			"%[2]sPut that key in the credential %[1]s, or %[3]s", s.Name, needs, other)
 	default:
 		// config.Load returns no other source: a bug.
-		return explain(cause, "the main key cannot decrypt the data keys in this database, and it came from a source "+
+		return explain.New(cause, "the main key cannot decrypt the data keys in this database, and it came from a source "+
 			"that Pisati does not know, %T, which is a bug in Pisati", src)
 	}
 }

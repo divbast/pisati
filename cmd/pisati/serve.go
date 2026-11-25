@@ -26,6 +26,7 @@ import (
 	"github.com/divbast/pisati/internal/app"
 	"github.com/divbast/pisati/internal/config"
 	"github.com/divbast/pisati/internal/crypto"
+	"github.com/divbast/pisati/internal/explain"
 	"github.com/divbast/pisati/internal/httpx"
 	"github.com/divbast/pisati/internal/jobs"
 	"github.com/divbast/pisati/internal/store"
@@ -485,15 +486,15 @@ func listen(ctx context.Context, lc *net.ListenConfig, addr config.ListenAddr, s
 	case errors.Is(err, syscall.EADDRINUSE) && other.Port() == addr.Port():
 		// Pisati's own listener for other may hold addr under another name,
 		// which no lookup at start would show: the advice holds either way.
-		return nil, explain(err, "Pisati cannot listen on %[1]s, the address that %[2]s sets, because that address is in "+
+		return nil, explain.New(err, "Pisati cannot listen on %[1]s, the address that %[2]s sets, because that address is in "+
 			"use already. %[4]s is %[3]s, on the same port, and Pisati's own listener there may be what uses it. Set "+
 			"one of the two settings to another port. If %[1]s is still in use then, another process uses it: stop "+
 			"that process, or set %[2]s to another address", addr, setting, other, otherSetting)
 	case errors.Is(err, syscall.EADDRINUSE):
-		return nil, explain(err, "Pisati cannot listen on %s, the address that %s sets, because another process already "+
+		return nil, explain.New(err, "Pisati cannot listen on %s, the address that %s sets, because another process already "+
 			"uses it. Stop that process, or set %s to another address", addr, setting, setting)
 	case err != nil:
-		return nil, explain(err, "Pisati cannot listen on %s, the address that %s sets: %s", addr, setting, reason(err))
+		return nil, explain.New(err, "Pisati cannot listen on %s, the address that %s sets: %s", addr, setting, reason(err))
 	}
 	return ln, nil
 }
@@ -638,7 +639,7 @@ func serveOn(srv *http.Server, ln net.Listener, setting string) error {
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
-	return explain(err, "Pisati stopped serving on %s, the address that %s sets, because accepting connections there failed: %s",
+	return explain.New(err, "Pisati stopped serving on %s, the address that %s sets, because accepting connections there failed: %s",
 		ln.Addr(), setting, reason(err))
 }
 
