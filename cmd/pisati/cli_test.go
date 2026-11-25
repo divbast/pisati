@@ -133,8 +133,8 @@ func TestConfigValueOneLine(t *testing.T) {
 func TestDirectoryVariablesRefused(t *testing.T) {
 	for _, name := range []string{"CONFIGURATION_DIRECTORY", "CREDENTIALS_DIRECTORY"} {
 		for _, tc := range []struct{ value, rule string }{
-			{"/a:/b", `which has ":" in it. Pisati reads ":" as the mark between two directories, and takes one ` +
-				`directory here. Set it to one directory, whose full path has no ":" in it.`},
+			{"/a:/b", `which has ":" in it. In this variable, ":" separates two directories, but Pisati takes only one ` +
+				`directory from it. Set it to one directory, whose full path has no ":" in it.`},
 			{"etc/pisati", `which is not a full path. Set it to a full path that starts with "/".`},
 			{"/etc//pisati", `which has "//" in it. Write one "/" there instead.`},
 			{"/etc/pisati/", `which ends with "/". Remove the "/" at the end.`},

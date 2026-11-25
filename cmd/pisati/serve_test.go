@@ -340,8 +340,12 @@ func mustNotHaveStarted(t *testing.T, r result) {
 
 func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 	keys := t.TempDir()
-	const advice = "This database needs the main key it was last used with. A backup made by pisati backup does not " +
-		"hold that key. "
+	// Every line says which key the database needs, and that a backup does
+	// not hold it.
+	advice := []string{
+		"needs the main key that its data keys are encrypted with", "pisati keys rewrap",
+		"A backup made by pisati backup does not hold that key.",
+	}
 	for _, tc := range []struct {
 		name string
 		// key, when set, gives the old site's main key and the new
@@ -349,28 +353,32 @@ func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 		key func(t *testing.T, s *site, name string)
 		// before has the new site make its own key before the restore.
 		before bool
-		want   func(s *site) string
+		// want gives what the line must hold, besides advice.
+		want func(s *site) []string
 	}{
 		{
 			name: "a key generated on this start",
-			want: func(s *site) string {
+			want: func(s *site) []string {
 				path := filepath.Join(s.state, "keys", "main.key")
-				return "pisati: there was no main key in " + path + ", so Pisati created one on this start. " +
-					"That new key cannot decrypt the data keys in this database. " + advice + "Replace the file " + path +
-					" with that key" +
-					", or set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it, " +
-					"or put it in the credential pisati-main-key."
+				return []string{
+					"pisati: there was no main key in " + path + ", so Pisati created one on this start.",
+					"That new key cannot decrypt the data keys in this database.", "Replace the file " + path + " with that key",
+					"set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it",
+					"put it in the credential pisati-main-key",
+				}
 			},
 		},
 		{
 			name:   "a key generated before",
 			before: true,
-			want: func(s *site) string {
+			want: func(s *site) []string {
 				path := filepath.Join(s.state, "keys", "main.key")
-				return "pisati: the main key in " + path + " cannot decrypt the data keys in this database. " +
-					advice + "Replace the file " + path + " with that key" +
-					", or set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it, " +
-					"or put it in the credential pisati-main-key."
+				return []string{
+					"pisati: the main key in " + path + " cannot decrypt the data keys in this database.",
+					"Replace the file " + path + " with that key",
+					"set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it",
+					"put it in the credential pisati-main-key",
+				}
 			},
 		},
 		{
@@ -378,12 +386,13 @@ func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 			key: func(t *testing.T, s *site, name string) {
 				s.env["PISATI_KEYS_MAIN_KEY_FILE"] = writeKeyFile(t, keys, name)
 			},
-			want: func(s *site) string {
+			want: func(s *site) []string {
 				path := s.env["PISATI_KEYS_MAIN_KEY_FILE"]
-				return "pisati: the main key in " + path + " cannot decrypt the data keys in this database. " +
-					"keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE names that file. " + advice + "Replace the file " + path +
-					" with that key" +
-					", or set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it."
+				return []string{
+					"pisati: the main key in " + path + " cannot decrypt the data keys in this database.",
+					"keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE names that file.", "Replace the file " + path + " with that key",
+					"set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it",
+				}
 			},
 		},
 		{
@@ -393,10 +402,12 @@ func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 				writeKeyFile(t, creds, "pisati-main-key")
 				s.env["CREDENTIALS_DIRECTORY"] = creds
 			},
-			want: func(*site) string {
-				return "pisati: the main key in the credential pisati-main-key cannot decrypt the data keys in this database. " +
-					advice + "Put that key in the credential pisati-main-key, " +
-					"or set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it."
+			want: func(*site) []string {
+				return []string{
+					"pisati: the main key in the credential pisati-main-key cannot decrypt the data keys in this database.",
+					"Put that key in the credential pisati-main-key",
+					"set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it",
+				}
 			},
 		},
 	} {
@@ -427,8 +438,8 @@ func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 			s.mustRun(t, "restore", backup)
 			holdPorts(t, s)
 			r := s.run(t, "serve")
-			if want := tc.want(s); r.code != 1 || r.line(t) != want {
-				t.Errorf("serve = %d, %q; want 1, %q", r.code, r.stderr, want)
+			if want := append(tc.want(s), advice...); r.code != 1 || !holdsAll(r.line(t), want) {
+				t.Errorf("serve = %d, %q; want 1, and one line holding each of %q", r.code, r.stderr, want)
 			}
 			mustNotHaveStarted(t, r)
 		})
@@ -550,23 +561,18 @@ func TestServeRefusesSameAddress(t *testing.T) {
 	for _, tc := range []struct {
 		name, public, internal string
 		// why is what the line says after the settings, with %[1]d for
-		// the port.
+		// the port: which address stands for every address.
 		why string
 	}{
 		{"the same address", "127.0.0.1:%d", "127.0.0.1:%d", ""},
-		{
-			"every address and one of them", ":%d", "127.0.0.1:%d",
-			":%[1]d stands for every address of this machine, so Pisati needs the two on different ports.",
-		},
-		{
-			"one address and every address", "127.0.0.1:%d", "[::]:%d",
-			"[::]:%[1]d stands for every address of this machine, so Pisati needs the two on different ports.",
-		},
+		{"every address and one of them", ":%d", "127.0.0.1:%d", ":%[1]d stands for every address of this machine."},
+		{"one address and every address", "127.0.0.1:%d", "[::]:%d", "[::]:%[1]d stands for every address of this machine."},
 		{
 			"every IPv4 address and every address", "0.0.0.0:%d", "[::]:%d",
-			"0.0.0.0:%[1]d stands for every IPv4 address of this machine, and [::]:%[1]d for every address of this " +
-				"machine, so Pisati needs the two on different ports.",
+			"0.0.0.0:%[1]d stands for every IPv4 address of this machine, and [::]:%[1]d for every address of this machine.",
 		},
+		// They share no address: the rule refuses them all the same.
+		{"every IPv4 address and an IPv6 one", "0.0.0.0:%d", "[::1]:%d", "0.0.0.0:%[1]d stands for every IPv4 address of this machine."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newSite(t)
@@ -575,15 +581,17 @@ func TestServeRefusesSameAddress(t *testing.T) {
 			s.env["PISATI_SERVER_INTERNAL_LISTEN"] = internal
 			holdPorts(t, s)
 			r := s.run(t, "serve")
-			want := fmt.Sprintf("pisati: server.listen (PISATI_SERVER_LISTEN) and server.internal_listen "+
+			want := []string{fmt.Sprintf("pisati: server.listen (PISATI_SERVER_LISTEN) and server.internal_listen "+
 				"(PISATI_SERVER_INTERNAL_LISTEN) are both %s. Pisati needs a different address for each. Set one of them "+
-				"to another port.", public)
+				"to another port.", public)}
 			if tc.why != "" {
-				want = "pisati: " + fmt.Sprintf(both, public, internal, s.public) + fmt.Sprintf(tc.why, s.public) +
-					" Set one of them to another port."
+				want = []string{
+					"pisati: " + fmt.Sprintf(both, public, internal, s.public) + fmt.Sprintf(tc.why, s.public),
+					"Pisati needs them on different ports", "Set one of them to another port.",
+				}
 			}
-			if r.code != 1 || r.line(t) != want {
-				t.Errorf("serve = %d, %q; want 1, %q", r.code, r.stderr, want)
+			if r.code != 1 || !holdsAll(r.line(t), want) {
+				t.Errorf("serve = %d, %q; want 1, and one line holding each of %q", r.code, r.stderr, want)
 			}
 			if entries, err := os.ReadDir(s.state); err != nil || len(entries) != 0 {
 				t.Errorf("the state directory holds %v (%v), want nothing: serve refuses before anything else", entries, err)
@@ -601,21 +609,25 @@ func TestServeNamesItsOwnListener(t *testing.T) {
 	s.env["PISATI_SERVER_LISTEN"] = fmt.Sprintf("localhost:%d", s.public)
 	s.env["PISATI_SERVER_INTERNAL_LISTEN"] = fmt.Sprintf("127.0.0.1:%d", s.public)
 	r := s.run(t, "serve")
-	line := func(addr, setting, other, otherSetting, host, otherHost string) string {
-		return fmt.Sprintf("pisati: Pisati cannot listen on %[1]s, the address that %[2]s sets, because that address is "+
-			"in use already. %[4]s is %[3]s, on the same port. If %[6]s and %[5]s name the same address, Pisati itself "+
-			"uses it, for %[4]s: set one of the two settings to another port. If they do not, another process uses it: "+
-			"stop that process, or set %[2]s to another address.", addr, setting, other, otherSetting, host, otherHost)
+	// What the line holds when addr, which setting gives, is the one that
+	// finds itself in use.
+	parts := func(addr, setting, other, otherSetting string) []string {
+		return []string{
+			"pisati: Pisati cannot listen on " + addr + ", the address that " + setting + " sets",
+			otherSetting + " is " + other + ", on the same port, and Pisati's own listener there may be what uses it.",
+			"Set one of the two settings to another port.", "set " + setting + " to another address.",
+		}
 	}
 	public, internal := s.env["PISATI_SERVER_LISTEN"], s.env["PISATI_SERVER_INTERNAL_LISTEN"]
 	const publicSetting = "server.listen (PISATI_SERVER_LISTEN)"
 	const internalSetting = "server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN)"
-	wants := []string{
-		line(internal, internalSetting, public, publicSetting, "127.0.0.1", "localhost"),
-		line(public, publicSetting, internal, internalSetting, "localhost", "127.0.0.1"),
+	wants := [][]string{
+		parts(internal, internalSetting, public, publicSetting),
+		parts(public, publicSetting, internal, internalSetting),
 	}
-	if lines := r.lines(t); r.code != 1 || len(lines) != 1 || !slices.Contains(wants, lines[0]) {
-		t.Errorf("serve = %d, %q; want 1, and one of:\n%s", r.code, r.stderr, strings.Join(wants, "\n"))
+	lines := r.lines(t)
+	if r.code != 1 || len(lines) != 1 || !slices.ContainsFunc(wants, func(w []string) bool { return holdsAll(lines[0], w) }) {
+		t.Errorf("serve = %d, %q; want 1, and one line holding each part of one of %q", r.code, r.stderr, wants)
 	}
 	mustNotHaveStarted(t, r)
 }

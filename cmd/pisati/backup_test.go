@@ -127,12 +127,12 @@ func TestBackupStopped(t *testing.T) {
 		{
 			"by a first signal", func(cancel, _ func()) { cancel() },
 			"pisati: the backup stopped before it finished, because a SIGTERM or SIGINT signal arrived. " +
-				"No backup was made, and nothing was left at %s.",
+				"No backup was made, and nothing of it is left at %s.",
 		},
 		{
 			"by a second signal", func(_, halt func()) { halt() },
 			"pisati: the backup stopped at once, before it finished, because a second SIGTERM or SIGINT signal " +
-				"arrived. No backup was made, and nothing was left at %s.",
+				"arrived. No backup was made, and nothing of it is left at %s.",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

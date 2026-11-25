@@ -48,11 +48,28 @@ func (c backupCmd) Run(ctx context.Context, h Host) error {
 	}
 	if r := remove.Load(); r != nil {
 		if err := (*r)(); err != nil {
-			return explain(err, "%s. No backup was made, but Pisati cannot remove what the unfinished copy wrote at %s: "+
-				"%s. Remove it", why, dest, reason(err))
+			return notRemoved(err, why, dest)
 		}
 	}
-	return fmt.Errorf("%s. No backup was made, and nothing was left at %s", why, dest)
+	return fmt.Errorf("%s. No backup was made, and nothing of it is left at %s", why, dest)
+}
+
+// notRemoved is the error of a backup to dest stopped, as why says, whose
+// unfinished copy's files err says Pisati cannot remove: one problem for
+// each file, naming it, with the operating system's reason.
+func notRemoved(err error, why, dest string) error {
+	var errs []error
+	for _, p := range separate(err) {
+		pe, ok := errors.AsType[*fs.PathError](p.err)
+		if !ok {
+			errs = append(errs, explain(p.err, "%s. No backup was made, but Pisati cannot remove what the unfinished "+
+				"copy wrote at %s: %s. Remove it", why, dest, p.msg))
+			continue
+		}
+		errs = append(errs, explain(p.err, "%s. No backup was made, but Pisati cannot remove the file %s, which the "+
+			"unfinished copy wrote: %s. Remove it", why, pe.Path, pe.Err))
+	}
+	return errors.Join(errs...)
 }
 
 // backup is Run's work: it copies the database to dest, and calls made

@@ -162,8 +162,12 @@ func sameAddress(srv config.Server) error {
 		// The second without its verb: "and [::]:8080 for every address".
 		every[1] = strings.Replace(every[1], " stands for ", " for ", 1)
 	}
-	return fmt.Errorf("%s is %s and %s is %s, both on port %d. %s, so Pisati needs the two on different ports. Set one "+
-		"of them to another port", publicSetting, public, internalSetting, internal, public.Port(), strings.Join(every, ", and "))
+	// The rule, not an overlap: 0.0.0.0 and [::1] share no address, and
+	// are refused all the same, as some systems would refuse others.
+	return fmt.Errorf("%s is %s and %s is %s, both on port %d. %s. When one of the two stands for every address or "+
+		"every IPv4 address, Pisati needs them on different ports: some systems refuse two listeners like these, so "+
+		"Pisati refuses them on every system. Set one of them to another port", publicSetting, public, internalSetting,
+		internal, public.Port(), strings.Join(every, ", and "))
 }
 
 // addressScope says which addresses of this machine host stands for when
@@ -479,11 +483,12 @@ func listen(ctx context.Context, lc *net.ListenConfig, addr config.ListenAddr, s
 	ln, err := lc.Listen(ctx, "tcp", addr.String())
 	switch {
 	case errors.Is(err, syscall.EADDRINUSE) && other.Port() == addr.Port():
+		// Pisati's own listener for other may hold addr under another name,
+		// which no lookup at start would show: the advice holds either way.
 		return nil, explain(err, "Pisati cannot listen on %[1]s, the address that %[2]s sets, because that address is in "+
-			"use already. %[4]s is %[3]s, on the same port. If %[6]s and %[5]s name the same address, Pisati itself uses "+
-			"it, for %[4]s: set one of the two settings to another port. If they do not, another process uses it: stop "+
-			"that process, or set %[2]s to another address", addr, setting, other, otherSetting, listenHost(addr),
-			listenHost(other))
+			"use already. %[4]s is %[3]s, on the same port, and Pisati's own listener there may be what uses it. Set "+
+			"one of the two settings to another port. If %[1]s is still in use then, another process uses it: stop "+
+			"that process, or set %[2]s to another address", addr, setting, other, otherSetting)
 	case errors.Is(err, syscall.EADDRINUSE):
 		return nil, explain(err, "Pisati cannot listen on %s, the address that %s sets, because another process already "+
 			"uses it. Stop that process, or set %s to another address", addr, setting, setting)
@@ -620,8 +625,8 @@ func (r *running) serve(ctx context.Context, h Host, l *life) error {
 	deadline, cancel := context.WithDeadline(context.WithoutCancel(ctx), stopAt())
 	defer cancel()
 	if ferr := r.tel.Shutdown(deadline); ferr != nil {
-		r.log.WarnContext(deadline, "stopping telemetry failed, so some traces or metrics may not have reached the collector",
-			"error", ferr)
+		r.log.WarnContext(deadline, "telemetry did not stop cleanly, so when telemetry.otlp_endpoint is set, the last "+
+			"traces may not have reached the OpenTelemetry collector it names", "error", ferr)
 	}
 	return err
 }

@@ -422,8 +422,8 @@ func directory(h Host, name string) (string, error) {
 func directoryRule(v string) string {
 	switch {
 	case strings.Contains(v, ":"):
-		return `which has ":" in it. Pisati reads ":" as the mark between two directories, and takes one directory ` +
-			`here. Set it to one directory, whose full path has no ":" in it`
+		return `which has ":" in it. In this variable, ":" separates two directories, but Pisati takes only one ` +
+			`directory from it. Set it to one directory, whose full path has no ":" in it`
 	case !filepath.IsAbs(v):
 		return `which is not a full path. Set it to a full path that starts with "/"`
 	case strings.Contains(v, "//"):
@@ -535,9 +535,9 @@ func checkStateDir(dir string) error {
 		return explain(err, "Pisati cannot write to the state directory %s, because its disk is full. Free some space "+
 			"on that disk, or set %s to a directory on another disk", dir, stateDirSetting)
 	case errors.Is(err, syscall.EDQUOT):
-		return explain(err, "Pisati cannot write to the state directory %s, because a disk quota is used up: the user "+
-			"or the group that runs Pisati, or the directory itself, may store no more on that disk. Delete files that "+
-			"count against that quota, or raise the quota", dir)
+		return explain(err, "Pisati cannot write to the state directory %s, because a disk quota is full: the quota "+
+			"of the user or the group that runs Pisati, or of the directory itself, allows no more data on that disk. "+
+			"Delete files that count against that quota, or raise the quota", dir)
 	case err != nil:
 		return explain(err, "Pisati cannot write to the state directory %s: %s. Set %s to a directory that the user "+
 			"that runs Pisati can write to", dir, reason(err), stateDirSetting)
@@ -546,8 +546,9 @@ func checkStateDir(dir string) error {
 	var errs []error
 	if err := f.Close(); err != nil {
 		errs = append(errs, explain(err, "Pisati made the file %s to check that it can write to the state directory %s, "+
-			"and closing that file failed: %s. So Pisati cannot be sure that it can write there. Check the file system "+
-			"that holds %s, or set %s to a directory on another file system", name, dir, reason(err), dir, stateDirSetting))
+			"and closing that file failed: %s. The file system that holds %s reported this as the file was closed, so "+
+			"Pisati cannot be sure that it can write there. Fix what the file system reports, or set %s to a directory "+
+			"on another file system", name, dir, reason(err), dir, stateDirSetting))
 	}
 	// A check file that something else has removed leaves nothing behind.
 	if err := os.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -625,8 +626,9 @@ func openKeyring(ctx context.Context, h Host, st *state, src config.SecretSource
 // it says where the key came from, and where to put the right one.
 func mainKeyMismatch(cause error, src config.SecretSource, dir string, origin keyOrigin) error {
 	const (
-		needs = "This database needs the main key it was last used with. A backup made by pisati backup does not " +
-			"hold that key. "
+		needs = "This database needs the main key that its data keys are encrypted with. That is the main key that " +
+			"pisati serve used with this database, or, once pisati keys rewrap has run, the new main key that the " +
+			"command was given. A backup made by pisati backup does not hold that key. "
 		other = "set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it"
 	)
 	switch s := src.(type) {
