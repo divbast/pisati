@@ -131,3 +131,23 @@ func TestNotAJoin(t *testing.T) {
 		t.Errorf("%q has Unwrap() []error, so it could be taken for a join", err)
 	}
 }
+
+func TestBytes(t *testing.T) {
+	t.Parallel()
+
+	for n, want := range map[int64]string{
+		0:       "0 bytes",
+		1:       "1 byte",
+		44:      "44 bytes",
+		999:     "999 bytes",
+		1000:    "1,000 bytes",
+		65536:   "65,536 bytes",
+		1 << 20: "1,048,576 bytes",
+		-1500:   "-1,500 bytes",
+		1 << 62: "4,611,686,018,427,387,904 bytes",
+	} {
+		if got := explain.Bytes(n); got != want {
+			t.Errorf("Bytes(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
