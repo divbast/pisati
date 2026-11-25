@@ -198,8 +198,10 @@ func expressionAt(data []byte, at int) (start, header int) {
 		if i >= at || i >= len(data) {
 			return i, header
 		}
+		// The last expression also holds the end of the file, where
+		// go-toml reports a value cut short with no line ending after it.
 		end := expressionEnd(data, i)
-		if at < end {
+		if at < end || end == len(data) {
 			return i, header
 		}
 		if data[i] == '[' {

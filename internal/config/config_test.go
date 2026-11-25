@@ -791,6 +791,20 @@ func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 			value: []string{needle},
 		},
 		{
+			name:  "a time cut short at the end of the file",
+			file:  "[keys]\nmain_key = 1979-05-27T",
+			want:  "pisati.toml:2:23: keys.main_key" + fixed,
+			value: []string{"1979"},
+			crlf:  true,
+		},
+		{
+			name:  "a time cut short at the end of the file's last line",
+			file:  "[keys]\nmain_key = 1979-05-27T\n",
+			want:  "pisati.toml:2:23: keys.main_key" + fixed,
+			value: []string{"1979"},
+			crlf:  true,
+		},
+		{
 			name:  "a secret's key given twice",
 			file:  "[keys]\nmain_key = \"" + needle + "\"\nmain_key = \"y-" + needle + "\"\n",
 			want:  "pisati.toml:3:1: keys.main_key" + fixed,
