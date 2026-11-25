@@ -33,9 +33,12 @@ CREATE INDEX sessions_by_user ON sessions (user_id);
 -- outcome only while the token is still its claim's: attempts cannot
 -- serve, as a try cut off by shutdown is given back uncounted.
 -- finished_at is when the job became done or dead, which its retention
--- runs from.
+-- runs from. AUTOINCREMENT keeps the ID of a job the sweep has deleted
+-- from ever going to a new one, so that an ID in the log names one job,
+-- and a worker that has held a lease since before a sweep cannot match a
+-- new job's ID and token.
 CREATE TABLE jobs (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL,
     payload BLOB NOT NULL,
     idempotency_key TEXT UNIQUE,

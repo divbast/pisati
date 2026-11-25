@@ -30,9 +30,10 @@ import (
 )
 
 // Handler runs one job, given its payload, and returns nil once the job is
-// done. Otherwise its error says what follows: a *Permanent moves the job
-// to the dead letter, and a *Retry or any other error has it tried again,
-// unless it has had its last attempt. The Worker looks for an Outcome
+// done. Otherwise its error says what follows, unless the drain cut it
+// off, which makes the job ready again at once, with the try not counted:
+// a *Permanent moves the job to the dead letter, and a *Retry or any other
+// error has it tried again, unless it has had its last attempt. The Worker looks for an Outcome
 // anywhere in the error's chain, so a Handler may wrap one. A Handler
 // that panics has its job moved to the dead letter: a panic is a bug,
 // which trying again would only repeat. The error's message is logged and
@@ -86,7 +87,7 @@ func (r *Retry) Unwrap() error {
 func (*Retry) outcome() {}
 
 // Permanent moves a job to the dead letter at once, as no attempt can
-// succeed. Err is why, and may be nil.
+// succeed, unless the drain cut it off. Err is why, and may be nil.
 type Permanent struct {
 	Err error
 }
@@ -522,9 +523,9 @@ func (w *Worker) process(ctx, rec context.Context, j storedb.ClaimJobRow) {
 	// the Worker's clock, so that no other claim can take the job while it
 	// runs.
 	leased, cancel := context.WithTimeout(ctx, time.UnixMilli(j.LeaseUntil.Int64).Sub(w.clock()))
+	defer cancel()
 	err := w.call(leased, h, j)
 	cutOff := errors.Is(context.Cause(leased), errDrained)
-	cancel()
 	if err != nil && cutOff && !errors.Is(err, errPanicked) {
 		w.release(rec, j)
 		return

@@ -78,8 +78,9 @@ func TestSweepRemovesOldJobs(t *testing.T) {
 			synctest.Wait()
 			wantStates(t, s, "once run", "done", "dead", "ready")
 
-			// The sweep 10 minutes in finds the done job two hours short of
-			// its retention.
+			// The sweep 10 minutes in finds the done job an hour and 50
+			// minutes short of its retention: it is that much younger than a
+			// week, by the clock 10 minutes on.
 			st.ahead.Store(int64(st.opts.KeepDone - 2*time.Hour))
 			time.Sleep(st.opts.SweepEvery + time.Minute)
 			wantStates(t, s, "short of a week", "done", "dead", "ready")
@@ -125,11 +126,38 @@ func TestSweepRemovesOldJobs(t *testing.T) {
 		})
 	})
 
+	t.Run("never giving a swept job's ID to a new one", func(t *testing.T) {
+		inBubble(t, func(t *testing.T, s *store.Store) {
+			st := newSweepTest(t, s)
+			enqueue(t, s, jobs.Job{Kind: st.ok})
+			enqueue(t, s, jobs.Job{Kind: st.bad})
+			stop := start(t, st.w)
+			synctest.Wait()
+			stopped(t, stop)
+			rows := jobRows(t, s)
+			last := rows[len(rows)-1].ID
+
+			// The sweep as Run starts again, thirty days on, leaves the
+			// table empty: a new row would take the first ID again, were
+			// the IDs not kept apart.
+			st.ahead.Store(int64(st.opts.KeepDead))
+			stop = start(t, st.w)
+			synctest.Wait()
+			stopped(t, stop)
+			wantStates(t, s, "swept")
+			enqueue(t, s, jobs.Job{Kind: st.ok, RunAt: time.Now().AddDate(1, 0, 0)})
+			if id := onlyRow(t, s).ID; id <= last {
+				t.Errorf("the job added after the sweep has the ID %d, want one above %d, the last swept", id, last)
+			}
+		})
+	})
+
 	t.Run("in batches", func(t *testing.T) {
 		inBubble(t, func(t *testing.T, s *store.Store) {
 			st := newSweepTest(t, s)
 			// More done jobs, long past their retention, than one batch
-			// takes; and one just finished.
+			// takes; and one ready job, which the sweep at start leaves, and
+			// which then runs.
 			const old = 1201
 			if _, err := s.DB().ExecContext(t.Context(), `
 				WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
