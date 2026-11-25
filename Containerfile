@@ -48,7 +48,7 @@ COPY internal/ internal/
 RUN rm -rf internal/web/dist
 COPY --from=web /src/internal/web/dist/ internal/web/dist/
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${PISATI_VERSION}" -o /out/pisati ./cmd/pisati \
-    && mkdir /out/state
+    && mkdir -p /out/lib/pisati
 
 FROM ${RUNTIME_IMAGE}
 ARG PISATI_VERSION
@@ -60,8 +60,10 @@ COPY --from=build /out/pisati /usr/local/bin/pisati
 COPY --from=web /src/pnpm-lock.yaml /usr/share/doc/pisati/pnpm-lock.yaml
 # The state directory, empty, and Pisati's user's alone. The root is
 # read-only, so Pisati refuses to start until a volume is mounted here; an
-# empty volume starts out with this directory's owner and mode.
-COPY --from=build --chown=65532:65532 --chmod=0700 /out/state/ /var/lib/pisati/
+# empty volume starts out with this directory's owner and mode. It is
+# copied as what /out/lib holds, so that --chmod sets its own mode under
+# every builder: buildah sets none on a directory it makes to copy into.
+COPY --from=build --chown=65532:65532 --chmod=0700 /out/lib/ /var/lib/
 
 LABEL org.opencontainers.image.source="https://github.com/divbast/pisati" \
     org.opencontainers.image.url="https://github.com/divbast/pisati" \
