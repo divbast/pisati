@@ -64,6 +64,11 @@ type Store struct {
 	queries    *storedb.Queries
 	migrations fs.FS
 	path       string
+	// dir is the directory that holds the database, open, and name the
+	// database's file in it: Check looks there for the file at its path,
+	// which the connections, holding it open, cannot.
+	dir  *os.Root
+	name string
 }
 
 // Option changes how a Store that Open returns behaves.
@@ -123,11 +128,19 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 	if err := db.PingContext(ctx); err != nil {
 		return nil, errors.Join(cannotOpen(ctx, err, path), db.Close())
 	}
+	dirPath, name := filepath.Split(path)
+	dir, err := os.OpenRoot(dirPath)
+	if err != nil {
+		return nil, errors.Join(explain.New(err, "Pisati cannot open the directory %s, which holds the database %s: %s",
+			filepath.Clean(dirPath), path, pathless(err)), db.Close())
+	}
 	return &Store{
 		db:         db,
 		queries:    storedb.New(db),
 		migrations: o.migrations,
 		path:       path,
+		dir:        dir,
+		name:       name,
 	}, nil
 }
 
@@ -176,9 +189,10 @@ func (s *Store) Close() error {
 		return nil
 	}
 	if err := s.db.Close(); err != nil {
-		return explain.Wrap(err, "Pisati cannot close the database %s", s.path)
+		return errors.Join(explain.Wrap(err, "Pisati cannot close the database %s", s.path), s.dir.Close())
 	}
-	return nil
+	// The directory, opened read-only, holds nothing to flush.
+	return s.dir.Close()
 }
 
 // DB returns the pool of connections, for what the generated queries do
@@ -190,17 +204,26 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-// Check reads the database from its files, as a health check needs: it
+// Check reads the database from its files, as a health check needs. First
+// it checks that the database's file is still at its path, as a regular
+// file: the connections hold the file open, and still read one that has
+// been removed or moved, which the next start would not find. Then it
 // counts the tables and indexes in the schema, sqlite_schema, which SQLite
 // keeps on the database's first pages. A connection keeps the pages it has
 // read, and reads them again only when another connection has changed
 // them, so a file overwritten or cut short from outside SQLite would go
 // unseen: Check empties its connection's cache of pages first. It returns
-// nil once the read succeeds, and otherwise an error that names the
-// database and gives SQLite's reason, or ctx's error when ctx ends first.
-// The zero Store gets an error.
+// nil once both pass, and otherwise an error that names the database and
+// says what is wrong, or ctx's error when ctx ends first. The zero Store
+// gets an error.
 func (s *Store) Check(ctx context.Context) (err error) {
 	if err := s.open(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return cannotRead(ctx, err, s.path)
+	}
+	if err := s.atItsPath(); err != nil {
 		return err
 	}
 	conn, err := s.db.Conn(ctx)
@@ -365,6 +388,38 @@ func cannotOpen(ctx context.Context, err error, path string) error {
 	}
 	return explain.New(err, "Pisati cannot open the database %s: %s. Check that the user that runs Pisati can read "+
 		"and write the file and the directory that holds it, and that the file is a database that Pisati made", path, err)
+}
+
+// atItsPath returns an error unless the database's file is at its path, in
+// the directory the Store opened, as a regular file: what Check finds
+// otherwise, and what to do about it.
+func (s *Store) atItsPath() error {
+	info, err := s.dir.Lstat(s.name)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return explain.New(err, "Pisati cannot find its database file %s: it was removed or moved while Pisati ran. "+
+			"Pisati still has the file open, but would not find it when it next starts. Stop Pisati, then put the "+
+			"database back at that path, or restore a backup of it with pisati restore", s.path)
+	case err != nil:
+		return explain.New(err, "Pisati cannot check its database file %s: %s. Check that the user that runs Pisati "+
+			"can enter the directory that holds it", s.path, pathless(err))
+	case !info.Mode().IsRegular():
+		return fmt.Errorf("the database file %s is not a regular file any more: %s is there in its place. Stop "+
+			"Pisati, then put the database back at that path, or restore a backup of it with pisati restore", s.path,
+			kindOf(info.Mode()))
+	}
+	return nil
+}
+
+// kindOf names what a file of mode m is, other than a regular file.
+func kindOf(m fs.FileMode) string {
+	switch {
+	case m.IsDir():
+		return "a directory"
+	case m&fs.ModeSymlink != 0:
+		return "a symbolic link"
+	}
+	return "a file that is not a regular file"
 }
 
 // cannotRead is the error for the database at path, which err says Check

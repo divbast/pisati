@@ -714,3 +714,24 @@ func TestInternalListenerLogsProbesAtDebug(t *testing.T) {
 		t.Errorf("serve logged requests for %q, want only /nothing: /healthz and /metrics at debug", paths)
 	}
 }
+
+func TestHealthzSeesTheDatabaseGone(t *testing.T) {
+	s := newSite(t)
+	v := s.serve(t)
+	healthz := fmt.Sprintf("http://127.0.0.1:%d/healthz", s.internal)
+
+	// Removed under a running serve, the database still reads through the
+	// file serve holds open, but a start would not find it.
+	db := filepath.Join(s.state, "pisati.db")
+	if err := os.Remove(db); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := get(t, http.MethodGet, healthz); status != http.StatusServiceUnavailable || body != "unavailable" {
+		t.Errorf("GET /healthz with the database removed = %d %q, want 503 %q", status, body, "unavailable")
+	}
+	const failed = "health check: the database did not answer"
+	if found := v.stdout.logged(t, failed); len(found) != 1 || found[0]["level"] != "ERROR" ||
+		!strings.Contains(fmt.Sprint(found[0]["error"]), "Pisati cannot find its database file "+db) {
+		t.Errorf("serve logged %v, want one error record of the check, naming the database file", found)
+	}
+}

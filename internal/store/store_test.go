@@ -230,6 +230,33 @@ func TestCheckReadsTheFiles(t *testing.T) {
 	if err := s.Check(ctx); !errors.Is(err, context.Canceled) {
 		t.Errorf("Check with its context ended = %v, want context.Canceled", err)
 	}
+
+	// Removed, the database still reads through the connections, which
+	// hold the file open; something else in its place is not it either.
+	for _, tc := range []struct {
+		name, want string
+		replace    func(path string) error
+	}{
+		{"removed", "Pisati cannot find its database file", nil},
+		{"a directory in its place", "is not a regular file any more", func(path string) error { return os.Mkdir(path, 0o700) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := dbPath(t)
+			s := migratedStore(t, path)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if tc.replace != nil {
+				if err := tc.replace(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := s.Check(t.Context())
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), path) {
+				t.Errorf("Check with the database file %s = %v, want an error naming %s and holding %q", tc.name, err, path, tc.want)
+			}
+		})
+	}
 	var zero store.Store
 	if err := zero.Check(t.Context()); err == nil {
 		t.Error("Check of the zero Store succeeded, want an error")

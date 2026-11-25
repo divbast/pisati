@@ -88,13 +88,13 @@ breaking change.
   `HEALTHCHECK`, Podman by the same array passed as `--health-cmd`
 - **The shipped probe asks `/healthz` alone.** `pisati health` sends
   `GET /healthz` to the host `server.internal_listen` names, or 127.0.0.1
-  when it names none. `/healthz` answers 200 `ok` while Pisati reads its
-  database from disk within 2 s, and 503 `unavailable` when it cannot,
-  with the reason in `pisati serve`'s log alone. It never goes through
-  8080's routes: the acceptance tests do. It prints nothing when healthy,
-  which the contract's `health-probe` check asserts; each failure is a
-  line, `<check>: <reason>`: with no shell, the engine's health log is the
-  only record of why
+  when it names none. `/healthz` answers 200 `ok` while the database file
+  is at its path and Pisati reads it from disk within 2 s, and 503
+  `unavailable` otherwise, with the reason in `pisati serve`'s log alone.
+  It never goes through 8080's routes: the acceptance tests do. It prints
+  nothing when healthy, which the contract's `health-probe` check asserts;
+  each failure is a line, `<check>: <reason>`: with no shell, the engine's
+  health log is the only record of why
 - **8080 serves the site, and 8081 only health and metrics.** 8080
   answers every path the site has no page for, `/index.php`, `/healthz`
   and `/metrics` among them, with the site's HTML 404 page. 8081 answers
