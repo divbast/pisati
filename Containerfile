@@ -15,7 +15,7 @@ ARG NODE_IMAGE=dhi.io/node:26.13.1-debian13-dev@sha256:1e91de4150a28147380747229
 # The runtime: Docker Hardened Images' static, since the binary is static,
 # with nothing in it but CA certificates, time zones and the nonroot user
 # 65532: no shell and no package manager.
-ARG RUNTIME_IMAGE=dhi.io/static:20250419-debian13@sha256:4749130e822c145dbdf9ca11ec0cc2f694b5fe687fd74268a2b62160e6726f39
+ARG RUNTIME_IMAGE=dhi.io/static:20250419-debian13@sha256:1295ce0b300e0972ee6034f75f2161a629c12d760526f2e029528416dec2f96e
 
 FROM ${NODE_IMAGE} AS web
 # The Node image has npm and no pnpm, so npm installs pnpm first, exactly
