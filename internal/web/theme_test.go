@@ -153,6 +153,17 @@ func TestThemeToggleNoJS(t *testing.T) {
 		}
 	})
 
+	t.Run("a page whose own path next refuses comes back home", func(t *testing.T) {
+		t.Parallel()
+
+		p := newPisati(t, options{})
+		_, doc := p.page("/"+strings.Repeat("a", 8<<10), http.StatusNotFound)
+		next := one(t, byAttr(doc, "input", "name", "next"), "next fields")
+		if value, _ := attr(next, "value"); value != "/" {
+			t.Errorf("the next field of a page whose path is over 8 KiB holds %.20q…, want /", value)
+		}
+	})
+
 	t.Run("a next is sent back as a URL a header can hold", func(t *testing.T) {
 		t.Parallel()
 
@@ -183,14 +194,24 @@ func TestThemeToggleNoJS(t *testing.T) {
 		t.Parallel()
 
 		p := newPisati(t, options{})
-		w := p.do(request{method: http.MethodPost, target: "/_/theme", body: "theme=dark&next=%zz"})
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("a malformed form = %d, want 400", w.Code)
+		// Whichever pair is malformed, next, theme, another, or the query,
+		// the form is refused, and nothing is set.
+		for _, req := range []request{
+			{method: http.MethodPost, target: "/_/theme", body: "theme=dark&next=%zz"},
+			{method: http.MethodPost, target: "/_/theme", body: "theme=%zz&next=%2F"},
+			{method: http.MethodPost, target: "/_/theme", body: "theme=dark&next=%2F&other=%zz"},
+			{method: http.MethodPost, target: "/_/theme", body: "theme=dark;next=%2F"},
+			{method: http.MethodPost, target: "/_/theme?%zz", body: "theme=dark&next=%2F"},
+		} {
+			w := p.do(req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("%s %q = %d, want 400", req.target, req.body, w.Code)
+			}
+			if got := w.Header().Values("Set-Cookie"); len(got) != 0 {
+				t.Errorf("%s %q set %q", req.target, req.body, got)
+			}
+			wantCache(t, w, noStore, "a malformed form")
 		}
-		if got := w.Header().Values("Set-Cookie"); len(got) != 0 {
-			t.Errorf("a malformed form set %q", got)
-		}
-		wantCache(t, w, noStore, "a malformed form")
 
 		big := "theme=dark&next=%2F&pad=" + strings.Repeat("a", int(httpx.FormLimit))
 		if w := p.do(request{method: http.MethodPost, target: "/_/theme", body: big, length: -1}); w.Code != http.StatusRequestEntityTooLarge {

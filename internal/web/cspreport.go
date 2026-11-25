@@ -30,23 +30,70 @@ const (
 )
 
 // report is one report of an upload, decoded strictly for the fields
-// cspReport reads: a field of the wrong JSON type fails the whole upload.
-// Every other field is ignored, so a browser that sends more still
-// passes.
+// cspReport reads, each by its key exactly as CSP Level 3 spells it: a
+// field of the wrong JSON type fails the whole upload. A key in any other
+// case, like any other key, is an unknown field, and ignored, so a browser
+// that sends more still passes.
 type report struct {
-	Type string     `json:"type"`
-	Body reportBody `json:"body"`
+	Type string
+	Body reportBody
+}
+
+// UnmarshalJSON decodes one report, matching its keys in their own case
+// alone, where encoding/json would match them in any.
+func (rep *report) UnmarshalJSON(data []byte) error {
+	fields, err := jsonFields(data)
+	if err != nil {
+		return err
+	}
+	return errors.Join(decodeField(fields, "type", &rep.Type), decodeField(fields, "body", &rep.Body))
 }
 
 // reportBody is the body of a CSP violation's report, as CSP Level 3's
 // CSPViolationReportBody names its fields.
 type reportBody struct {
-	BlockedURL         string `json:"blockedURL"`
-	DocumentURL        string `json:"documentURL"`
-	EffectiveDirective string `json:"effectiveDirective"`
-	Disposition        string `json:"disposition"`
+	BlockedURL         string
+	DocumentURL        string
+	EffectiveDirective string
+	Disposition        string
 	// StatusCode is nil when the report gives none.
-	StatusCode *int `json:"statusCode"`
+	StatusCode *int
+}
+
+// UnmarshalJSON decodes a report's body, matching its keys in their own
+// case alone.
+func (b *reportBody) UnmarshalJSON(data []byte) error {
+	fields, err := jsonFields(data)
+	if err != nil {
+		return err
+	}
+	return errors.Join(
+		decodeField(fields, "blockedURL", &b.BlockedURL),
+		decodeField(fields, "documentURL", &b.DocumentURL),
+		decodeField(fields, "effectiveDirective", &b.EffectiveDirective),
+		decodeField(fields, "disposition", &b.Disposition),
+		decodeField(fields, "statusCode", &b.StatusCode),
+	)
+}
+
+// jsonFields decodes data, a JSON object or null, into its fields by
+// their keys as written. null has none.
+func jsonFields(data []byte) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
+// decodeField decodes the field fields holds under exactly key into
+// into, and leaves into as it is when there is none.
+func decodeField(fields map[string]json.RawMessage, key string, into any) error {
+	raw, ok := fields[key]
+	if !ok {
+		return nil
+	}
+	return json.Unmarshal(raw, into)
 }
 
 // cspReport logs the CSP violations a browser reports, as the Reporting

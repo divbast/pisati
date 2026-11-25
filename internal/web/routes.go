@@ -156,7 +156,7 @@ func (s *Site) routes() *http.ServeMux {
 	Route(mux, "POST /login", &Public{}, httpx.Isolated, httpx.FormLimit, http.HandlerFunc(s.signInPost))
 	Route(mux, "POST /_/theme", &Public{}, httpx.NotIsolated, httpx.FormLimit, http.HandlerFunc(s.setTheme))
 	Route(mux, "POST /_/csp-report", &Public{}, httpx.NotIsolated, httpx.CSPReportLimit, s.reports(http.HandlerFunc(s.cspReport)))
-	Route(mux, "GET /static/", &Public{}, httpx.NotIsolated, noBody, s.assets.Handler())
+	Route(mux, "GET /static/", &Public{}, httpx.NotIsolated, noBody, keepsOwnCaching(s.assets.Handler()))
 	// Every other GET finds no page. Other methods to a path no route
 	// takes are the mux's own 405.
 	Route(mux, "GET /", &Public{}, httpx.NotIsolated, noBody, http.HandlerFunc(s.notFound))
@@ -221,8 +221,8 @@ type page struct {
 	title string
 	theme theme
 	// next is the page's own path and query, which the theme form comes
-	// back to, or / when the rule next follows refuses them.
-	next                     string
+	// back to, or / when parseLocalPath refuses them.
+	next                     localPath
 	style, script, devClient asset
 }
 
@@ -247,10 +247,8 @@ func assetOf(tagOf func() (AssetTag, bool)) asset {
 // page returns what the layout shows around the answer to r, titled
 // title.
 func (s *Site) page(r *http.Request, title string) page {
-	next, ok := safeNext(r.URL.RequestURI())
-	if !ok {
-		next = "/"
-	}
+	// A path refused is the zero localPath: the home page.
+	next, _ := parseLocalPath(r.URL.RequestURI())
 	return page{
 		lang:      msg.English,
 		title:     title,

@@ -355,6 +355,59 @@ func TestCSPReportEndpointBounded(t *testing.T) {
 		}
 	})
 
+	t.Run("keys match in their own case alone", func(t *testing.T) {
+		t.Parallel()
+
+		// A key in another case is not the field it spells: it is an
+		// unknown key, ignored, whatever its value.
+		tests := []struct {
+			body string
+			want map[string]any
+		}{
+			{body: `[{"Type":"csp-violation","body":{"blockedURL":"inline"}}]`},
+			{
+				body: `[{"type":"csp-violation","BODY":{"blockedURL":"inline"}}]`,
+				want: map[string]any{"blocked_url": "other"},
+			},
+			{
+				body: `[{"type":"csp-violation","body":{"statuscode":200,"BlockedURL":"eval","blockedURL":"inline"}}]`,
+				want: map[string]any{"status_code": nil, "blocked_url": "inline"},
+			},
+			{
+				body: `[{"type":"csp-violation","body":{"StatusCode":"not a number","Disposition":7,"disposition":"report"}}]`,
+				want: map[string]any{"status_code": nil, "disposition": "report"},
+			},
+		}
+		for _, tt := range tests {
+			p := newPisati(t, options{})
+			if w := p.do(chromeUpload(tt.body)); w.Code != http.StatusNoContent {
+				t.Errorf("%s = %d, want 204", tt.body, w.Code)
+				continue
+			}
+			got := violations(t, p)
+			if tt.want == nil {
+				if len(got) != 0 {
+					t.Errorf("%s: records %v, want none: its type is no csp-violation", tt.body, got)
+				}
+				continue
+			}
+			if len(got) != 1 {
+				t.Errorf("%s: %d records, want 1", tt.body, len(got))
+				continue
+			}
+			for k, v := range tt.want {
+				switch {
+				case v == nil:
+					if _, ok := got[0][k]; ok {
+						t.Errorf("%s: %s = %v, want it left out", tt.body, k, got[0][k])
+					}
+				case fmt.Sprint(got[0][k]) != fmt.Sprint(v):
+					t.Errorf("%s: %s = %v, want %v", tt.body, k, got[0][k], v)
+				}
+			}
+		}
+	})
+
 	t.Run("a report of another type is skipped", func(t *testing.T) {
 		t.Parallel()
 

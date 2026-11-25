@@ -19,7 +19,7 @@ import (
 //   - *app.NotFound: 404;
 //   - *app.Forbidden: 403;
 //   - *app.Unauthenticated: 303 See Other to /login, with the page asked
-//     for as next when safeNext takes it;
+//     for as next when parseLocalPath takes it;
 //   - *app.Invalid: 400, saying which rule its Reason names, and never
 //     what was sent;
 //   - *app.Conflict: 409;
@@ -79,12 +79,12 @@ func (s *Site) problem(w http.ResponseWriter, r *http.Request, status int, headi
 }
 
 // redirectToSignIn sends r to sign in: 303 See Other to /login, with r's
-// path and query as next when safeNext takes them, and with none
+// path and query as next when parseLocalPath takes them, and with none
 // otherwise.
 func redirectToSignIn(w http.ResponseWriter, r *http.Request) {
 	target := "/login"
-	if next, ok := safeNext(r.URL.RequestURI()); ok {
-		target += "?" + url.Values{string(nextField): {next}}.Encode()
+	if next, ok := parseLocalPath(r.URL.RequestURI()); ok {
+		target += "?" + url.Values{string(nextField): {next.String()}}.Encode()
 	}
 	w.Header().Set("Location", target)
 	w.WriteHeader(http.StatusSeeOther)

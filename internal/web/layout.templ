@@ -79,7 +79,7 @@ templ scriptTag(a asset, nonce string) {
 // is pressed. theme.ts makes the same post without leaving the page.
 templ themeForm(p page) {
 	<form class="theme-switch" method="post" action="/_/theme" data-theme-form aria-label={ msg.ThemeLabel(p.lang) }>
-		<input type="hidden" name="next" value={ p.next }/>
+		<input type="hidden" name="next" value={ p.next.String() }/>
 		@themeButton(p, themeLight, icons.Sun(), msg.ThemeLight(p.lang))
 		@themeButton(p, themeDark, icons.Moon(), msg.ThemeDark(p.lang))
 		@themeButton(p, themeAuto, icons.Monitor(), msg.ThemeAuto(p.lang))

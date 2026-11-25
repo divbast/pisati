@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
-package main
+package icongen_test
 
 import (
 	"bytes"
@@ -15,17 +15,38 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/divbast/pisati/cmd/genicons/internal/icongen"
 )
 
-// licence is a package licence laid out as lucide-static's is: ISC, then
-// the icons derived from another project, under MIT.
-const licence = `ISC License
+// The REUSE tags the generated file carries, each spelt in two, so that
+// REUSE does not read them as this file's own.
+const (
+	spdxLicence   = "SPDX-" + "License-Identifier: "
+	spdxCopyright = "SPDX-" + "FileCopyrightText: "
+)
+
+// iscPart and mitPart are a package licence laid out as lucide-static's
+// is, line for line, with example holders and list: the ISC License, then
+// the icons derived from Feather and the MIT License they come under.
+const (
+	iscPart = `ISC License
 
 Copyright (c) 2026 Example Icons and Contributors
 
 Permission to use, copy, modify, and/or distribute this software for any
-purpose with or without fee is hereby granted.
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
 
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+`
+	mitPart = `
 ---
 
 The following Lucide icons are derived from the Feather project:
@@ -36,8 +57,26 @@ The MIT License (MIT) (for the icons listed above)
 
 Copyright (c) 2013-present Example Author
 
-Permission is hereby granted, free of charge, to any person obtaining a copy.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 `
+	licence = iscPart + mitPart
+)
 
 // svg returns an icon file as lucide-static writes one, with body inside
 // its svg element.
@@ -87,7 +126,7 @@ func fixture() fstest.MapFS {
 func TestRenderWritesEachIcon(t *testing.T) {
 	t.Parallel()
 
-	out, err := render(t.Context(), fixture(), []string{"sun", "moon", "monitor"})
+	out, err := icongen.Render(t.Context(), fixture(), []string{"sun", "moon", "monitor"})
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
@@ -124,9 +163,9 @@ func TestRenderMarksTheLicences(t *testing.T) {
 
 	header := func(t *testing.T, names ...string) string {
 		t.Helper()
-		out, err := render(t.Context(), fixture(), names)
+		out, err := icongen.Render(t.Context(), fixture(), names)
 		if err != nil {
-			t.Fatalf("render(%v): %v", names, err)
+			t.Fatalf("icongen.Render(%v): %v", names, err)
 		}
 		head, _, ok := strings.Cut(string(out), "package icons")
 		if !ok {
@@ -169,12 +208,12 @@ func TestRenderMarksTheLicences(t *testing.T) {
 func TestRenderIsDeterministic(t *testing.T) {
 	t.Parallel()
 
-	first, err := render(t.Context(), fixture(), []string{"sun", "moon", "monitor"})
+	first, err := icongen.Render(t.Context(), fixture(), []string{"sun", "moon", "monitor"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range 3 {
-		again, err := render(t.Context(), fixture(), []string{"monitor", "sun", "moon"})
+		again, err := icongen.Render(t.Context(), fixture(), []string{"monitor", "sun", "moon"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -189,6 +228,11 @@ func TestRenderRefuses(t *testing.T) {
 
 	withSun := func(sun string) fstest.MapFS {
 		return pkg(licence, map[string]string{"sun": sun})
+	}
+	// withLicence is a package with text as its LICENSE, and a well-formed
+	// sun and moon.
+	withLicence := func(text string) fstest.MapFS {
+		return pkg(text, map[string]string{"sun": svg("sun", `<path d="M1 1" />`), "moon": svg("moon", `<path d="M1 1" />`)})
 	}
 	tests := []struct {
 		name string
@@ -218,12 +262,29 @@ func TestRenderRefuses(t *testing.T) {
 			icon: "moon",
 		},
 		{name: "no licence", fsys: fstest.MapFS{"icons/sun.svg": {Data: []byte(svg("sun", `<path d="M1 1" />`))}}, icon: "sun"},
+		// The licence is held to lucide-static's layout, line for line: a
+		// line reworded, added or missing could change which icon comes
+		// under which licence, unseen.
+		{name: "the Feather line reworded", fsys: withLicence(strings.Replace(licence, "Feather project:", "Feather project (MIT):", 1)), icon: "moon"},
+		{name: "a line added after the ISC License", fsys: withLicence(iscPart + "Some icons are also under CC-BY-4.0.\n" + mitPart), icon: "sun"},
+		{name: "a line added at the end", fsys: withLicence(licence + "\nExcept the icons in the extras folder.\n"), icon: "sun"},
+		{name: "the ISC text reworded", fsys: withLicence(strings.Replace(licence, "for any\npurpose", "for some\npurpose", 1)), icon: "sun"},
+		{name: "the MIT text reworded", fsys: withLicence(strings.Replace(licence, "free of charge", "for a fee", 1)), icon: "moon"},
+		{name: "a second ISC copyright line", fsys: withLicence(strings.Replace(licence, "Contributors\n", "Contributors\nCopyright (c) 2026 Someone Else\n", 1)), icon: "sun"},
+		{name: "no ISC copyright line", fsys: withLicence(strings.Replace(licence, "Copyright (c) 2026 Example Icons and Contributors\n", "", 1)), icon: "sun"},
+		{
+			name: "an MIT License with no list of the icons it covers",
+			fsys: withLicence(strings.Replace(licence, "The following Lucide icons are derived from the Feather project:\n\nairplay, moon, x\n", "", 1)),
+			icon: "sun",
+		},
+		{name: "a list of icons spelt otherwise", fsys: withLicence(strings.Replace(licence, "airplay, moon, x", "airplay; moon; x", 1)), icon: "moon"},
+		{name: "a list with no MIT License after it", fsys: withLicence(licence[:strings.Index(licence, "The MIT License")]), icon: "sun"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			out, err := render(t.Context(), tt.fsys, []string{tt.icon})
+			out, err := icongen.Render(t.Context(), tt.fsys, []string{tt.icon})
 			if err == nil {
 				t.Fatalf("render accepted it and wrote:\n%s", out)
 			}
@@ -239,7 +300,7 @@ func TestRenderStopsWhenCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := render(ctx, fixture(), []string{"sun"}); !errors.Is(err, context.Canceled) {
+	if _, err := icongen.Render(ctx, fixture(), []string{"sun"}); !errors.Is(err, context.Canceled) {
 		t.Errorf("render with a cancelled context = %v, want context.Canceled", err)
 	}
 }
@@ -248,7 +309,7 @@ func TestGenerateWritesTheFile(t *testing.T) {
 	t.Parallel()
 
 	out := filepath.Join(t.TempDir(), "icons.go")
-	if err := generate(t.Context(), fixture(), []string{"sun"}, out); err != nil {
+	if err := icongen.Generate(t.Context(), fixture(), []string{"sun"}, out); err != nil {
 		t.Fatalf("generate: %v", err)
 	}
 	dir, err := os.OpenRoot(filepath.Dir(out))
@@ -264,7 +325,7 @@ func TestGenerateWritesTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := render(t.Context(), fixture(), []string{"sun"})
+	want, err := icongen.Render(t.Context(), fixture(), []string{"sun"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +337,7 @@ func TestGenerateWritesTheFile(t *testing.T) {
 func TestTheCommittedList(t *testing.T) {
 	t.Parallel()
 
-	if got := strings.Join(names(), " "); got != "monitor moon sun" {
-		t.Errorf("names() = %s, want the committed list: monitor moon sun", got)
+	if got := strings.Join(icongen.Icons(), " "); got != "monitor moon sun" {
+		t.Errorf("Icons() = %s, want the committed list: monitor moon sun", got)
 	}
 }

@@ -4,7 +4,10 @@
 package web
 
 import (
+	"bytes"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -22,10 +25,13 @@ const (
 	maxNext = 8 << 10
 )
 
-// The theme form's fields.
+// The theme form's fields, and formField, which names the form as a
+// whole, for what fails that is neither field: a pair of another name, or
+// the request's query.
 const (
 	themeField app.Field = "theme"
 	nextField  app.Field = "next"
+	formField  app.Field = "form"
 )
 
 // theme is the colour scheme a page asks for, as its <html data-theme>
@@ -92,51 +98,99 @@ func (s *Site) themeCookie(t theme) *http.Cookie {
 // setTheme answers the theme form: it sets the theme cookie to the theme
 // posted, light, dark or auto, and sends the browser back to next with
 // 303 See Other. A theme it does not know, or none, changes nothing, and
-// the browser goes back all the same. A next the rule safeNext follows
-// refuses sends the browser to / instead. A form it cannot read is
-// answered 400, and one over its limit 413.
+// the browser goes back all the same. A next that parseLocalPath refuses
+// sends the browser to / instead. A form it cannot read is answered 400,
+// and one over its limit 413.
 func (s *Site) setTheme(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
+	// A copy whose body is kept as it is read, so that a malformed form
+	// can name its field: a handler must not change the request it is
+	// given. The body is held to the route's limit already.
+	var body bytes.Buffer
+	form := *r
+	form.Body = io.NopCloser(io.TeeReader(r.Body, &body))
+	if err := form.ParseForm(); err != nil {
 		if httpx.RefuseTooLarge(w, err) {
 			return
 		}
-		s.WriteError(w, r, &app.Invalid{Field: themeField, Reason: app.Malformed})
+		s.WriteError(w, r, &app.Invalid{Field: malformedField(body.String()), Reason: app.Malformed})
 		return
 	}
-	if t, ok := parseTheme(r.PostForm.Get(string(themeField))); ok {
+	if t, ok := parseTheme(form.PostForm.Get(string(themeField))); ok {
 		http.SetCookie(w, s.themeCookie(t))
 	}
-	next, ok := safeNext(r.PostForm.Get(string(nextField)))
-	if !ok {
-		next = "/"
-	}
+	// A next refused is the zero localPath: the home page.
+	next, _ := parseLocalPath(form.PostForm.Get(string(nextField)))
 	w.Header().Set("Location", locationOf(next))
 	w.WriteHeader(http.StatusSeeOther)
 }
 
-// safeNext returns s, and whether it is a path on this site a browser may
-// be sent back to: a single / first, so it names no scheme or host, and
-// neither // nor /\ first, which a browser would read as another host;
-// valid UTF-8, with no control character anywhere, as browsers drop some
-// of them before they read a URL; and at most 8 KiB.
-func safeNext(s string) (string, bool) {
-	if len(s) == 0 || len(s) > maxNext || s[0] != '/' {
-		return "", false
+// malformedField returns the field of the first pair in body, a form
+// ParseForm refused, that is malformed: themeField or nextField when the
+// pair is one of theirs, and formField for any other pair, or when every
+// pair of body is well formed, and so the request's query failed. It
+// never names a field from what body holds.
+func malformedField(body string) app.Field {
+	for pair := range strings.SplitSeq(body, "&") {
+		key, value, _ := strings.Cut(pair, "=")
+		name, err := url.QueryUnescape(key)
+		if err != nil || strings.Contains(key, ";") {
+			return formField
+		}
+		if _, err := url.QueryUnescape(value); err == nil && !strings.Contains(value, ";") {
+			continue
+		}
+		switch name {
+		case string(themeField):
+			return themeField
+		case string(nextField):
+			return nextField
+		}
+		return formField
 	}
-	if len(s) > 1 && (s[1] == '/' || s[1] == '\\') {
-		return "", false
-	}
-	if !utf8.ValidString(s) || strings.ContainsFunc(s, unicode.IsControl) {
-		return "", false
-	}
-	return s, true
+	return formField
 }
 
-// locationOf returns next, a path safeNext took, as a Location header
-// carries it: each byte a URL may not hold as it is, a space or a byte of
-// a character outside ASCII among them, percent-encoded, as is a % that
-// does not begin an escape. A browser reads it as the same path.
-func locationOf(next string) string {
+// localPath is a path on this site that a browser may be sent to, as a
+// next that the theme switch or signing in comes back to. parseLocalPath
+// is the only way to make one, so a value of the type has passed its
+// rule. The zero localPath is /, the home page, where every next refused
+// goes instead.
+type localPath struct {
+	path string
+}
+
+// parseLocalPath returns s as a localPath, and whether it is one: a
+// single / first, so it names no scheme or host, and neither // nor /\
+// first, which a browser would read as another host; valid UTF-8, with no
+// control character anywhere, as browsers drop some of them before they
+// read a URL; and at most 8 KiB.
+func parseLocalPath(s string) (localPath, bool) {
+	if len(s) == 0 || len(s) > maxNext || s[0] != '/' {
+		return localPath{}, false
+	}
+	if len(s) > 1 && (s[1] == '/' || s[1] == '\\') {
+		return localPath{}, false
+	}
+	if !utf8.ValidString(s) || strings.ContainsFunc(s, unicode.IsControl) {
+		return localPath{}, false
+	}
+	return localPath{path: s}, true
+}
+
+// String returns the path as it was given, or / for the zero localPath.
+func (p localPath) String() string {
+	if p.path == "" {
+		return "/"
+	}
+	return p.path
+}
+
+// locationOf returns next as a Location header carries it: each byte a
+// URL may not hold as it is, a space or a byte of a character outside
+// ASCII among them, percent-encoded, as is a % that does not begin an
+// escape. A browser reads it as the same path.
+func locationOf(p localPath) string {
+	next := p.String()
 	var b strings.Builder
 	for i := 0; i < len(next); i++ {
 		c := next[i]

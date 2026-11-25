@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
-package main
+package icongen_test
 
 import (
 	"testing"

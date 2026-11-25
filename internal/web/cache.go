@@ -3,7 +3,10 @@
 
 package web
 
-import "net/http"
+import (
+	"context"
+	"net/http"
+)
 
 // The Cache-Control values the cache policy sends.
 const (
@@ -23,7 +26,8 @@ type response struct {
 	signedIn bool
 	// setsCookie is whether the response sets or clears a cookie.
 	setsCookie bool
-	// own is the Cache-Control the handler set itself, if any.
+	// own is the Cache-Control the static files' handler set itself, if
+	// any: what any other handler sets is not kept.
 	own string
 }
 
@@ -32,8 +36,8 @@ type response struct {
 //
 //  1. a response that sets or clears a cookie is stored by no cache, even
 //     one that would otherwise be kept;
-//  2. a response whose handler chose its own Cache-Control keeps it: only
-//     /static/'s files, which are immutable;
+//  2. a static file's response keeps the Cache-Control its handler
+//     chose, which is immutable: the only handler whose own is kept;
 //  3. a response to a signed-in visitor is stored by no cache;
 //  4. a GET or HEAD answered 200 or 404 may be kept by any cache for 5
 //     minutes, apart for each set of cookies: Vary: Cookie;
@@ -54,18 +58,26 @@ func (resp response) cacheControl() (value string, varyCookie bool) {
 
 // cachePolicy sets the Cache-Control of every response next sends, and
 // Vary: Cookie where it may be kept, as response.cacheControl decides,
-// just before its header is written. A cookie set before next runs, as
-// SessionMiddleware clears a stale one, counts as the response's.
+// just before its header is written, replacing whatever Cache-Control the
+// response carries but a static file's (see keepsOwnCaching). A cookie
+// set before next runs, as SessionMiddleware clears a stale one, counts
+// as the response's.
 func cachePolicy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, signedIn := SessionFrom(r.Context())
 		page := r.Method == http.MethodGet || r.Method == http.MethodHead
+		served := &servedBy{}
+		r = r.WithContext(context.WithValue(r.Context(), servedByKey{}, served))
 		cw := &cacheWriter{ResponseWriter: w}
 		cw.decide = func(status int) {
 			h := w.Header()
+			own := ""
+			if served.staticFiles {
+				own = h.Get("Cache-Control")
+			}
 			value, vary := response{
 				status: status, page: page, signedIn: signedIn,
-				setsCookie: len(h.Values("Set-Cookie")) > 0, own: h.Get("Cache-Control"),
+				setsCookie: len(h.Values("Set-Cookie")) > 0, own: own,
 			}.cacheControl()
 			h.Set("Cache-Control", value)
 			if vary {
@@ -79,6 +91,28 @@ func cachePolicy(next http.Handler) http.Handler {
 			cw.decided = true
 			cw.decide(http.StatusOK)
 		}
+	})
+}
+
+// servedBy records, for the cache policy, whether a request was served by
+// the static files' handler. A pointer to it rides in the request's
+// context, so the copy the handler gets shares it.
+type servedBy struct {
+	staticFiles bool
+}
+
+// servedByKey keys a request's servedBy in its context.
+type servedByKey struct{}
+
+// keepsOwnCaching serves next, the static files' handler, and marks the
+// response as one whose own Cache-Control the cache policy keeps. No
+// other handler's is kept.
+func keepsOwnCaching(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if served, ok := r.Context().Value(servedByKey{}).(*servedBy); ok {
+			served.staticFiles = true
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

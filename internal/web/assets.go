@@ -271,9 +271,11 @@ func (a *Assets) DevClient() (AssetTag, bool) {
 // own Content-Type, and with Cache-Control: public, max-age=31536000,
 // immutable, since a file's name changes whenever its content does. It
 // answers 404 to every other path, a directory's, the manifest's and every
-// file the manifest does not name among them, with nothing cached; 405 to
-// a method other than GET or HEAD; and ranges as http.ServeContent does.
-// In dev mode, and with no manifest, it serves nothing.
+// file the manifest does not name among them, setting no Cache-Control of
+// its own, so that the site's cache policy decides it as for any 404;
+// 405 to a method other than GET or HEAD; and ranges as
+// http.ServeContent does. In dev mode, and with no manifest, it serves
+// nothing.
 func (a *Assets) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {

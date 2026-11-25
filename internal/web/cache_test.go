@@ -87,3 +87,39 @@ func TestCachePolicy(t *testing.T) {
 		}
 	}
 }
+
+// TestCachePolicyKeepsOnlyTheStaticFilesOwn holds the policy to its table
+// whatever Cache-Control a response already carries when its header is
+// written: only the build's files keep their own. Every other route's
+// handler is, to the policy, like this middleware, which sets one before
+// the site runs.
+func TestCachePolicyKeepsOnlyTheStaticFilesOwn(t *testing.T) {
+	t.Parallel()
+
+	p := newPisati(t, options{store: newStore(t)})
+	session, err := p.sessions.Renew(t.Context(), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedIn := []*http.Cookie{requestCookie(session.Name, session.Value)}
+	site := p.h
+	p.h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		site.ServeHTTP(w, r)
+	})
+
+	for _, tt := range []struct {
+		name string
+		req  request
+		want string
+	}{
+		{name: "a page, signed in", req: request{target: "/", cookies: signedIn}, want: noStore},
+		{name: "a page, signed out", req: request{target: "/"}, want: publicPage},
+		{name: "a 404, signed out", req: request{target: "/nothing-here"}, want: publicPage},
+		{name: "the theme switch", req: request{method: http.MethodPost, target: "/_/theme", body: "theme=dark&next=%2F"}, want: noStore},
+		{name: "a static file", req: request{target: "/static/" + script}, want: immutable},
+		{name: "a static file, signed in", req: request{target: "/static/" + script, cookies: signedIn}, want: immutable},
+	} {
+		wantCache(t, p.do(tt.req), tt.want, tt.name)
+	}
+}
