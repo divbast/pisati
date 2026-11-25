@@ -755,3 +755,34 @@ func FuzzLimiterOptions(f *testing.F) {
 		}, "[2001:db8:1:ff::1]:1", 8)
 	})
 }
+
+func TestLimiterRefusalIsNotStored(t *testing.T) {
+	t.Parallel()
+
+	for name, o := range map[string]httpx.LimiterOptions{
+		"pages":       httpx.PageLimiterOptions(),
+		"CSP reports": httpx.CSPReportLimiterOptions(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				l, err := httpx.NewLimiter(o, time.Now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lt := newLimited(t, l)
+				lt.burst("192.0.2.1:1", o.Burst)
+				w := lt.from("192.0.2.1:1")
+				if w.Code != http.StatusTooManyRequests {
+					t.Fatalf("the request past the burst = %d, want 429", w.Code)
+				}
+				// The refusal answers this client alone, for now: no
+				// cache may keep it.
+				if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+					t.Errorf("the 429 has Cache-Control %q, want no-store", cc)
+				}
+			})
+		})
+	}
+}

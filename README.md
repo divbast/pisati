@@ -145,6 +145,12 @@ signed commits. The App, the `renovate` environment holding its key,
   logged in to dhi.io.
 - `just fe-check` runs the gates of the stylesheets and scripts under
   `web/`, and `just fe-build` builds them into `internal/web/dist`.
+- `just generate` regenerates the committed generated code: the pages
+  from their `.templ` files, the queries with sqlc, and the icons from
+  `lucide-static`. `just lint` fails when any of it differs from its
+  source.
+- `just dev` runs Pisati in dev mode: Vite's dev server beside templ,
+  which regenerates the pages and restarts Pisati as files change.
 - `just ci` runs every gate, the scan included. Run it before committing.
 
 The recipes that call GitHub, pinact's and zizmor's, read a fine-grained

@@ -164,8 +164,9 @@ secrets:
 # an ignore file may suppress one. This refuses, in every file git tracks
 # or would track, each comment Oxlint, ESLint, Stylelint, TypeScript and
 # Oxfmt honour as a suppression, in each of its forms (-line, -next-line
-# and the rest); and each ignore file these tools read, tracked anywhere or
-# present at the root, where they read one. Each pattern brackets one
+# and the rest); and each ignore file these tools read, or templ, whose
+# ignore files would keep a template from generate-check, tracked anywhere
+# or present at the root, where they read one. Each pattern brackets one
 # character, so that this recipe never matches itself, and names match in
 # any case, as macOS's file system does. The repository needs .gitignore,
 # so this cannot refuse it, though Oxlint and Oxfmt skip what it lists
@@ -178,7 +179,7 @@ _fe-no-suppression:
     hits=$(git grep --untracked -n -o -i -I -E -e '(oxlint|eslint|stylelint)[-]disable[a-z-]*' \
         -e '@ts[-](ignore|expect-error|nocheck)' -e '(prettier|oxfmt)[-]ignore[a-z-]*' || [[ $? -eq 1 ]])
     ignores=$({ git ls-files; ls -A; } |
-        grep -i -E '(^|/)[.](stylelint|prettier|oxlint|eslint|oxfmt)ignore$' | sort -u || true)
+        grep -i -E '(^|/)[.]((stylelint|prettier|oxlint|eslint|oxfmt)ignore|templignore_(generate|fmt))$' | sort -u || true)
     status=0
     if [[ -n "${hits}" ]]; then
         while IFS=: read -r file line what; do
@@ -188,7 +189,7 @@ _fe-no-suppression:
     fi
     if [[ -n "${ignores}" ]]; then
         while read -r file; do
-            echo "${file}: an ignore file the front end's tools read: ${rule}" >&2
+            echo "${file}: an ignore file the front end's tools or templ read: ${rule}" >&2
         done <<<"${ignores}"
         status=1
     fi
@@ -216,9 +217,53 @@ fe-build:
     find internal/web/dist -mindepth 1 ! -name PLACEHOLDER -delete
     pnpm exec vp build
 
+# The generated code is committed: templ's pages from each .templ file,
+# sqlc's queries from internal/store, and the icons from lucide-static,
+# which just setup installs. The templ and sqlc commands are exactly those
+# Renovate may run to regenerate them.
+
+# Regenerate every generated file from its source
+generate:
+    go tool -modfile=tools/go.mod templ generate
+    go tool -modfile=tools/go.mod sqlc generate
+    go run ./cmd/genicons
+
+# git diff sees only tracked files, so a generated file never added is
+# looked for apart, under the paths generators write to. Any change to a
+# tracked file fails it, so it runs on a tree with nothing unstaged.
+
+# Fail when any generated file differs from what its source generates
+[script("mise", "exec", "--", "bash", "-euo", "pipefail")]
+generate-check:
+    {{ just_executable() }} generate
+    go tool -modfile=tools/go.mod sqlc diff
+    if ! git diff --exit-code; then
+        echo "generate-check: the generated files above differ from their sources; run just generate and commit what it writes" >&2
+        exit 1
+    fi
+    untracked=$(git ls-files --others --exclude-standard -- '*_templ.go' internal/web/icons internal/store/storedb)
+    if [[ -n "${untracked}" ]]; then
+        printf 'generate-check: generated, but not committed:\n%s\n' "${untracked}" >&2
+        exit 1
+    fi
+
+# Vite serves the front end's sources on PISATI_DEV_VITE_URL, which
+# Pisati's dev mode points its pages at. templ regenerates the pages as
+# they change, rebuilds and restarts Pisati as Go files change, and serves
+# it through its proxy, on port 7331, which reloads the browser. Stopping
+# either stops both.
+
+# Run Pisati in dev mode: Vite's dev server, and Pisati rebuilt as it changes
+[script("mise", "exec", "--", "bash", "-euo", "pipefail")]
+dev:
+    trap 'kill 0' EXIT
+    pnpm exec vp dev &
+    go tool -modfile=tools/go.mod templ generate --watch --proxy=http://localhost:8080 \
+        --cmd="go run ./cmd/pisati serve" --watch-pattern='(.+\.go$)|(.+\.templ$)'
+
 # Every lint gate. Needs a running Docker daemon, for docker build --check
 lint:
-    {{ just_executable() }} ci-fresh actions-check workflow-audit actionlint shell-lint go-gates go-unit vuln secrets fe-check reuse-lint app-lint
+    {{ just_executable() }} ci-fresh actions-check workflow-audit actionlint shell-lint generate-check go-gates go-unit vuln secrets fe-check reuse-lint app-lint
 
 # Every gate. Run before committing
 ci:

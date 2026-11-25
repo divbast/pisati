@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
+
+package web
+
+import (
+	"strconv"
+
+	"github.com/divbast/pisati/internal/web/icons"
+	"github.com/divbast/pisati/internal/web/msg"
+)
+
+// layout is every page around its content: the head, with the front
+// end's tags, then a link to skip to the content, the header, with the
+// site's name and the theme form, and main, holding the content. Its
+// scripts carry the response's nonce and, outside dev mode, the
+// integrity of what they load. It holds no inline script or style.
+templ layout(p page) {
+	{{ nonce := templ.GetNonce(ctx) }}
+	<!DOCTYPE html>
+	<html lang={ p.lang.Code() } data-theme={ p.theme.String() }>
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ p.title }</title>
+			if p.devClient.url != "" {
+				// Vite's client gives the style elements it adds the nonce
+				// this element carries, which is how the policy allows them.
+				<meta property="csp-nonce" nonce={ nonce }/>
+				@scriptTag(p.devClient, nonce)
+			}
+			if p.style.url != "" {
+				<link
+					rel="stylesheet"
+					href={ p.style.url }
+					if p.style.integrity != "" {
+						integrity={ p.style.integrity }
+					}
+					if p.style.crossOrigin {
+						crossorigin
+					}
+				/>
+			}
+			if p.script.url != "" {
+				@scriptTag(p.script, nonce)
+			}
+		</head>
+		<body>
+			<a class="skip-link visually-hidden" href="#main">{ msg.SkipToContent(p.lang) }</a>
+			<header class="site-header">
+				<a class="site-name" href="/">{ msg.SiteName(p.lang) }</a>
+				@themeForm(p)
+			</header>
+			<main id="main">
+				{ children... }
+			</main>
+		</body>
+	</html>
+}
+
+// scriptTag is a module script that loads a, carrying nonce, the
+// response's.
+templ scriptTag(a asset, nonce string) {
+	<script
+		type="module"
+		src={ a.url }
+		if a.integrity != "" {
+			integrity={ a.integrity }
+		}
+		if a.crossOrigin {
+			crossorigin
+		}
+		nonce={ nonce }
+	></script>
+}
+
+// themeForm switches the theme without script: it posts the theme chosen
+// and the page to come back to, and the button of the theme the page has
+// is pressed. theme.ts makes the same post without leaving the page.
+templ themeForm(p page) {
+	<form class="theme-switch" method="post" action="/_/theme" data-theme-form aria-label={ msg.ThemeLabel(p.lang) }>
+		<input type="hidden" name="next" value={ p.next }/>
+		@themeButton(p, themeLight, icons.Sun(), msg.ThemeLight(p.lang))
+		@themeButton(p, themeDark, icons.Moon(), msg.ThemeDark(p.lang))
+		@themeButton(p, themeAuto, icons.Monitor(), msg.ThemeAuto(p.lang))
+	</form>
+}
+
+// themeButton picks t, showing icon beside label.
+templ themeButton(p page, t theme, icon icons.Icon, label string) {
+	<button type="submit" name="theme" value={ t.String() } aria-pressed={ strconv.FormatBool(p.theme == t) }>
+		@icon
+		<span>{ label }</span>
+	</button>
+}
+
+// home is the home page, which has nothing to show yet.
+templ home(l msg.Lang) {
+	<h1>{ msg.SiteName(l) }</h1>
+	<p>{ msg.HomeBody(l) }</p>
+	<p><a href="/login">{ msg.SignInLink(l) }</a></p>
+}

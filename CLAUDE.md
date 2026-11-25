@@ -206,7 +206,8 @@ breaking change.
   `ENGINE=docker IMAGE=localhost/pisati:dev mise exec -- go
   -C test/acceptance test -run TestServes ./...` runs one test
 - `just test` — build, then the acceptance suite
-- `just lint` — pinact, zizmor, actionlint, ShellCheck and shfmt, the Go
+- `just lint` — pinact, zizmor, actionlint, ShellCheck and shfmt,
+  `generate-check`, the Go
   gates (`go-gates`, `go-unit`, `vuln` and `secrets`), `fe-check`,
   `reuse lint`, hadolint and `docker build --check`. `go-gates` runs the
   compiler, `go fix -diff`, `go mod tidy -diff`, `go mod verify` and `golangci-lint
@@ -223,7 +224,8 @@ breaking change.
 - `just fe-check` — the front end's gates: no suppression comment at
   all, of Oxlint, ESLint, Stylelint, TypeScript or Oxfmt, and no ignore
   file they read (`.stylelintignore`, `.prettierignore`, `.oxlintignore`,
-  `.eslintignore`, `.oxfmtignore`), tracked anywhere or present at the
+  `.eslintignore`, `.oxfmtignore`), nor templ's (`.templignore_generate`,
+  `.templignore_fmt`), tracked anywhere or present at the
   root (a noisy rule is switched off by name, with its reason, in
   `vite.config.ts` or `stylelint.config.mjs` instead). The repository
   needs `.gitignore`, so the gate can't refuse it, though Oxlint and Oxfmt
@@ -248,6 +250,20 @@ breaking change.
   test reads one table of cases for each rule, in
   `internal/config/testdata/`. So a dev server on a port other than 5173,
   or over https, takes these variables, which Pisati and Vite both read
+- `just generate` — regenerate the committed generated code: templ's
+  pages from each `.templ` file (`go tool -modfile=tools/go.mod templ
+  generate`), sqlc's queries (`go tool -modfile=tools/go.mod sqlc
+  generate`), and `internal/web/icons` from `lucide-static` in
+  `node_modules` (`go run ./cmd/genicons`, which keeps only the SVG
+  Lucide draws with, and marks the file with the icons' licences).
+  `just generate-check`, part of `lint`, runs it, then `sqlc diff`, and
+  fails on any change to a tracked file and on a generated file never
+  committed; it needs a tree with nothing unstaged
+- `just dev` — Pisati in dev mode: `vp dev` beside `templ generate
+  --watch`, which regenerates the pages, rebuilds and restarts `pisati
+  serve` as files change, and serves it through its proxy on port 7331,
+  which reloads the browser. It sets nothing for you: Pisati reads its
+  own settings, `dev.vite_url` among them
 - `just archive`, `just scan` — write the image as an OCI archive, then run
   `divbast-scan` over it and the published `:latest`. Needs network access
   to ghcr.io
@@ -260,7 +276,8 @@ breaking change.
   Node, pnpm, betterleaks, hadolint, ShellCheck, shfmt, actionlint, reuse,
   just, pinact, trivy, grype, zizmor and cosign are all listed there. The
   front end's own tools (Vite+, TypeScript, Lightning CSS, Stylelint and
-  happy-dom) are pinned in `package.json` and `pnpm-lock.yaml`, and pnpm
+  happy-dom), and `lucide-static`, which `cmd/genicons` reads the icons
+  from, are pinned in `package.json` and `pnpm-lock.yaml`, and pnpm
   installs only releases at least 7 days old (`pnpm-workspace.yaml`). Every
   justfile recipe but `setup`, which installs them, runs through `mise
   exec`, so a recipe resolves those binaries and not a same-named one on

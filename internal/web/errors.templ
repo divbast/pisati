@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
+
+package web
+
+import "github.com/divbast/pisati/internal/web/msg"
+
+// problemContent is an error page's content: what went wrong, as heading,
+// a sentence more, as body, and a link home. Both come from the catalogue
+// alone, never from the request.
+templ problemContent(l msg.Lang, heading, body string) {
+	<h1>{ heading }</h1>
+	<p>{ body }</p>
+	<p><a href="/">{ msg.BackHome(l) }</a></p>
+}

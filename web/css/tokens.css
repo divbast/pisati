@@ -84,6 +84,10 @@
     --border-width-strong: 0.25rem;
     /* An invalid field's border where forced colours paint it. */
     --border-width-invalid: calc(var(--border-width) * 3);
+    /* An icon beside a label, a little taller than its letters. */
+    --size-icon: 1.25em;
+    /* The skip link, once focused, is drawn above the page. */
+    --layer-skip-link: 1;
     --focus-width: 3px;
     --focus-offset: 2px;
     --opacity-disabled: 0.6;

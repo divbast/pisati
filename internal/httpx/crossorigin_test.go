@@ -96,3 +96,25 @@ func TestCrossOriginRefusesForeignPost(t *testing.T) {
 		httpx.CrossOrigin(zero)
 	})
 }
+
+func TestCrossOriginRefusalIsNotStored(t *testing.T) {
+	t.Parallel()
+
+	h := httpx.CrossOrigin(baseURL(t, "https://blog.example"))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("a refused request reached the handler")
+	}))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/_/theme", http.NoBody)
+	req.Host = "blog.example"
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	req.Header.Set("Origin", "https://foreign.example")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("a cross-site POST = %d, want 403", rec.Code)
+	}
+	// The refusal answers this request alone: no cache may keep it.
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("the 403 has Cache-Control %q, want no-store", cc)
+	}
+}

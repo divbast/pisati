@@ -14,8 +14,9 @@ import (
 // cross-site or same-site, or, from a browser too old to send that, one
 // whose Origin is not its Host. It is http.CrossOriginProtection, with
 // base's origin trusted too, since a reverse proxy may pass another Host.
-// A refused request gets 403 with a generic body, and never reaches the
-// handler. A request with neither header comes from outside a browser,
+// A refused request gets 403 with a generic body and Cache-Control:
+// no-store, as the refusal answers that request alone, and never reaches
+// the handler. A request with neither header comes from outside a browser,
 // and passes.
 //
 // The zero BaseURL is a bug, since config.Load never returns one, and
@@ -27,6 +28,7 @@ func CrossOrigin(base config.BaseURL) Middleware {
 		panic("httpx: CrossOrigin needs a base URL: " + err.Error())
 	}
 	p.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 	}))
 	return p.Handler

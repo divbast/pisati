@@ -11,3 +11,11 @@ version = 1
 path = "internal/store/storedb/**"
 SPDX-FileCopyrightText = "2026 Aryan Ameri <github@aryan.ameri.coffee>"
 SPDX-License-Identifier = "AGPL-3.0-only"
+
+# templ's output, from each .templ file beside it. templ carries the
+# template's own header into the code it writes; this holds should that
+# ever change.
+[[annotations]]
+path = "internal/web/**/*_templ.go"
+SPDX-FileCopyrightText = "2026 Aryan Ameri <github@aryan.ameri.coffee>"
+SPDX-License-Identifier = "AGPL-3.0-only"

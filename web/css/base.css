@@ -271,9 +271,10 @@
     padding-block: var(--space-m);
 
     /*
-     * Each landmark has its own row, and anything else, such as a skip
-     * link once focus shows it, shares the header's, so nothing pushes
-     * main or the footer out of theirs.
+     * Each landmark has its own row, and anything else shares the
+     * header's, so nothing pushes main or the footer out of theirs. The
+     * skip link, once focus shows it, is drawn over the page instead:
+     * components.css places it.
      */
     > * {
       grid-row: header;

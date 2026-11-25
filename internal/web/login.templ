@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
+
+package web
+
+import "github.com/divbast/pisati/internal/web/msg"
+
+// signInForm is the sign-in page: a plain form, which works without
+// script, posting a username and a password to /login. Each field says
+// what it is to the browser's password manager by its autocomplete.
+templ signInForm(l msg.Lang) {
+	<h1>{ msg.SignInTitle(l) }</h1>
+	<form method="post" action="/login">
+		<div>
+			<label for="username">{ msg.UsernameLabel(l) }</label>
+			<input id="username" name="username" type="text" autocomplete="username" required/>
+		</div>
+		<div>
+			<label for="password">{ msg.PasswordLabel(l) }</label>
+			<input id="password" name="password" type="password" autocomplete="current-password" required/>
+		</div>
+		<button type="submit">{ msg.SignInButton(l) }</button>
+	</form>
+}

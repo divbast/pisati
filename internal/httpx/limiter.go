@@ -212,9 +212,10 @@ func NewLimiter(o LimiterOptions, clock func() time.Time) (*Limiter, error) {
 
 // Middleware returns the middleware that serves a request only when each
 // of its client's buckets, as ip finds the client, has a token to spend.
-// A request refused gets 429 with a generic body, and a Retry-After of
-// the whole seconds, rounded up, until every bucket that refused it has
-// a token again, and never reaches the handler. A refused request takes
+// A request refused gets 429 with a generic body, Cache-Control:
+// no-store, as the refusal answers that client alone, and a Retry-After
+// of the whole seconds, rounded up, until every bucket that refused it
+// has a token again, and never reaches the handler. A refused request takes
 // no token from any bucket. A nil ip, or a Limiter not made by
 // NewLimiter, is a bug, and Middleware panics on it.
 func (l *Limiter) Middleware(ip ClientIP) Middleware {
@@ -228,6 +229,7 @@ func (l *Limiter) Middleware(ip ClientIP) Middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if wait, ok := l.admit(r, ip); !ok {
 				w.Header().Set("Retry-After", strconv.FormatInt(wholeSeconds(wait), 10))
+				w.Header().Set("Cache-Control", "no-store")
 				http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 				return
 			}

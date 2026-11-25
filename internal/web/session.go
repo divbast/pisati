@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee>
 
-// Package web serves Pisati's website. SessionMiddleware loads each
-// request's session from its cookie, and SessionFrom hands it to the
-// handlers. Assets gives pages the front end's stylesheets and scripts,
-// each checked by its integrity value, and serves them under /static/.
+// Package web serves Pisati's website. Site holds every route, each
+// registered with Route, which declares who may use it, whether it is
+// cross-origin isolated and its body limit, behind one cache policy; it
+// renders the pages through templ, with text from package msg, and maps
+// each app.Error to its page with WriteError. SessionMiddleware loads
+// each request's session from its cookie, and SessionFrom hands it to
+// the handlers. Assets gives pages the front end's stylesheets and
+// scripts, each checked by its integrity value, and serves them under
+// /static/.
 package web
 
 import (
