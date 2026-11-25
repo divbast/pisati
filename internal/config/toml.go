@@ -54,11 +54,18 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 		table, isTable := doc[tableName].(map[string]any)
 		section := strings.ToLower(tableName)
 		if tableName != section || !knownSection(section) {
-			what := aKey
-			if isTable {
-				what = aTable
+			switch {
+			case isTable:
+				unknown = append(unknown, unknownName(name, aTable, tableName, section))
+			case knownSection(section):
+				// Fixing the case alone would give a table's name a value
+				// that is no table.
+				unknown = append(unknown, explain.New(ErrUnknown, "the configuration file %q has the key %q at its "+
+					"top level, but Pisati takes only tables there, with names in lower case. Write it as one table, "+
+					"[%s], with its settings in it", name, tableName, section))
+			default:
+				unknown = append(unknown, unknownName(name, aKey, tableName, section))
 			}
-			unknown = append(unknown, unknownName(name, what, tableName, section))
 			if knownSection(section) {
 				for _, t := range tablesOf(doc[tableName]) {
 					for key := range t {
@@ -71,7 +78,9 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 			continue
 		}
 		if !isTable {
-			wrongType = append(wrongType, decodeError(name, 0, 0, []string{tableName}))
+			wrongType = append(wrongType, explain.New(ErrInvalid, "the configuration file %q has the key %s at its "+
+				"top level, but %s is a table of settings. Write it as one table, [%s], with its settings in it. %s",
+				name, tableName, tableName, tableName, notUsed))
 			continue
 		}
 		for _, key := range slices.Sorted(maps.Keys(table)) {
@@ -94,11 +103,21 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 			continue
 		}
 		if !fromValue(&l, s, v) {
-			wrongType = append(wrongType, decodeError(name, 0, 0, strings.Split(s.key, ".")))
+			takes := "one value in quotes"
+			if _, ok := s.kind.(list); ok {
+				takes = `a list of values in quotes, such as ["192.0.2.1"]`
+			}
+			wrongType = append(wrongType, explain.New(ErrInvalid, "the configuration file %q gives the setting %s a "+
+				"value of the wrong type: it takes %s. Pisati does not show the value, as it may be a secret. %s",
+				name, s.key, takes, notUsed))
 		}
 	}
 	return l, unknown, wrongType, otherCase
 }
+
+// notUsed says what Pisati does with a file whose value is of the wrong
+// type.
+const notUsed = "Pisati uses none of the file's settings until it is fixed"
 
 // What unknownName calls a name the file holds.
 const (
@@ -112,14 +131,14 @@ const (
 // or a setting of Pisati's, the problem is the case alone.
 func unknownName(name, what, written, lower string) error {
 	if knownSection(lower) || knownSetting(lower) {
-		return explain.New(ErrUnknown, "the configuration file %s has the %s %s, but Pisati's tables and keys are written "+
+		return explain.New(ErrUnknown, "the configuration file %q has the %s %q, but Pisati's tables and keys are written "+
 			"in lower case. Write it as %s", name, what, written, lower)
 	}
 	setting := "setting"
 	if what == aTable {
 		setting = "table"
 	}
-	return explain.New(ErrUnknown, "the configuration file %s has the %s %s, but Pisati has no %s of that name. Check its "+
+	return explain.New(ErrUnknown, "the configuration file %q has the %s %q, but Pisati has no %s of that name. Check its "+
 		"spelling, or remove it", name, what, written, setting)
 }
 

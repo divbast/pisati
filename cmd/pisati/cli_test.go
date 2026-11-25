@@ -66,10 +66,10 @@ func TestUnknownEnvRefused(t *testing.T) {
 		command []string
 		line    string
 	}{
-		{[]string{"serve"}, "pisati: the environment variable PISATI_BOGUS is set, but"},
-		{[]string{"migrate"}, "pisati: the environment variable PISATI_BOGUS is set, but"},
-		{[]string{"backup", "/nowhere/copy.db"}, "pisati: the environment variable PISATI_BOGUS is set, but"},
-		{[]string{"health"}, "config: the environment variable PISATI_BOGUS is set, but"},
+		{[]string{"serve"}, `pisati: the environment variable "PISATI_BOGUS" is set, but`},
+		{[]string{"migrate"}, `pisati: the environment variable "PISATI_BOGUS" is set, but`},
+		{[]string{"backup", "/nowhere/copy.db"}, `pisati: the environment variable "PISATI_BOGUS" is set, but`},
+		{[]string{"health"}, `config: the environment variable "PISATI_BOGUS" is set, but`},
 	} {
 		s := newSite(t)
 		s.env["PISATI_BOGUS"] = "1"
@@ -97,7 +97,7 @@ func TestConfigProblemsOneLineEach(t *testing.T) {
 		if r.code != 1 || len(lines) != 2 {
 			t.Fatalf("pisati %q with two problems = %d, %q; want 1 and two lines", tc.command, r.code, r.stderr)
 		}
-		for i, want := range []string{"the environment variable PISATI_BOGUS is set", "server.base_url"} {
+		for i, want := range []string{`the environment variable "PISATI_BOGUS" is set`, "server.base_url"} {
 			if !strings.HasPrefix(lines[i], tc.prefix) || !strings.Contains(lines[i], want) || !strings.HasSuffix(lines[i], ".") {
 				t.Errorf("pisati %q: line %d is %q, want it to start %q, name %q and end with a full stop",
 					tc.command, i+1, lines[i], tc.prefix, want)
@@ -258,7 +258,7 @@ func TestDirectoryVariablesAmongOtherProblems(t *testing.T) {
 		}
 		text := r.stderr
 		if !strings.Contains(text, "pisati: "+tc.name+` is set to "relative"`) ||
-			!strings.Contains(text, "pisati: the environment variable PISATI_BOGUS is set") {
+			!strings.Contains(text, `pisati: the environment variable "PISATI_BOGUS" is set`) {
 			t.Errorf("%s bad: the lines are %q, want the variable and PISATI_BOGUS each named", tc.name, lines)
 		}
 		if named := strings.Contains(text, "server.base_url"); named != tc.missing {

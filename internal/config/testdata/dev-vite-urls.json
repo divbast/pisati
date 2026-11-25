@@ -101,6 +101,7 @@
   { "url": "http://-localhost:5173", "valid": false },
   { "url": "http://localhost.localdomain:5173", "valid": false },
   { "url": "http://vite.example.org:5173", "valid": false },
+  { "url": "http://vite.example.org:5173", "base": "https://blog.example.org", "valid": false },
   { "url": "http://127.0.0.2:5173", "valid": false },
   { "url": "http://[::2]:5173", "valid": false },
   { "url": "http://[::ffff:127.0.0.1]:5173", "valid": false },

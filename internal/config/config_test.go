@@ -445,10 +445,10 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 		},
 	}.load(t.Context())
 	refused(t, err, config.ErrUnknown,
-		"the configuration file pisati.toml has the key server.bsae_url, at line 3, column 1,",
+		`the configuration file "pisati.toml" has the key "server.bsae_url", at line 3, column 1,`,
 		"nope",
-		"the configuration file pisati.toml.d/10-extra.toml has the key toplevel, at line 1, column 1,",
-		"the environment variable PISATI_SERVER_BSAE_URL is set",
+		`the configuration file "pisati.toml.d/10-extra.toml" has the key "toplevel", at line 1, column 1,`,
+		`the environment variable "PISATI_SERVER_BSAE_URL" is set`,
 	)
 	for _, known := range []string{"HOME", "PISATI_SERVER_LISTEN"} {
 		if strings.Contains(err.Error(), known) {
@@ -471,8 +471,8 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 			unknown = append(unknown, part.Error())
 		}
 		want := []string{
-			"the configuration file pisati.toml has the key keys.mian_key, at line 1, column 10,",
-			"the configuration file pisati.toml has the key log.fmt.x, at line 2, column 25,",
+			`the configuration file "pisati.toml" has the key "keys.mian_key", at line 1, column 10,`,
+			`the configuration file "pisati.toml" has the key "log.fmt.x", at line 2, column 25,`,
 		}
 		if len(unknown) != len(want) {
 			t.Errorf("errors %q, want %q", unknown, want)
@@ -501,7 +501,7 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 	// hold the base URL, so the base URL is not reported missing.
 	brokenFile := func(t *testing.T, err error, at string) {
 		t.Helper()
-		refused(t, err, config.ErrInvalid, at, "Pisati uses none of this file's settings")
+		refused(t, err, config.ErrInvalid, at, "uses none of the file's settings")
 		if errors.Is(err, config.ErrMissing) {
 			t.Errorf("error %q reports a setting missing, though the file that failed may hold it", err)
 		}
@@ -513,7 +513,7 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 		_, err := setup{
 			files: fstest.MapFS{"pisati.toml": tomlFile("[server]\nbase_url = \"https://blog.example.org\"\nlisten = 8080\n")},
 		}.load(t.Context())
-		brokenFile(t, err, "the configuration file pisati.toml has an error at line 3, column 10, in the setting server.listen:")
+		brokenFile(t, err, `the configuration file "pisati.toml" has an error at line 3, column 10, in the setting server.listen:`)
 		if strings.Contains(err.Error(), "(PISATI_SERVER_LISTEN)") {
 			t.Errorf("error %q reports server.listen twice", err)
 		}
@@ -525,7 +525,7 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 		_, err := setup{
 			files: fstest.MapFS{"pisati.toml.d/10-broken.toml": tomlFile("[server]\nbase_url = \"https://blog.example.org\"\n[log\n")},
 		}.load(t.Context())
-		brokenFile(t, err, "the configuration file pisati.toml.d/10-broken.toml has an error at line 3,")
+		brokenFile(t, err, `the configuration file "pisati.toml.d/10-broken.toml" has an error at line 3,`)
 	})
 
 	t.Run("a secret in a file that fails to decode", func(t *testing.T) {
@@ -540,7 +540,7 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 				files: fstest.MapFS{"pisati.toml": tomlFile(file)},
 				env:   env{"PISATI_SERVER_BASE_URL": baseURL},
 			}.load(t.Context())
-			refused(t, err, config.ErrInvalid, "the configuration file pisati.toml sets keys.main_key,",
+			refused(t, err, config.ErrInvalid, `the configuration file "pisati.toml" sets keys.main_key,`,
 				"keys.main_key_file (PISATI_KEYS_MAIN_KEY_FILE)")
 			if strings.Contains(err.Error(), secret) {
 				t.Errorf("%s: error %q holds the secret", name, err)
@@ -636,9 +636,11 @@ func TestSettingsTable(t *testing.T) {
 }
 
 // namesUnknown reports whether msg, an error for an unknown key, names
-// name, as written, in the file file.
+// name, as written and quoted, in the file file.
 func namesUnknown(msg, file, name string) bool {
-	return strings.HasPrefix(msg, "the configuration file "+file+" has the ") && strings.Contains(msg, " "+name+", but ")
+	quoted := " " + strconv.Quote(name)
+	return strings.HasPrefix(msg, "the configuration file "+strconv.Quote(file)+" has the ") &&
+		(strings.Contains(msg, quoted+" ") || strings.Contains(msg, quoted+", "))
 }
 
 // errorParts returns the errors err joins, or err alone.
@@ -714,10 +716,11 @@ func TestKeysAreLowerCase(t *testing.T) {
 			want: []string{"pisati.toml: nope", "pisati.toml: server.BASE_URL", "pisati.toml: server.bsae_url"},
 		},
 		{
-			name:    "a value of the wrong type beside a key in another case",
-			text:    "[server]\nBASE_URL = " + base + "\nlisten = 8080\n",
-			want:    []string{"pisati.toml: server.BASE_URL"},
-			refused: decodeError{file: "pisati.toml", key: "server.listen"}.message(),
+			name: "a value of the wrong type beside a key in another case",
+			text: "[server]\nBASE_URL = " + base + "\nlisten = 8080\n",
+			want: []string{"pisati.toml: server.BASE_URL"},
+			refused: `the configuration file "pisati.toml" gives the setting server.listen a value of the wrong type: it takes one value in quotes. ` +
+				"Pisati does not show the value, as it may be a secret. Pisati uses none of the file's settings until it is fixed",
 		},
 	}
 	for _, tt := range tests {
@@ -1817,7 +1820,7 @@ func TestDevViteURLs(t *testing.T) {
 				}
 				return
 			}
-			refused(t, err, config.ErrInvalid, "dev.vite_url (PISATI_DEV_VITE_URL) is set")
+			refused(t, err, config.ErrInvalid, "dev.vite_url (PISATI_DEV_VITE_URL)")
 			for _, part := range append(c.userInfo(), url) {
 				if part != "" && strings.Contains(err.Error(), part) {
 					t.Errorf("error %q repeats %q, of the value", err, part)
@@ -2155,9 +2158,9 @@ func FuzzLoad(f *testing.F) {
 
 // notDecoded is the fixed text of every error for a file that does not
 // decode, after its file, line, column and key.
-const notDecoded = "it is not valid TOML there, or a setting there has a value of the wrong type, such as a number " +
-	"where a setting takes a value in quotes. Pisati does not show what the file holds there, because it may be a " +
-	"secret. Pisati uses none of this file's settings until it is fixed"
+const notDecoded = "it is not valid TOML there, or a value of the wrong type, such as a number where a value in " +
+	"quotes belongs. Pisati does not show what is there, as it may be a secret, and uses none of the file's " +
+	"settings until it is fixed"
 
 // needle is a value no fixed text holds by chance.
 const needle = "Qz9vNEEDLEq7Zk"
@@ -2175,7 +2178,7 @@ type decodeError struct {
 // the line and column when it has them, then the key, a table when it has
 // one part, then the fixed text.
 func (d decodeError) message() string {
-	where := "the configuration file " + d.file + " has an error"
+	where := "the configuration file " + strconv.Quote(d.file) + " has an error"
 	if d.row > 0 {
 		where += fmt.Sprintf(" at line %d, column %d", d.row, d.col)
 		if d.key != "" {
@@ -2200,8 +2203,15 @@ func decodeErrorPart(msg string) (decodeError, bool) {
 	if !ok {
 		return decodeError{}, false
 	}
+	quoted, err := strconv.QuotedPrefix(rest)
+	if err != nil {
+		return decodeError{}, false
+	}
 	var d decodeError
-	if d.file, rest, ok = strings.Cut(rest, " has an error"); !ok {
+	if d.file, err = strconv.Unquote(quoted); err != nil {
+		return decodeError{}, false
+	}
+	if rest, ok = strings.CutPrefix(rest[len(quoted):], " has an error"); !ok {
 		return decodeError{}, false
 	}
 	if n, err := fmt.Sscanf(rest, " at line %d, column %d", &d.row, &d.col); err == nil && n == 2 {
@@ -2455,5 +2465,91 @@ func valid(t *testing.T, c config.Config) {
 	case config.Generated:
 	case nil:
 		t.Error("no main key source")
+	}
+}
+
+// TestAdviceBranches reaches each case whose words differ from its
+// neighbours', and holds the line to the parts that say what to do.
+func TestAdviceBranches(t *testing.T) {
+	t.Parallel()
+
+	const local = "http://localhost:8080"
+	tests := map[string]struct {
+		s    setup
+		want error
+		// parts are what one problem the error joins holds, together.
+		parts []string
+	}{
+		"a variable in lower case": {
+			s:    setup{env: env{"PISATI_SERVER_BASE_URL": baseURL, "pisati_server_listen": ":9000"}},
+			want: config.ErrUnknown,
+			parts: []string{
+				`the environment variable "pisati_server_listen" is set`, "written in capital letters",
+				"Write it as PISATI_SERVER_LISTEN",
+			},
+		},
+		"a table in capitals": {
+			s:     setup{files: fstest.MapFS{"pisati.toml": tomlFile("[SERVER]\nbase_url = \"" + baseURL + "\"\n")}},
+			want:  config.ErrUnknown,
+			parts: []string{`has the table "SERVER"`, "written in lower case", "Write it as server"},
+		},
+		"a key in capitals": {
+			s:     setup{files: fstest.MapFS{"pisati.toml": tomlFile("[server]\nBAse_url = \"" + baseURL + "\"\n")}},
+			want:  config.ErrUnknown,
+			parts: []string{`has the key "server.BAse_url"`, "written in lower case", "Write it as server.base_url"},
+		},
+		"a table's name in capitals, with no table": {
+			s:     setup{files: fstest.MapFS{"pisati.toml": tomlFile("SERVER = 1\n")}, env: env{"PISATI_SERVER_BASE_URL": baseURL}},
+			want:  config.ErrUnknown,
+			parts: []string{`has the key "SERVER" at its top level`, "takes only tables there", "[server]"},
+		},
+		"a table's name, with no table": {
+			s:     setup{files: fstest.MapFS{"pisati.toml": tomlFile("server = 1\nLOG = 2\n")}, env: env{"PISATI_SERVER_BASE_URL": baseURL}},
+			want:  config.ErrInvalid,
+			parts: []string{"has the key server at its top level", "is a table of settings", "Write it as one table, [server]"},
+		},
+		"a list of the wrong type, read as a map": {
+			s:     setup{files: fstest.MapFS{"pisati.toml": tomlFile("[server]\nBASE_URL = \"" + baseURL + "\"\ntrusted_proxies = \"10.0.0.1\"\n")}},
+			want:  config.ErrInvalid,
+			parts: []string{"gives the setting server.trusted_proxies a value of the wrong type", "a list of values in quotes"},
+		},
+		"an address with a zone": {
+			s:     setup{env: env{"PISATI_SERVER_BASE_URL": baseURL, "PISATI_SERVER_TRUSTED_PROXIES": "fe80::1%eth0"}},
+			want:  config.ErrInvalid,
+			parts: []string{`holds "fe80::1%eth0"`, "has a zone", "Remove the zone"},
+		},
+		"two state directories from systemd": {
+			s:     setup{env: env{"PISATI_SERVER_BASE_URL": baseURL}, state: "/var/lib/a:/var/lib/b"},
+			want:  config.ErrInvalid,
+			parts: []string{`STATE_DIRECTORY is set to "/var/lib/a:/var/lib/b", which has ":" in it`, "set storage.state_dir"},
+		},
+		"the Vite dev server away from this machine": {
+			s:     setup{env: env{"PISATI_SERVER_BASE_URL": local, "PISATI_DEV_VITE_URL": "http://vite.example.org:5173"}},
+			want:  config.ErrInvalid,
+			parts: []string{"dev.vite_url (PISATI_DEV_VITE_URL) is set to a value that is not on localhost", "set it to a URL on localhost"},
+		},
+		"the base URL away from this machine": {
+			s:     setup{env: env{"PISATI_SERVER_BASE_URL": baseURL, "PISATI_DEV_VITE_URL": "http://localhost:5173"}},
+			want:  config.ErrInvalid,
+			parts: []string{"server.base_url (PISATI_SERVER_BASE_URL) is set to a URL that is not on localhost", "set dev.vite_url to nothing"},
+		},
+		"both away from this machine": {
+			s:     setup{env: env{"PISATI_SERVER_BASE_URL": baseURL, "PISATI_DEV_VITE_URL": "http://vite.example.org:5173"}},
+			want:  config.ErrInvalid,
+			parts: []string{"are both set to URLs that are not on localhost", "set both to URLs on localhost"},
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := tt.s.load(t.Context())
+			refused(t, err, tt.want)
+			if !slices.ContainsFunc(errorParts(err), func(e error) bool {
+				return errors.Is(e, tt.want) && !slices.ContainsFunc(tt.parts, func(p string) bool { return !strings.Contains(e.Error(), p) })
+			}) {
+				t.Errorf("error %q has no problem that holds each of %q", err, tt.parts)
+			}
+		})
 	}
 }

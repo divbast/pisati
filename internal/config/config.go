@@ -77,8 +77,8 @@ func (b *badValue) of(label string) string {
 const whyURLHidden = "a URL may hold a password"
 
 // baseURLFix says what server.base_url takes.
-const baseURLFix = "Set it to an https URL with no path, such as https://blog.example.org; or, for development on " +
-	"this machine, an http URL on localhost, 127.0.0.1 or [::1], such as http://localhost:8080"
+const baseURLFix = "Set it to an https URL with no path, such as https://blog.example.org, or, for use on this " +
+	"machine alone, an http URL on localhost, 127.0.0.1 or [::1]"
 
 // listenFix says what a listen address takes.
 const listenFix = "Set it to host:port, with a port from 1 to 65535, such as 127.0.0.1:8080, or :8080 for every " +
@@ -218,8 +218,7 @@ func ParseBaseURL(s string) (BaseURL, error) {
 		if p := u.EscapedPath(); p != "" && p != "/" {
 			why = "has a path after its host"
 		} else if u.Scheme == "http" && !loopback(u.Hostname()) {
-			why = "is an http URL on a host other than localhost, 127.0.0.1 or [::1], but away from this machine " +
-				"the blog must be served over https"
+			why = "is an http URL on a host other than localhost, 127.0.0.1 or [::1], where Pisati takes only https"
 		}
 	}
 	if why != "" {

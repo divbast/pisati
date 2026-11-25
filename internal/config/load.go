@@ -14,6 +14,7 @@ import (
 	"maps"
 	"net/netip"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -167,11 +168,11 @@ func stopped(ctx context.Context) error {
 func unknownVariable(name string) error {
 	for _, s := range settings() {
 		if s.env() == strings.ToUpper(name) {
-			return explain.New(ErrUnknown, "the environment variable %s is set, but Pisati's variables are written in "+
+			return explain.New(ErrUnknown, "the environment variable %q is set, but Pisati's variables are written in "+
 				"capital letters. Write it as %s", name, s.env())
 		}
 	}
-	return explain.New(ErrUnknown, "the environment variable %s is set, but Pisati has no setting of that name. Check its "+
+	return explain.New(ErrUnknown, "the environment variable %q is set, but Pisati has no setting of that name. Check its "+
 		"spelling, or remove it", name)
 }
 
@@ -288,7 +289,7 @@ func readBounded(fsys fs.FS, name string) (data []byte, err error) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	what := "the configuration file " + name
+	what := "the configuration file " + strconv.Quote(name)
 	if err != nil {
 		return nil, cannotRead(err, what)
 	}
@@ -310,8 +311,8 @@ func readBounded(fsys fs.FS, name string) (data []byte, err error) {
 		return nil, cannotRead(err, what)
 	}
 	if len(data) > maxFileSize {
-		return nil, explain.New(ErrInvalid, "%s is larger than 1 MiB (1,048,576 bytes), which is more than Pisati reads "+
-			"from a configuration file. Check that it is the right file", what)
+		return nil, explain.New(ErrInvalid, "%s is larger than %s, which is more than Pisati reads from a "+
+			"configuration file. Check that it is the right file", what, explain.Bytes(maxFileSize))
 	}
 	return data, nil
 }
@@ -324,7 +325,8 @@ func cannotRead(err error, what string) error {
 		return explain.New(err, "Pisati cannot read %s, because the user that runs Pisati does not have permission to. "+
 			"Give that user permission to read it", what)
 	}
-	return explain.New(err, "Pisati cannot read %s: %s", what, pathless(err))
+	return explain.New(err, "Pisati cannot read %s: %s. Check that the user that runs Pisati can read it, and that "+
+		"the disk that holds it works", what, pathless(err))
 }
 
 // pathless returns the error inside err when err is an *fs.PathError,
@@ -336,19 +338,18 @@ func pathless(err error) error {
 	return err
 }
 
-// notDecoded is why a file that does not decode, or a value in it of the
-// wrong type, is refused: fixed text, which never quotes the file. It
-// follows the file, and the line, column and key, as decodeError gives
-// them.
-const notDecoded = "it is not valid TOML there, or a setting there has a value of the wrong type, such as a number " +
-	"where a setting takes a value in quotes. Pisati does not show what the file holds there, because it may be a " +
-	"secret. Pisati uses none of this file's settings until it is fixed"
+// notDecoded is why a file that does not decode is refused: fixed text,
+// which never quotes the file. It follows the file, and the line, column
+// and key, as decodeError gives them.
+const notDecoded = "it is not valid TOML there, or a value of the wrong type, such as a number where a value in " +
+	"quotes belongs. Pisati does not show what is there, as it may be a secret, and uses none of the file's " +
+	"settings until it is fixed"
 
 // decodeError is the problem of the file name, which does not decode as
 // TOML: at line row and column col, when both are above 0, and in key,
 // a setting, or a table when it has one part, when it has any.
 func decodeError(name string, row, col int, key []string) error {
-	where := "the configuration file " + name + " has an error"
+	where := "the configuration file " + strconv.Quote(name) + " has an error"
 	if row > 0 && col > 0 {
 		where += fmt.Sprintf(" at line %d, column %d", row, col)
 		if len(key) > 0 {
@@ -382,7 +383,7 @@ func decodeErrors(name string, data []byte, err error) []error {
 		for i := range strict.Errors {
 			row, col := strict.Errors[i].Position()
 			key := unknownKey(data, offset(data, row, col), strict.Errors[i].Key())
-			errs = append(errs, explain.New(ErrUnknown, "the configuration file %s has the key %s, at line %d, column %d, "+
+			errs = append(errs, explain.New(ErrUnknown, "the configuration file %q has the key %q, at line %d, column %d, "+
 				"but Pisati has no setting of that name. Check its spelling, or remove it", name, strings.Join(key, "."), row, col))
 		}
 		return errs
@@ -415,7 +416,7 @@ func refusals(name string, l *layer) []error {
 	var errs []error
 	for _, s := range settings() {
 		if k, ok := s.kind.(refused); ok && *k.field(l) != nil {
-			errs = append(errs, refusal("the configuration file "+name+" sets "+s.key, k))
+			errs = append(errs, refusal("the configuration file "+strconv.Quote(name)+" sets "+s.key, k))
 		}
 	}
 	return errs
@@ -545,7 +546,8 @@ func credentialSource(creds fs.FS) (SecretSource, error) {
 			"that directory", mainKeyCredential)
 	default:
 		return nil, explain.New(err, "Pisati cannot look for the credential %s in the directory that CREDENTIALS_DIRECTORY "+
-			"names: %s", mainKeyCredential, pathless(err))
+			"names: %s. Check that CREDENTIALS_DIRECTORY names a directory that the user that runs Pisati can read",
+			mainKeyCredential, pathless(err))
 	}
 }
 
