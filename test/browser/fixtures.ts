@@ -72,12 +72,33 @@ export const themeCookie = "pisati-theme";
  * Waits until no animation or transition runs on page, so that what is
  * checked is the page at rest, once something a test did has set
  * something moving: a button under the pointer changes its colour as the
- * pointer arrives.
+ * pointer arrives, and a navigation fades to the new page. It fails once
+ * expect's timeout has passed with something still moving.
+ *
+ * The fade, the navigation's view transition, starts in the new page's
+ * first frame, which can come after its content is already in place, so
+ * a look at the page before that frame finds nothing moving yet. Each
+ * look therefore waits for two frames first, by which time whatever
+ * drawing the page started is running, then for that to finish, and
+ * settle looks again until a look finds nothing.
  */
 export async function settle(page: Page): Promise<void> {
-  await page.evaluate(async () => {
-    await Promise.allSettled(document.getAnimations().map((animation) => animation.finished));
-  });
+  await expect
+    .poll(
+      () =>
+        page.evaluate(async () => {
+          await new Promise((resolve) => {
+            requestAnimationFrame(() => {
+              requestAnimationFrame(resolve);
+            });
+          });
+          const moving = document.getAnimations();
+          await Promise.allSettled(moving.map((animation) => animation.finished));
+          return moving.length;
+        }),
+      { message: "the page never came to rest" },
+    )
+    .toBe(0);
 }
 
 /**
