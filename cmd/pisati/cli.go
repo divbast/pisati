@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/ncruces/go-sqlite3"
 
 	"github.com/divbast/pisati/internal/config"
 	"github.com/divbast/pisati/internal/crypto"
@@ -131,11 +130,39 @@ func run(ctx context.Context, h Host) int {
 		report(h.Stderr, errors.New("the command stopped at once, before it finished, because a second SIGTERM or SIGINT "+
 			"signal arrived"))
 	case stopped(ctx, err):
-		report(h.Stderr, errors.New("the command stopped before it finished, because a SIGTERM or SIGINT signal arrived"))
+		report(h.Stderr, errors.New(stopLine))
 	default:
-		report(h.Stderr, err)
+		report(h.Stderr, plainStop(ctx, err))
 	}
 	return exitFailed
+}
+
+// stopLine is the line of a command that a first SIGTERM or SIGINT
+// stopped.
+const stopLine = "the command stopped before it finished, because a SIGTERM or SIGINT signal arrived"
+
+// plainStop returns err with the problems that are a stop, ctx's own
+// error once ctx has ended, given as one stopLine before the others, which
+// keep their words: a stop that came with another failure, such as a
+// database that did not close, says that it was a stop as plainly as a
+// stop alone does. With no stop among them, it returns err.
+func plainStop(ctx context.Context, err error) error {
+	if ctx.Err() == nil {
+		return err
+	}
+	stop := false
+	var others []error
+	for _, p := range separate(err) {
+		if errors.Is(p.err, ctx.Err()) {
+			stop = true
+			continue
+		}
+		others = append(others, explain.New(p.err, "%s", p.msg))
+	}
+	if !stop {
+		return err
+	}
+	return errors.Join(append([]error{errors.New(stopLine)}, others...)...)
 }
 
 // errHalted is the error of a command that a second SIGTERM or SIGINT
@@ -177,14 +204,14 @@ func untilHalt(h Host, work func() error) error {
 
 // stopped reports whether err is what a stop leaves, after ctx has ended:
 // the command was stopped by a signal, and nothing else failed. Each
-// problem err reports must be ctx's own error, or SQLite's "database is
-// locked", which a wait for a lock returns when ctx cuts it short.
+// problem err reports must be ctx's own error, as the store reports a
+// wait for a lock that ctx cut short.
 func stopped(ctx context.Context, err error) bool {
 	if ctx.Err() == nil || err == nil {
 		return false
 	}
 	for _, p := range separate(err) {
-		if !errors.Is(p.err, ctx.Err()) && !errors.Is(p.err, sqlite3.BUSY) {
+		if !errors.Is(p.err, ctx.Err()) {
 			return false
 		}
 	}

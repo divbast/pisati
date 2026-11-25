@@ -82,6 +82,10 @@ func (s *Store) Migrate(ctx context.Context, lock Lock) (from, to SchemaVersion,
 	// database never migrated. A newer database has the table, so reading
 	// its version writes nothing to it.
 	current, latest, err := p.GetVersions(ctx)
+	if stop := stoppedBy(ctx, err, "Pisati stopped before it had read the schema version of the database %s",
+		s.path); stop != nil {
+		return 0, 0, stop
+	}
 	if err != nil {
 		return 0, 0, explain.Wrap(err, "Pisati cannot read the schema version of the database %s, the version of "+
 			"the layout of its tables", s.path)
@@ -102,6 +106,10 @@ func (s *Store) Migrate(ctx context.Context, lock Lock) (from, to SchemaVersion,
 	to = from
 	if len(applied) > 0 {
 		to = SchemaVersion(applied[len(applied)-1].Source.Version)
+	}
+	if stop := stoppedBy(ctx, err, "Pisati stopped before it had updated the schema of the database %s past "+
+		"version %d", s.path, to); stop != nil {
+		return from, to, stop
 	}
 	if err != nil {
 		return from, to, explain.Wrap(err, "Pisati cannot update the schema of the database %s, the layout of its "+

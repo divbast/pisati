@@ -114,14 +114,14 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 
 	db, err := driver.Open(dataSourceName(path))
 	if err != nil {
-		return nil, cannotOpen(err, path)
+		return nil, cannotOpen(ctx, err, path)
 	}
 	// Idle connections stay at database/sql's default of two: each one
 	// kept keeps an instance of SQLite, with its cache.
 	db.SetMaxOpenConns(maxConns)
 	// sql.Open connects to nothing; a connection opens the file.
 	if err := db.PingContext(ctx); err != nil {
-		return nil, errors.Join(cannotOpen(err, path), db.Close())
+		return nil, errors.Join(cannotOpen(ctx, err, path), db.Close())
 	}
 	return &Store{
 		db:         db,
@@ -245,7 +245,7 @@ func (s *Store) InTx(ctx context.Context, fn func(*storedb.Queries) error) (err 
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return cannotChange(err, "Pisati cannot start a change to the database %s", s.path)
+		return cannotChange(ctx, err, "Pisati cannot start a change to the database %s", s.path)
 	}
 	// Rolled back on every way out but the commit, a panic in fn included:
 	// otherwise the connection would never return to the pool, and would
@@ -261,7 +261,7 @@ func (s *Store) InTx(ctx context.Context, fn func(*storedb.Queries) error) (err 
 	}
 	committing = true
 	if err := tx.Commit(); err != nil {
-		return cannotChange(err, "Pisati cannot save a change to the database %s", s.path)
+		return cannotChange(ctx, err, "Pisati cannot save a change to the database %s", s.path)
 	}
 	return nil
 }
@@ -325,9 +325,32 @@ func removeFiles(ctx context.Context, root *os.Root, names ...string) error {
 	return errors.Join(errs...)
 }
 
+// stoppedBy returns ctx's error, in the words format and args give, when
+// ctx has ended and err is what that leaves of a call into SQLite: ctx's
+// own error; SQLITE_BUSY, "database is locked", which a wait for a lock
+// another connection holds returns once ctx cuts the wait short; or
+// SQLITE_INTERRUPT, which a statement that ctx stopped returns. The caller
+// was stopped, and nothing failed, so the error wraps ctx's error alone:
+// errors.Is finds context.Canceled or context.DeadlineExceeded through it,
+// and no code of SQLite's. Otherwise stoppedBy returns nil.
+func stoppedBy(ctx context.Context, err error, format string, args ...any) error {
+	cause := ctx.Err()
+	if cause == nil || err == nil {
+		return nil
+	}
+	if !errors.Is(err, cause) && !errors.Is(err, sqlite3.BUSY) && !errors.Is(err, sqlite3.INTERRUPT) {
+		return nil
+	}
+	return explain.New(cause, format, args...)
+}
+
 // cannotOpen is the error for the database at path, which err says SQLite
-// cannot open: SQLite's reason, and what to do when the reason says.
-func cannotOpen(err error, path string) error {
+// cannot open: SQLite's reason, and what to do when the reason says, or,
+// once ctx has ended, that Pisati stopped (stoppedBy).
+func cannotOpen(ctx context.Context, err error, path string) error {
+	if stop := stoppedBy(ctx, err, "Pisati stopped before it had opened the database %s", path); stop != nil {
+		return stop
+	}
 	switch {
 	case errors.Is(err, sqlite3.NOTADB), errors.Is(err, sqlite3.CORRUPT):
 		return explain.New(err, "Pisati cannot open the database %s: %s. It is not a SQLite database, or it is "+
@@ -364,9 +387,13 @@ func cannotRead(ctx context.Context, err error, path string) error {
 
 // cannotChange is the error, worded as format and args say, for a change
 // to the database that err says SQLite refused: SQLite's reason, and what
-// to do when the reason says.
-func cannotChange(err error, format string, args ...any) error {
+// to do when the reason says, or, once ctx has ended, that Pisati stopped
+// (stoppedBy).
+func cannotChange(ctx context.Context, err error, format string, args ...any) error {
 	words := fmt.Sprintf(format, args...)
+	if stop := stoppedBy(ctx, err, "%s, because Pisati stopped first", words); stop != nil {
+		return stop
+	}
 	switch {
 	case errors.Is(err, sqlite3.FULL):
 		return explain.New(err, "%s: %s. The disk that holds it is full: free some space on it", words, err)

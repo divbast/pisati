@@ -100,10 +100,14 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 		}
 	}()
 	tmpPath := filepath.Join(dir.String(), tmp)
-	if err := copyFrom(ctx, tmpPath, src); errors.Is(err, sqlite3.NOTADB) {
-		return explain.New(err, "SQLite cannot copy it into %s: %s. It is not a SQLite database: restore from a "+
-			"copy that pisati backup made", tmpPath, err)
-	} else if err != nil {
+	if err := copyFrom(ctx, tmpPath, src); err != nil {
+		if stop := stoppedBy(ctx, err, "Pisati stopped before it had copied it into %s", tmpPath); stop != nil {
+			return stop
+		}
+		if errors.Is(err, sqlite3.NOTADB) {
+			return explain.New(err, "SQLite cannot copy it into %s: %s. It is not a SQLite database: restore from a "+
+				"copy that pisati backup made", tmpPath, err)
+		}
 		return explain.Wrap(err, "SQLite cannot copy it into %s", tmpPath)
 	}
 	if err := check(ctx, tmpPath); err != nil {
@@ -198,6 +202,9 @@ func check(ctx context.Context, path string) (err error) {
 		err = errors.Join(err, s.Close())
 	}()
 	if err := s.checkIntegrity(ctx); err != nil {
+		if stop := stoppedBy(ctx, err, "Pisati stopped before it had checked the copy %s", path); stop != nil {
+			return stop
+		}
 		return err
 	}
 	p, err := newProvider(s.db, s.migrations)
@@ -205,6 +212,9 @@ func check(ctx context.Context, path string) (err error) {
 		return err
 	}
 	version, newest, err := p.GetVersions(ctx)
+	if stop := stoppedBy(ctx, err, "Pisati stopped before it had read the schema version of the copy %s", path); stop != nil {
+		return stop
+	}
 	switch {
 	case err != nil:
 		return explain.Wrap(err, "Pisati cannot read the schema version of the copy")

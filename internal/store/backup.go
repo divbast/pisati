@@ -108,9 +108,15 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	}()
 	path := filepath.Join(dir, name)
 	if err := s.copyTo(ctx, path); err != nil {
+		if stop := stoppedBy(ctx, err, "Pisati stopped before it had copied the database into %s", path); stop != nil {
+			return stop
+		}
 		return explain.Wrap(err, "Pisati cannot copy the database into %s", path)
 	}
 	if err := useRollbackJournal(ctx, path); err != nil {
+		if stop := stoppedBy(ctx, err, "Pisati stopped before it had finished the copy %s", path); stop != nil {
+			return stop
+		}
 		return explain.Wrap(err, "Pisati cannot finish the copy %s", path)
 	}
 	if err := syncDir(ctx, root); err != nil {

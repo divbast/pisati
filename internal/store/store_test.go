@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/divbast/pisati/internal/config"
 	"github.com/divbast/pisati/internal/store"
@@ -443,4 +444,72 @@ func TestAcquireLockKeepsThePathError(t *testing.T) {
 	if !strings.Contains(err.Error(), "Pisati cannot lock the state directory "+missing) {
 		t.Errorf("error %q does not name the state directory", err)
 	}
+}
+
+// TestLockWaitCutShortIsTheStop: a wait for a lock that another
+// connection holds, which its context ends, returns that context's error,
+// not SQLite's "database is locked": the caller was stopped, and nothing
+// failed. It runs in real time: the wait is in SQLite's file locking,
+// which a synctest bubble cannot see.
+func TestLockWaitCutShortIsTheStop(t *testing.T) {
+	// cutShort runs call with a context it ends 200 ms on, while another
+	// connection to the database at path, which runs stmts first, holds
+	// a lock that call must wait for, and fails the test unless call
+	// returns that context's error within a second of it ending.
+	cutShort := func(t *testing.T, path, what string, stmts []string, call func(ctx context.Context) error) {
+		t.Helper()
+		other := openStore(t, path)
+		conn, err := other.DB().Conn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := conn.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		for _, stmt := range stmts {
+			if _, err := conn.ExecContext(t.Context(), stmt); err != nil {
+				t.Fatalf("%s: %v", stmt, err)
+			}
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- call(ctx) }()
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("%s, cut short by its context: %v, want context.Canceled", what, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s did not return within a second of its context ending", what)
+		}
+	}
+
+	t.Run("InTx, for the write lock", func(t *testing.T) {
+		path := dbPath(t)
+		s := migratedStore(t, path)
+		cutShort(t, path, "InTx", []string{"BEGIN IMMEDIATE"}, func(ctx context.Context) error {
+			return s.InTx(ctx, func(*storedb.Queries) error { return nil })
+		})
+	})
+	t.Run("Open, for a database another holds whole", func(t *testing.T) {
+		path := dbPath(t)
+		if err := migratedStore(t, path).Close(); err != nil {
+			t.Fatal(err)
+		}
+		// In WAL mode, a connection in exclusive locking mode keeps every
+		// other from the database once its first exclusive transaction
+		// has run, which needs no other connection open.
+		cutShort(t, path, "Open", []string{"PRAGMA locking_mode = EXCLUSIVE", "BEGIN EXCLUSIVE", "COMMIT"},
+			func(ctx context.Context) error {
+				opened, err := store.Open(ctx, path)
+				if err == nil {
+					return errors.Join(errors.New("Open succeeded"), opened.Close())
+				}
+				return err
+			})
+	})
 }

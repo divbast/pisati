@@ -309,8 +309,8 @@ func TestHealthStoppedBySignal(t *testing.T) {
 
 func TestCommandStoppedWhileWaiting(t *testing.T) {
 	// A first signal while a command waits for a lock another connection
-	// holds: SQLite's wait then ends with "database is locked", which is
-	// the stop, and no failure.
+	// holds: SQLite's wait then ends with "database is locked", which the
+	// store reports as the stop it is, and no failure.
 	const line = "pisati: the command stopped before it finished, because a SIGTERM or SIGINT signal arrived."
 	for _, tc := range []struct {
 		name string
