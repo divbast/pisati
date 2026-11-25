@@ -568,7 +568,7 @@ func TestUnknownEnv(t *testing.T) {
 		"PISATI_KEYS_MAIN_KEY", "PISATI_KEYS_MAIN_KEY_FILE",
 	}
 	before := slices.Clone(names)
-	got := config.UnknownEnv(names)
+	got := config.UnknownEnv(names, nil)
 	if want := []string{"PISATI_", "PISATI_NOPE", "pisati_server_base_url"}; !slices.Equal(got, want) {
 		t.Errorf("UnknownEnv = %q, want %q", got, want)
 	}
@@ -576,64 +576,96 @@ func TestUnknownEnv(t *testing.T) {
 		t.Errorf("UnknownEnv changed its argument to %q", names)
 	}
 
-	if got := config.UnknownEnv(knownEnv); len(got) != 0 {
+	if got := config.UnknownEnv(knownEnv, nil); len(got) != 0 {
 		t.Errorf("UnknownEnv(every known name) = %q, want none", got)
 	}
 }
 
 // serviceLinks are the variables Kubernetes sets, in every container of
-// its namespace, for a Service named pisati with the ports http, 8080/TCP,
-// and metrics, 8081/TCP.
-var serviceLinks = []string{
-	"PISATI_SERVICE_HOST", "PISATI_SERVICE_PORT", "PISATI_SERVICE_PORT_HTTP", "PISATI_SERVICE_PORT_METRICS",
-	"PISATI_PORT", "PISATI_PORT_8080_TCP", "PISATI_PORT_8080_TCP_PROTO", "PISATI_PORT_8080_TCP_PORT",
-	"PISATI_PORT_8080_TCP_ADDR", "PISATI_PORT_8081_TCP", "PISATI_PORT_53_UDP_ADDR", "PISATI_PORT_9_SCTP",
-	"PISATI_PORT_65535_TCP_PROTO",
+// its namespace, with the values the kubelet writes: for a Service named
+// pisati, with the ports http, 8080/TCP, and metrics, 8081/TCP; for one
+// named pisati-web, with the port http-alt, 80/TCP; and for one named
+// pisati-db-2, with a port 53/UDP on IPv6.
+var serviceLinks = env{
+	"PISATI_SERVICE_HOST": "10.96.0.7", "PISATI_SERVICE_PORT": "8080", "PISATI_SERVICE_PORT_HTTP": "8080",
+	"PISATI_SERVICE_PORT_METRICS": "8081", "PISATI_PORT": "tcp://10.96.0.7:8080", "PISATI_PORT_8080_TCP": "tcp://10.96.0.7:8080",
+	"PISATI_PORT_8080_TCP_PROTO": "tcp", "PISATI_PORT_8080_TCP_PORT": "8080", "PISATI_PORT_8080_TCP_ADDR": "10.96.0.7",
+	"PISATI_PORT_8081_TCP": "tcp://10.96.0.7:8081", "PISATI_PORT_9_SCTP": "sctp://10.96.0.7:9",
+	"PISATI_PORT_65535_TCP_PROTO": "tcp",
+
+	"PISATI_WEB_SERVICE_HOST": "10.96.0.8", "PISATI_WEB_SERVICE_PORT": "80", "PISATI_WEB_SERVICE_PORT_HTTP_ALT": "80",
+	"PISATI_WEB_PORT": "tcp://10.96.0.8:80", "PISATI_WEB_PORT_80_TCP": "tcp://10.96.0.8:80",
+	"PISATI_WEB_PORT_80_TCP_PROTO": "tcp", "PISATI_WEB_PORT_80_TCP_PORT": "80", "PISATI_WEB_PORT_80_TCP_ADDR": "10.96.0.8",
+
+	"PISATI_DB_2_SERVICE_HOST": "fd00::9", "PISATI_DB_2_PORT": "udp://[fd00::9]:53",
+	"PISATI_DB_2_PORT_53_UDP_ADDR": "fd00::9",
+
+	// A Service named pisati-server: a link too, though it starts as a
+	// setting's variable does.
+	"PISATI_SERVER_SERVICE_HOST": "10.96.0.10",
+}
+
+// nearLinks are variables near a service link's shape, or a bare
+// …_PORT whose value is not one the kubelet writes, with their values:
+// each is refused, as a typo of a setting's own variable is.
+var nearLinks = env{
+	// The typo of a setting that the rule must still refuse.
+	"PISATI_SERVER_PORT": "8080",
+	"PISATI_PORT":        "8080", "PISATI_API_PORT": "http://10.96.0.8:80", "PISATI_CACHE_PORT": "tcp://10.96.0.8",
+	"PISATI_QUEUE_PORT": "tcp://:80", "PISATI_SERVER_LISTEN_PORT": ":8080",
+	"PISATI_SERVICE_HOSTS": "", "PISATI_WEB_SERVICE_HOSTS": "", "PISATI__SERVICE_HOST": "", "PISATI_WEB__SERVICE_HOST": "",
+	"PISATI_SERVICE_PORT_": "", "PISATI_SERVICE_PORT_http": "", "PISATI_PORTS": "", "PISATI_PORT_": "",
+	"PISATI_PORT_0_TCP": "", "PISATI_PORT_08080_TCP": "", "PISATI_PORT_65536_TCP": "", "PISATI_PORT_8080": "",
+	"PISATI_PORT_8080_HTTP": "", "PISATI_PORT_8080_TCP_HOST": "", "PISATI_PORT_8080_TCP_ADDR_": "", "PISATI_PORT_X_TCP": "",
+	"PISATI_WEB_PORT_80_TCP_HOST": "", "pisati_service_host": "", "Pisati_Port": "",
 }
 
 // serviceLinkShape is every shape of variable that Kubernetes's service
-// links take for a Service named pisati, written apart from Pisati's own
-// rule, so that a setting's variable can be checked against it.
-var serviceLinkShape = regexp.MustCompile(
-	`^PISATI_(SERVICE_HOST|SERVICE_PORT(_[A-Z0-9_]+)?|PORT(_[1-9][0-9]*_(TCP|UDP|SCTP)(_(PROTO|PORT|ADDR))?)?)$`)
+// links take for a Service whose name starts with pisati, written apart
+// from Pisati's own rule, so that a setting's variable can be checked
+// against it. A bare …_PORT is among them: Load passes over one only for
+// the value the kubelet writes, but no setting's variable should take its
+// shape either.
+var serviceLinkShape = regexp.MustCompile(`^PISATI_([A-Z0-9]([A-Z0-9_]*[A-Z0-9])?_)?` +
+	`(SERVICE_HOST|SERVICE_PORT(_[A-Z0-9_]+)?|PORT(_[1-9][0-9]*_(TCP|UDP|SCTP)(_(PROTO|PORT|ADDR))?)?)$`)
 
 func TestUnknownEnvSkipsServiceLinks(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range serviceLinks {
+	for name := range serviceLinks {
 		if !serviceLinkShape.MatchString(name) {
 			t.Fatalf("%s is not shaped as a service link: the test's list and its shape disagree", name)
 		}
 	}
-	if got := config.UnknownEnv(serviceLinks); len(got) != 0 {
+	links := slices.Sorted(maps.Keys(serviceLinks))
+	if got := config.UnknownEnv(links, serviceLinks.sources().Env); len(got) != 0 {
 		t.Errorf("UnknownEnv(Kubernetes's service links) = %q, want none", got)
 	}
-
-	// Near a link's shape, but no link: each is refused, as a typo of a
-	// setting's own variable is.
-	near := []string{
-		"PISATI_SERVICE_HOSTS", "PISATI_SERVICE_PORT_", "PISATI_SERVICE_PORT_http", "PISATI_PORTS", "PISATI_PORT_",
-		"PISATI_PORT_0_TCP", "PISATI_PORT_08080_TCP", "PISATI_PORT_65536_TCP", "PISATI_PORT_8080", "PISATI_PORT_8080_HTTP",
-		"PISATI_PORT_8080_TCP_HOST", "PISATI_PORT_8080_TCP_ADDR_", "PISATI_PORT_X_TCP", "pisati_service_host",
-		"Pisati_Port", "PISATI_SERVER_PORT", "PISATI_SERVER_SERVICE_HOST", "PISATI_SERVER_LISTEN_PORT",
+	// Without the values, a bare …_PORT is refused: its name alone is that
+	// of a setting's typo.
+	if got := config.UnknownEnv(links, nil); !slices.Equal(got, []string{"PISATI_DB_2_PORT", "PISATI_PORT", "PISATI_WEB_PORT"}) {
+		t.Errorf("UnknownEnv(the links, with no values) = %q, want the three bare …_PORT", got)
 	}
-	if got := config.UnknownEnv(near); !slices.Equal(got, slices.Sorted(slices.Values(near))) {
+
+	near := slices.Sorted(maps.Keys(nearLinks))
+	if got := config.UnknownEnv(near, nearLinks.sources().Env); !slices.Equal(got, near) {
 		t.Errorf("UnknownEnv(names near a link) = %q, want every one of %q", got, near)
 	}
 
-	// Load starts beside the links, and still names the typo among them.
-	e := env{"PISATI_SERVER_BASE_URL": baseURL, "PISATI_SERVER_LISTN": ":8080"}
-	for _, name := range serviceLinks {
-		e[name] = "tcp://10.96.0.7:8080"
-	}
+	// Load starts beside the links, and still names the typos among them.
+	e := maps.Clone(serviceLinks)
+	e["PISATI_SERVER_BASE_URL"] = baseURL
+	e["PISATI_SERVER_LISTN"] = ":8080"
+	e["PISATI_SERVER_PORT"] = "8080"
 	_, err := setup{env: e}.load(t.Context())
-	refused(t, err, config.ErrUnknown, `"PISATI_SERVER_LISTN"`)
-	for _, name := range serviceLinks {
-		if strings.Contains(err.Error(), name) {
+	refused(t, err, config.ErrUnknown, `"PISATI_SERVER_LISTN"`, `"PISATI_SERVER_PORT"`)
+	for name := range serviceLinks {
+		if strings.Contains(err.Error(), `"`+name+`"`) {
 			t.Errorf("Load named the service link %s: %v", name, err)
 		}
 	}
 	delete(e, "PISATI_SERVER_LISTN")
+	delete(e, "PISATI_SERVER_PORT")
 	if _, err := (setup{env: e}).load(t.Context()); err != nil {
 		t.Errorf("Load beside Kubernetes's service links: %v", err)
 	}
@@ -678,7 +710,7 @@ func TestSettingsTable(t *testing.T) {
 	if !slices.Equal(envs, knownEnv) {
 		t.Errorf("the table's variables are %q, want %q", envs, knownEnv)
 	}
-	if got := config.UnknownEnv(envs); len(got) != 0 {
+	if got := config.UnknownEnv(envs, nil); len(got) != 0 {
 		t.Errorf("UnknownEnv does not know %q", got)
 	}
 
@@ -2217,6 +2249,8 @@ func FuzzLoad(f *testing.F) {
 	// passes over, and a name near one, which it refuses.
 	f.Add("", "", "PISATI_SERVER_BASE_URL=https://b.example.org\nPISATI_SERVICE_HOST=10.96.0.7\nPISATI_SERVICE_PORT_HTTP=8080\n"+
 		"PISATI_PORT=tcp://10.96.0.7:8080\nPISATI_PORT_8080_TCP_ADDR=10.96.0.7\nPISATI_PORT_8080_TCP_PORTS=8080", "", false)
+	f.Add("", "", "PISATI_SERVER_BASE_URL=https://b.example.org\nPISATI_WEB_SERVICE_HOST=10.96.0.8\n"+
+		"PISATI_WEB_PORT=tcp://10.96.0.8:80\nPISATI_WEB_PORT_80_TCP_PROTO=tcp\nPISATI_SERVER_PORT=8080", "", false)
 	// A table and a key in another case, which go-toml alone would match.
 	f.Add("[SERVER]\nbase_url = \"https://blog.example.org\"\n", "[log]\nLEVEL = \"debug\"\n", "PISATI_SERVER_BASE_URL=https://b.example.org", "", false)
 	// A file that fails at its top, in no table, as an expression before

@@ -62,8 +62,8 @@ type Sources struct {
 // it replaces the default state directory.
 //
 // The error reports every unknown key in each file, every unknown
-// PISATI_ variable, as UnknownEnv finds them, and every value read that
-// its rule refuses. A key is
+// PISATI_ variable, as UnknownEnv finds them among EnvNames and their
+// values, and every value read that its rule refuses. A key is
 // known only when spelt exactly as its setting is, in lower case: [SERVER]
 // or BAse_url is an unknown key, named as written with its file, whose
 // value is not used, and the setting it would set is not also reported
@@ -93,7 +93,7 @@ func Load(ctx context.Context, src Sources, stateDirEnv string) (Config, error) 
 	overlay(&merged, &env)
 
 	errs := files.errs
-	for _, name := range UnknownEnv(src.EnvNames) {
+	for _, name := range UnknownEnv(src.EnvNames, src.Env) {
 		errs = append(errs, unknownVariable(name))
 	}
 	cfg, refusedValues, missing := build(merged, files.otherCase)
