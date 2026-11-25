@@ -35,17 +35,34 @@ const (
 var (
 	// ErrPasswordTooShort is a password of fewer than MinPasswordRunes
 	// characters.
-	ErrPasswordTooShort = errors.New("auth: password has fewer than 15 characters")
+	ErrPasswordTooShort = errors.New("the password has fewer than 15 characters")
 	// ErrPasswordTooLong is a password of more than MaxPasswordBytes bytes.
-	ErrPasswordTooLong = errors.New("auth: password is longer than 1024 bytes")
+	ErrPasswordTooLong = errors.New("the password is longer than 1,024 bytes")
 	// ErrPasswordNotUTF8 is a password that is not valid UTF-8.
-	ErrPasswordNotUTF8 = errors.New("auth: password is not valid UTF-8")
+	ErrPasswordNotUTF8 = errors.New("the password is not valid UTF-8 text")
 )
 
 // ErrInvalid is a value that one of this package's rules refuses, other
 // than a password: a salt, Params or a stored hash. Every error the package returns for one wraps it and says which
-// rule, without repeating the value.
+// rule, without repeating the value, in plain words of its own: ErrInvalid's
+// text does not show in it.
 var ErrInvalid = errors.New("auth: invalid")
+
+// refusal is an error the package returns for a value its rules refuse:
+// its message is msg alone, and it wraps ErrInvalid. The core imports no
+// package outside the standard library and itself, so it has this type of
+// its own.
+type refusal struct {
+	msg string
+}
+
+func (r *refusal) Error() string { return r.msg }
+func (r *refusal) Unwrap() error { return ErrInvalid }
+
+// refuse returns the refusal format and args say.
+func refuse(format string, args ...any) error {
+	return &refusal{msg: fmt.Sprintf(format, args...)}
+}
 
 // redacted stands in for a secret wherever one would show: all of a
 // Password, and a Hash's salt and key.

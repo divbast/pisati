@@ -172,7 +172,7 @@ func NewSessions(s *store.Store, clock func() time.Time, rnd io.Reader, base con
 		errs = append(errs, errors.New("app.NewSessions was given no random source, "+bug))
 	}
 	if base == (config.BaseURL{}) {
-		errs = append(errs, errors.New("app.NewSessions was given the zero BaseURL, "+bug))
+		errs = append(errs, errors.New("app.NewSessions was given no base URL (the zero BaseURL), "+bug))
 	}
 	if log == nil {
 		errs = append(errs, errors.New("app.NewSessions was given no logger, "+bug))
@@ -330,12 +330,12 @@ func (s *Sessions) Renew(ctx context.Context, user auth.UserID) (http.Cookie, er
 	}
 	var id sessionID
 	if _, err := io.ReadFull(s.rnd, id[:]); err != nil {
-		return http.Cookie{}, fmt.Errorf("no random bytes can be read for a new session's ID: %w", err)
+		return http.Cookie{}, fmt.Errorf("the %d random bytes of a new session's ID cannot be read: %w", len(id), err)
 	}
 	// All zero is what a source that never filled the buffer leaves.
 	if id == (sessionID{}) {
-		return http.Cookie{}, errors.New("the random source gave only zero bytes for a new session's ID, so no " +
-			"session is started")
+		return http.Cookie{}, fmt.Errorf("every one of the %d random bytes read for a new session's ID is zero, which "+
+			"a working random source does not give, so no session is started", len(id))
 	}
 	now := s.clock().UnixMilli()
 	if err := s.store.Queries().InsertSession(ctx, storedb.InsertSessionParams{

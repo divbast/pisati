@@ -150,7 +150,8 @@ func NewProviders(ctx context.Context, c config.Telemetry, version string, log *
 	}
 	duration, err := httpconv.NewServerRequestDuration(meters.Meter(scope))
 	if err != nil {
-		return Providers{}, explain.Wrap(err, "Pisati cannot make the histogram of how long requests take, for /metrics")
+		return Providers{}, explain.Wrap(err, "Pisati cannot set up the measure of how long requests take, which "+
+			"/metrics serves")
 	}
 	p := Providers{
 		meters:   meters,
@@ -328,7 +329,8 @@ func (e spanExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnly
 // logged here instead: all but ctx's end, which that caller is told of.
 func (e spanExporter) Shutdown(ctx context.Context) error {
 	if err := e.next.Shutdown(ctx); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
-		e.log.WarnContext(ctx, "sending traces did not stop cleanly, so the last traces may not have been sent", "error", err)
+		e.log.WarnContext(ctx, "trace sending not shut down, so the last traces may not have reached the collector",
+			"error", err)
 	}
 	e.client.CloseIdleConnections()
 	return nil

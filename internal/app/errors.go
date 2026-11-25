@@ -75,23 +75,24 @@ const (
 	Malformed
 )
 
-// String returns the rule's name, for logs: required, too short, too
-// long, not allowed or malformed, and unspecified for the zero Reason or
-// one outside the set.
+// String says what the rule found, for logs, as what follows the input's
+// name: "is missing", "is too short", "is too long", "is not allowed" or
+// "is not in the form it takes", and "is refused, for no reason given"
+// for the zero Reason or one outside the set.
 func (r Reason) String() string {
 	switch r {
 	case Required:
-		return "required"
+		return "is missing"
 	case TooShort:
-		return "too short"
+		return "is too short"
 	case TooLong:
-		return "too long"
+		return "is too long"
 	case NotAllowed:
-		return "not allowed"
+		return "is not allowed"
 	case Malformed:
-		return "malformed"
+		return "is not in the form it takes"
 	}
-	return "unspecified"
+	return "is refused, for no reason given"
 }
 
 // Conflict is a change that the current state refuses, such as a name
@@ -121,23 +122,28 @@ func (e *RateLimited) RetryAfterSeconds() int64 {
 	return seconds
 }
 
-func (*NotFound) Error() string        { return "app: not found" }
-func (*Forbidden) Error() string       { return "app: forbidden" }
-func (*Unauthenticated) Error() string { return "app: not signed in" }
-func (*Conflict) Error() string        { return "app: conflict" }
+func (*NotFound) Error() string  { return "the page or the item asked for does not exist" }
+func (*Forbidden) Error() string { return "the signed-in user may not do this" }
+func (*Unauthenticated) Error() string {
+	return "this needs a signed-in user, and the request comes from none"
+}
+
+func (*Conflict) Error() string {
+	return "the change does not fit what is there already, such as a name that is taken already"
+}
 
 func (e *Invalid) Error() string {
 	if e == nil {
-		return "app: invalid"
+		return "an input is refused, for no reason given"
 	}
-	return "app: invalid " + string(e.Field) + ": " + e.Reason.String()
+	return "the input " + string(e.Field) + " " + e.Reason.String()
 }
 
 func (e *RateLimited) Error() string {
 	if e == nil {
-		return "app: rate limited"
+		return "the request came too soon after others from the same place"
 	}
-	return fmt.Sprintf("app: rate limited; retry after %s", e.RetryAfter)
+	return fmt.Sprintf("the request came too soon after others from the same place: try again after %s", e.RetryAfter)
 }
 
 // Each variant is an Error as a pointer, and only as one: the compiler

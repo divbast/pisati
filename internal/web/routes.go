@@ -117,10 +117,10 @@ func NewSite(assets *Assets, base config.BaseURL, reports *httpx.Limiter, ip htt
 	var errs []error
 	const bug = "which is a bug in Pisati"
 	if assets == nil {
-		errs = append(errs, errors.New("web.NewSite was given no assets of the front end, "+bug))
+		errs = append(errs, errors.New("web.NewSite was given no assets, the stylesheets and scripts that pages load, "+bug))
 	}
 	if base == (config.BaseURL{}) {
-		errs = append(errs, errors.New("web.NewSite was given the zero BaseURL, so no base URL, "+bug))
+		errs = append(errs, errors.New("web.NewSite was given no base URL (the zero BaseURL), "+bug))
 	}
 	if reports == nil {
 		errs = append(errs, errors.New("web.NewSite was given no limiter for CSP reports, "+bug))

@@ -48,7 +48,7 @@ func NewHasher(ctx context.Context, rnd io.Reader) (*Hasher, error) {
 	}
 	var secret [32]byte
 	if _, err := io.ReadFull(rnd, secret[:]); err != nil {
-		return nil, fmt.Errorf("no random bytes can be read for the password hasher's decoy: %w", err)
+		return nil, fmt.Errorf("the %d random bytes of the password hasher's decoy cannot be read: %w", len(secret), err)
 	}
 	p, err := auth.ParsePassword(base64.RawURLEncoding.EncodeToString(secret[:]))
 	if err != nil {
@@ -102,7 +102,7 @@ func (h *Hasher) Verify(ctx context.Context, p auth.Password, stored auth.Hash) 
 func hashWith(rnd io.Reader, p auth.Password) (auth.Hash, error) {
 	var salt auth.Salt
 	if _, err := io.ReadFull(rnd, salt[:]); err != nil {
-		return auth.Hash{}, fmt.Errorf("no random bytes can be read for a password's salt: %w", err)
+		return auth.Hash{}, fmt.Errorf("the %d random bytes of a password's salt cannot be read: %w", len(salt), err)
 	}
 	hash, err := auth.HashPassword(p, salt, auth.DefaultParams())
 	if err != nil {

@@ -114,7 +114,7 @@ func TestWriteErrorExhaustive(t *testing.T) {
 			switch {
 			case tt.logged && len(recs) != 1:
 				t.Errorf("%d records, want the failure logged once: %v", len(recs), recs)
-			case tt.logged && (recs[0]["level"] != "ERROR" || recs[0]["msg"] != "request answered with status 500, because of an error in Pisati"):
+			case tt.logged && (recs[0]["level"] != "ERROR" || recs[0]["msg"] != "request answered with status 500, because Pisati could not complete it"):
 				t.Errorf("logged %v, want request failed at ERROR", recs[0])
 			case !tt.logged && len(recs) != 0:
 				t.Errorf("logged %v, want nothing for an error the visitor can act on", recs)

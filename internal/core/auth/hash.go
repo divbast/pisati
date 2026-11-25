@@ -46,12 +46,13 @@ func DefaultParams() Params {
 func (p Params) check() error {
 	switch {
 	case p.Time < 1 || p.Time > maxTime:
-		return fmt.Errorf("%w params: %d passes, want 1 to %d", ErrInvalid, p.Time, maxTime)
+		return refuse("the password hash's settings ask for %d passes, but Pisati takes 1 to %d", p.Time, maxTime)
 	case p.Threads < 1:
-		return fmt.Errorf("%w params: no threads, want 1 to 255", ErrInvalid)
+		return refuse("the password hash's settings ask for no threads, but Pisati takes 1 to 255")
 	case p.Memory < minMemoryPerThread*uint32(p.Threads) || p.Memory > maxMemory:
-		return fmt.Errorf("%w params: %d KiB of memory for %d threads, want %d KiB for each thread to %d KiB",
-			ErrInvalid, p.Memory, p.Threads, minMemoryPerThread, maxMemory)
+		return refuse("the password hash's settings give %d KiB of memory (a KiB is 1,024 bytes) for %d threads, but "+
+			"Pisati takes at least %d KiB for each thread, and at most %d KiB in all", p.Memory, p.Threads,
+			minMemoryPerThread, maxMemory)
 	}
 	return nil
 }
@@ -93,7 +94,8 @@ func HashPassword(p Password, s Salt, params Params) (Hash, error) {
 		return Hash{}, ErrPasswordTooShort
 	}
 	if s == (Salt{}) {
-		return Hash{}, fmt.Errorf("%w salt: all zero, want 16 bytes from crypto/rand", ErrInvalid)
+		return Hash{}, refuse("auth.HashPassword was given a salt whose 16 bytes are all zero, but a salt is 16 bytes " +
+			"from crypto/rand, which is a bug in Pisati")
 	}
 	if err := params.check(); err != nil {
 		return Hash{}, err
@@ -212,15 +214,17 @@ func (h Hash) MarshalText() ([]byte, error) {
 // longest such hash before reading it. Its errors never repeat s.
 func ParseHash(s string) (Hash, error) {
 	if len(s) > maxPHC {
-		return Hash{}, fmt.Errorf("%w hash: %d bytes, want at most %d", ErrInvalid, len(s), maxPHC)
+		return Hash{}, refuse("the stored password hash is %d bytes long, more than the %d bytes that a hash of "+
+			"Pisati's takes", len(s), maxPHC)
 	}
 	rest, ok := strings.CutPrefix(s, phcPrefix)
 	if !ok {
-		return Hash{}, fmt.Errorf("%w hash: want the prefix %s", ErrInvalid, phcPrefix)
+		return Hash{}, refuse("the stored password hash does not start with %s, as a hash of Pisati's does", phcPrefix)
 	}
 	fields := strings.Split(rest, "$")
 	if len(fields) != 3 {
-		return Hash{}, fmt.Errorf("%w hash: want params, salt and key after the prefix, separated by $", ErrInvalid)
+		return Hash{}, refuse("the stored password hash does not hold its settings, its salt and its key after %s, "+
+			"each after a \"$\"", phcPrefix)
 	}
 	params, err := parseParams(fields[0])
 	if err != nil {
@@ -228,14 +232,16 @@ func ParseHash(s string) (Hash, error) {
 	}
 	var salt Salt
 	if len(fields[1]) != saltB64 || !decode(salt[:], fields[1]) {
-		return Hash{}, fmt.Errorf("%w hash: want a 16-byte salt in %d characters of unpadded base64", ErrInvalid, saltB64)
+		return Hash{}, refuse("the stored password hash does not hold a 16-byte salt in %d characters of base64 "+
+			"without padding", saltB64)
 	}
 	if salt == (Salt{}) {
-		return Hash{}, fmt.Errorf("%w hash: the salt is all zero", ErrInvalid)
+		return Hash{}, refuse("the stored password hash has a salt whose bytes are all zero")
 	}
 	var key [keyLen]byte
 	if len(fields[2]) != keyB64 || !decode(key[:], fields[2]) {
-		return Hash{}, fmt.Errorf("%w hash: want a 32-byte key in %d characters of unpadded base64", ErrInvalid, keyB64)
+		return Hash{}, refuse("the stored password hash does not hold a 32-byte key in %d characters of base64 "+
+			"without padding", keyB64)
 	}
 	return newHash(params, salt, key), nil
 }
@@ -255,10 +261,11 @@ func parseParams(s string) (Params, error) {
 	passes, okT2 := number(t, "t=")
 	threads, okP := number(p, "p=")
 	if !okM || !okT || !okM2 || !okT2 || !okP {
-		return Params{}, fmt.Errorf("%w hash: want params m=<KiB>,t=<passes>,p=<threads> in decimal", ErrInvalid)
+		return Params{}, refuse("the stored password hash does not hold its settings as m=<KiB>,t=<passes>,p=<threads>, " +
+			"each a decimal number")
 	}
 	if threads > 255 {
-		return Params{}, fmt.Errorf("%w params: %d threads, want 1 to 255", ErrInvalid, threads)
+		return Params{}, refuse("the stored password hash asks for %d threads, but Pisati takes 1 to 255", threads)
 	}
 	params := Params{Memory: memory, Time: passes, Threads: uint8(threads)}
 	if err := params.check(); err != nil {

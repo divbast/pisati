@@ -50,19 +50,25 @@ func TestErrorSwitchIsExhaustive(t *testing.T) {
 		status  int
 		message string
 	}{
-		{err: &app.NotFound{}, status: http.StatusNotFound, message: "app: not found"},
-		{err: &app.Forbidden{}, status: http.StatusForbidden, message: "app: forbidden"},
-		{err: &app.Unauthenticated{}, status: http.StatusUnauthorized, message: "app: not signed in"},
+		{err: &app.NotFound{}, status: http.StatusNotFound, message: "the page or the item asked for does not exist"},
+		{err: &app.Forbidden{}, status: http.StatusForbidden, message: "the signed-in user may not do this"},
+		{
+			err: &app.Unauthenticated{}, status: http.StatusUnauthorized,
+			message: "this needs a signed-in user, and the request comes from none",
+		},
 		{
 			err:     &app.Invalid{Field: "title", Reason: app.TooLong},
 			status:  http.StatusBadRequest,
-			message: "app: invalid title: too long",
+			message: "the input title is too long",
 		},
-		{err: &app.Conflict{}, status: http.StatusConflict, message: "app: conflict"},
+		{
+			err: &app.Conflict{}, status: http.StatusConflict,
+			message: "the change does not fit what is there already, such as a name that is taken already",
+		},
 		{
 			err:     &app.RateLimited{RetryAfter: 30 * time.Second},
 			status:  http.StatusTooManyRequests,
-			message: "app: rate limited; retry after 30s",
+			message: "the request came too soon after others from the same place: try again after 30s",
 		},
 	} {
 		t.Run(fmt.Sprintf("%T", tc.err), func(t *testing.T) {
@@ -111,8 +117,8 @@ func TestErrorSwitchIsExhaustive(t *testing.T) {
 			(*app.NotFound)(nil), (*app.Forbidden)(nil), (*app.Unauthenticated)(nil),
 			(*app.Invalid)(nil), (*app.Conflict)(nil), (*app.RateLimited)(nil),
 		} {
-			if msg := err.Error(); !strings.HasPrefix(msg, "app: ") {
-				t.Errorf("%T(nil).Error() = %q", err, msg)
+			if msg := err.Error(); msg == "" || strings.HasPrefix(msg, "app: ") {
+				t.Errorf("%T(nil).Error() = %q, want a message in plain words", err, msg)
 			}
 		}
 	})
@@ -143,7 +149,7 @@ func TestReasonsAreAClosedSet(t *testing.T) {
 	seen := map[string]app.Reason{}
 	for _, r := range []app.Reason{app.Required, app.TooShort, app.TooLong, app.NotAllowed, app.Malformed} {
 		name := r.String()
-		if name == "" || name == "unspecified" {
+		if name == "" || name == "is refused, for no reason given" {
 			t.Errorf("Reason %d has the name %q", r, name)
 		}
 		if other, ok := seen[name]; ok {
@@ -154,17 +160,17 @@ func TestReasonsAreAClosedSet(t *testing.T) {
 			t.Errorf("Reason %s has no message", r)
 		}
 		err := &app.Invalid{Field: "title", Reason: r}
-		if want := "app: invalid title: " + name; err.Error() != want {
+		if want := "the input title " + name; err.Error() != want {
 			t.Errorf("Error() = %q, want %q", err.Error(), want)
 		}
 	}
 	// The zero Reason, and any outside the set, is unspecified.
 	for _, r := range []app.Reason{0, 6, 255} {
-		if got := r.String(); got != "unspecified" {
-			t.Errorf("Reason(%d).String() = %q, want unspecified", r, got)
+		if got := r.String(); got != "is refused, for no reason given" {
+			t.Errorf("Reason(%d).String() = %q, want the unspecified reason", r, got)
 		}
 	}
-	if got := (&app.Invalid{Field: "title"}).Error(); got != "app: invalid title: unspecified" {
+	if got := (&app.Invalid{Field: "title"}).Error(); got != "the input title is refused, for no reason given" {
 		t.Errorf("Invalid without a Reason: %q", got)
 	}
 }

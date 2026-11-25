@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/divbast/pisati/internal/core/auth"
+	"github.com/divbast/pisati/internal/explain"
 )
 
 func TestParsePasswordBounds(t *testing.T) {
@@ -152,4 +153,20 @@ func FuzzParsePassword(f *testing.F) {
 			t.Fatalf("CheckPassword(ParsePassword(%q), %q) = %v, want ErrContextWord", s, s, err)
 		}
 	})
+}
+
+// TestPasswordErrorsGiveTheBounds: the refusals' fixed texts give the
+// bounds as the constants hold them, the size in the one form every
+// message writes a size in, so that the texts cannot drift from them.
+func TestPasswordErrorsGiveTheBounds(t *testing.T) {
+	t.Parallel()
+
+	for err, want := range map[error]string{
+		auth.ErrPasswordTooShort: fmt.Sprintf("fewer than %d characters", auth.MinPasswordRunes),
+		auth.ErrPasswordTooLong:  "longer than " + explain.Bytes(auth.MaxPasswordBytes),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("%q does not say %q", err, want)
+		}
+	}
 }

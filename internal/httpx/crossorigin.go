@@ -27,7 +27,8 @@ func CrossOrigin(base config.BaseURL) Middleware {
 	// The panic leaves err out: net/http's text quotes the origin, and a
 	// URL is never shown.
 	if err := p.AddTrustedOrigin(base.String()); err != nil {
-		panic("httpx.CrossOrigin was given a base URL that is no origin, " + bug + ": config.Load never gives one")
+		panic("httpx.CrossOrigin was given a base URL that net/http does not take as an origin, " + bug +
+			": config.Load never gives one")
 	}
 	p.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")

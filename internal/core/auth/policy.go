@@ -13,7 +13,8 @@ import (
 // ErrContextWord is a password that contains one of the words it was
 // checked with. Its message is fixed, and never holds the password or the
 // word.
-var ErrContextWord = errors.New("auth: password contains a word from its context")
+var ErrContextWord = errors.New("the password holds a word from its context, such as the user's name or the " +
+	"blog's title")
 
 // minContextRunes is the fewest characters a context word needs to count:
 // a shorter one is too likely to turn up in a password by chance.

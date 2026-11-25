@@ -182,8 +182,9 @@ func NewGuardedClient(o GuardedOptions) (*GuardedClient, error) {
 		Timeout: o.Timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > maxRedirects {
-				return explain.New(ErrTooManyRedirects, "the server sent the request to another address more than %d "+
-					"times, and Pisati follows no more", maxRedirects)
+				return explain.New(ErrTooManyRedirects, "the request was redirected more than %d times: each answer "+
+					"told Pisati to ask another URL instead, and Pisati follows no more than %d such answers",
+					maxRedirects, maxRedirects)
 			}
 			return c.check.url(req.URL)
 		},
@@ -225,14 +226,14 @@ func (c *GuardedClient) Do(ctx context.Context, req *http.Request) (*http.Respon
 	resp, err := c.client.Do(req.WithContext(ctx)) //nolint:gosec // G704: this is the address-checked client; the check above, CheckRedirect and dial check every URL and address
 	if err != nil {
 		if headerTooLarge(err) {
-			return nil, explain.New(errors.Join(ErrTooLarge, err), "the server's answer has a header of more than %d "+
-				"bytes (64 KiB), which is more than Pisati reads", maxResponseHeader)
+			return nil, explain.New(errors.Join(ErrTooLarge, err), "the server's answer has a header of more than %s, "+
+				"which is more than Pisati reads", explain.Bytes(maxResponseHeader))
 		}
 		return nil, err
 	}
 	if !resp.Uncompressed && mayHaveBody(resp) && encoded(resp.Header) {
-		return nil, errors.Join(explain.New(ErrInvalid, "the server sent its answer encoded as %s, which Pisati did not "+
-			"ask for, so Pisati does not read it", strings.Join(resp.Header.Values("Content-Encoding"), ", ")),
+		return nil, errors.Join(explain.New(ErrInvalid, "the server sent its answer encoded as %q, which Pisati does "+
+			"not decode, so Pisati does not read it", strings.Join(resp.Header.Values("Content-Encoding"), ", ")),
 			resp.Body.Close())
 	}
 	resp.Body = &cappedBody{body: resp.Body, left: c.maxBody, limit: c.maxBody}
@@ -429,7 +430,11 @@ func (k addressCheck) allows(a netip.Addr) bool {
 // address the check refuses. A host name is checked as it is connected
 // to.
 func (k addressCheck) url(u *url.URL) error {
-	if u.Scheme != "http" && u.Scheme != "https" {
+	switch {
+	case u.Scheme == "":
+		return explain.New(ErrAddressRefused, "Pisati sends requests only to http and https URLs, and this URL has no "+
+			"scheme, such as https: at its start")
+	case u.Scheme != "http" && u.Scheme != "https":
 		return explain.New(ErrAddressRefused, "Pisati sends requests only to http and https URLs, and not to one that "+
 			"starts with %q", u.Scheme+":")
 	}
@@ -488,8 +493,8 @@ func (b *cappedBody) Read(p []byte) (int, error) {
 	}
 	n = int(b.left)
 	b.left = 0
-	b.err = explain.New(ErrTooLarge, "the server's answer has a body of more than %d bytes, which is more than Pisati "+
-		"reads", b.limit)
+	b.err = explain.New(ErrTooLarge, "the server's answer has a body of more than %s, which is more than Pisati "+
+		"reads", explain.Bytes(b.limit))
 	return n, b.err
 }
 

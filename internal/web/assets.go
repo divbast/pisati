@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/divbast/pisati/internal/config"
+	"github.com/divbast/pisati/internal/explain"
 )
 
 // The conditions NewAssets's errors report, besides the context's own
@@ -33,8 +34,8 @@ var (
 	// that is not one Vite writes, or that names a file the build lacks,
 	// a file outside it, one too big, one of a type Assets does not serve,
 	// or an entry that would load files a page could not check.
-	ErrBuild = errors.New("the front end built into this Pisati cannot be served, which is a fault in how this " +
-		"Pisati was built")
+	ErrBuild = errors.New("the stylesheets and scripts built into this Pisati cannot be served, which is a fault in " +
+		"how this Pisati was built")
 	// ErrDevServer is dev mode with the Vite dev server or the base URL
 	// away from localhost, 127.0.0.1 and [::1].
 	ErrDevServer = errors.New("the Vite dev server is for development on this machine only, which config.Load " +
@@ -446,8 +447,8 @@ func readFile(ctx context.Context, fsys fs.FS, name string, limit int64) (data [
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("%w: the file %q of the build is larger than %d bytes, more than Pisati serves", ErrBuild,
-			name, limit)
+		return nil, fmt.Errorf("%w: the file %q of the build is larger than %s, more than Pisati serves", ErrBuild,
+			name, explain.Bytes(limit))
 	}
 	return data, nil
 }

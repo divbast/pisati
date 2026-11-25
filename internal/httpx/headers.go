@@ -57,7 +57,7 @@ type header struct {
 // panics on it.
 func SecurityHeaders(base config.BaseURL, hsts config.HSTSScope, dev config.Dev) Middleware {
 	if base.String() == "" {
-		panic("httpx.SecurityHeaders was given the zero BaseURL, " + bug + ": config.Load never gives one")
+		panic("httpx.SecurityHeaders was given no base URL (the zero BaseURL), " + bug + ": config.Load never gives one")
 	}
 	sts := hstsValue(hsts)
 	vite := devServerOf(base, dev)
