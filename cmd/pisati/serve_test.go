@@ -123,7 +123,7 @@ func TestServeAndShutdown(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(s.state, "pisati.db-wal")); !os.IsNotExist(err) {
 		t.Errorf("pisati.db-wal is still there once serve stopped (%v): the store was not closed", err)
 	}
-	lock, err := store.AcquireLock(t.Context(), s.state)
+	lock, err := store.AcquireLock(t.Context(), stateDir(t, s.state))
 	if err != nil {
 		t.Errorf("the state directory's lock is still held once serve stopped: %v", err)
 	}
@@ -202,7 +202,7 @@ func mustHaveHalted(t *testing.T, s *site, v *serving, code int, took time.Durat
 	if cut := v.stdout.logged(t, haltRecord); len(cut) != 1 || cut[0]["level"] != "ERROR" {
 		t.Errorf("serve logged %v, want one error record of the halt", cut)
 	}
-	lock, err := store.AcquireLock(t.Context(), s.state)
+	lock, err := store.AcquireLock(t.Context(), stateDir(t, s.state))
 	if err != nil {
 		t.Errorf("the state directory's lock is still held once serve stopped: %v", err)
 	}

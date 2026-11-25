@@ -7,8 +7,10 @@
 //
 // Load checks every value it reads and reports, in one error, every
 // unknown key in each file, every unknown PISATI_ variable and every value
-// refused. A file with a syntax or type error is reported at that error
-// alone, since decoding stops there, and gives none of its settings.
+// refused. Decoding a file stops at its first syntax or type error, so a
+// file with one gives none of its settings, and is reported at that
+// error, and at each secret given in place before it, which is refused
+// wherever it is given.
 //
 // The package reads nothing by itself: files reach it through fs.FS and
 // the environment through a lookup function, both built in main.
@@ -112,9 +114,31 @@ type Server struct {
 
 // Storage is where Pisati keeps its state.
 type Storage struct {
-	// StateDir is an absolute, clean path: $STATE_DIRECTORY when systemd
-	// sets it, otherwise /var/lib/pisati.
-	StateDir string
+	// StateDir is $STATE_DIRECTORY when systemd sets it, otherwise
+	// /var/lib/pisati.
+	StateDir StateDir
+}
+
+// StateDir is the directory Pisati keeps its state in, the database and
+// the main key it generates among it: an absolute, clean path, which
+// filepath.Clean leaves as it is. The zero StateDir is none: its String is
+// empty.
+type StateDir struct {
+	path string
+}
+
+// ParseStateDir returns s as a StateDir, or an error wrapping ErrInvalid
+// that says why it is not an absolute, clean path.
+func ParseStateDir(s string) (StateDir, error) {
+	if why, fix := pathRule(s); why != "" {
+		return StateDir{}, &badValue{value: s, why: why, fix: fix}
+	}
+	return StateDir{path: s}, nil
+}
+
+// String returns the directory's path.
+func (d StateDir) String() string {
+	return d.path
 }
 
 // Log is how Pisati logs.

@@ -23,7 +23,7 @@ func TestBackupRoundTrip(t *testing.T) {
 	insertSession(t, s, "committed", 42)
 	// Named as a state directory's database, so that it can be migrated
 	// under that directory's lock.
-	dest := store.DatabasePath(t.TempDir())
+	dest := store.DatabasePath(stateDir(t, t.TempDir()))
 
 	// A transaction open while the backup runs: the backup neither waits
 	// for it nor holds what it has not committed.

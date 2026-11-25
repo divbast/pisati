@@ -104,7 +104,7 @@ func describe(c config.Config) map[string]string {
 		"server.internal_listen":  c.Server.InternalListen.String(),
 		"server.trusted_proxies":  fmt.Sprint(c.Server.TrustedProxies),
 		"server.hsts":             c.Server.HSTS.String(),
-		"storage.state_dir":       c.Storage.StateDir,
+		"storage.state_dir":       c.Storage.StateDir.String(),
 		"log.level":               c.Log.Level.String(),
 		"log.format":              c.Log.Format.String(),
 		"telemetry.otlp_endpoint": optional(c.Telemetry.OTLPEndpoint),
@@ -1501,6 +1501,43 @@ func TestSettingRules(t *testing.T) {
 	}
 }
 
+func TestParseStateDir(t *testing.T) {
+	t.Parallel()
+
+	for _, ok := range []string{"/var/lib/pisati", "/", "/srv/a b/pisati"} {
+		d, err := config.ParseStateDir(ok)
+		if err != nil || d.String() != ok {
+			t.Errorf("ParseStateDir(%q) = %q, %v; want it as given", ok, d, err)
+		}
+	}
+	for _, bad := range []string{"", "var/lib/pisati", "/var//lib", "/var/lib/", "/var/./lib", "/var/lib/.."} {
+		if d, err := config.ParseStateDir(bad); !errors.Is(err, config.ErrInvalid) || d != (config.StateDir{}) {
+			t.Errorf("ParseStateDir(%q) = %q, %v; want the zero StateDir and ErrInvalid", bad, d, err)
+		}
+	}
+	if s := (config.StateDir{}).String(); s != "" {
+		t.Errorf("the zero StateDir is %q, want empty", s)
+	}
+}
+
+func FuzzParseStateDir(f *testing.F) {
+	for _, s := range []string{"/var/lib/pisati", "", "relative", "/a//b", "/a/", "/a/../b", "/./"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		d, err := config.ParseStateDir(s)
+		if err != nil {
+			if !errors.Is(err, config.ErrInvalid) || d != (config.StateDir{}) {
+				t.Errorf("ParseStateDir(%q) = %q, %v; want the zero StateDir and an error wrapping ErrInvalid", s, d, err)
+			}
+			return
+		}
+		if d.String() != s || !filepath.IsAbs(s) || filepath.Clean(s) != s {
+			t.Errorf("ParseStateDir(%q) accepted %q, which is not that absolute, clean path", s, d)
+		}
+	})
+}
+
 func TestStateDirFromSystemd(t *testing.T) {
 	t.Parallel()
 
@@ -1529,7 +1566,7 @@ func TestStateDirFromSystemd(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if cfg.Storage.StateDir != tt.want {
+			if cfg.Storage.StateDir.String() != tt.want {
 				t.Errorf("state directory %q, want %q", cfg.Storage.StateDir, tt.want)
 			}
 		})
@@ -2496,7 +2533,7 @@ func valid(t *testing.T, c config.Config) {
 	default:
 		t.Errorf("HSTS scope %d is not one of the constants", c.Server.HSTS)
 	}
-	if d := c.Storage.StateDir; !filepath.IsAbs(d) || filepath.Clean(d) != d {
+	if d := c.Storage.StateDir.String(); !filepath.IsAbs(d) || filepath.Clean(d) != d {
 		t.Errorf("state directory %q is not absolute and clean", d)
 	}
 	switch c.Log.Level {

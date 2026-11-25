@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/divbast/pisati/internal/config"
 	"github.com/divbast/pisati/internal/store"
 )
 
@@ -27,7 +28,7 @@ type target struct {
 func newTarget(t *testing.T) target {
 	t.Helper()
 	state := t.TempDir()
-	path := store.DatabasePath(state)
+	path := store.DatabasePath(stateDir(t, state))
 	s := migratedStore(t, path)
 	insertSession(t, s, "live", 1)
 	if err := s.Close(); err != nil {
@@ -193,7 +194,7 @@ func TestRestoreRefusesWhileLocked(t *testing.T) {
 	ctx := t.Context()
 
 	// serve holds the lock for as long as it runs.
-	serving, err := store.AcquireLock(ctx, tg.state)
+	serving, err := store.AcquireLock(ctx, stateDir(t, tg.state))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +204,7 @@ func TestRestoreRefusesWhileLocked(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if _, err := store.AcquireLock(ctx, tg.state); !errors.Is(err, store.ErrLocked) {
+	if _, err := store.AcquireLock(ctx, stateDir(t, tg.state)); !errors.Is(err, store.ErrLocked) {
 		t.Fatalf("AcquireLock while serve holds the lock: %v, want ErrLocked", err)
 	}
 	if err := store.Restore(ctx, src, store.Lock{}); !errors.Is(err, store.ErrLockNotHeld) {
@@ -348,7 +349,7 @@ func TestRestoreSharedLockRunsOneAtATime(t *testing.T) {
 // Migrate up is SQLite's lock on the file, which a bubble cannot see.
 func TestQueuedRestoreStopsWithItsContext(t *testing.T) {
 	state := t.TempDir()
-	path := store.DatabasePath(state)
+	path := store.DatabasePath(stateDir(t, state))
 	s := openStore(t, path)
 	lock := lockOn(t, state)
 	ctx := t.Context()
@@ -473,7 +474,7 @@ func TestQueuedRestoreStopsWithItsContext(t *testing.T) {
 }
 
 func TestLockIsExclusive(t *testing.T) {
-	state := t.TempDir()
+	state := stateDir(t, t.TempDir())
 	ctx := t.Context()
 
 	first, err := store.AcquireLock(ctx, state)
@@ -501,7 +502,7 @@ func TestLockIsExclusive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := store.AcquireLock(ctx, "state"); err == nil {
-		t.Error("AcquireLock took a relative path")
+	if _, err := store.AcquireLock(ctx, config.StateDir{}); err == nil {
+		t.Error("AcquireLock took the zero StateDir")
 	}
 }

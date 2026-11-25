@@ -119,7 +119,7 @@ func (c restoreCmd) restore(ctx context.Context, h Host) (err error) {
 		return err
 	}
 	dir := cfg.Storage.StateDir
-	if err := checkStateDir(dir); err != nil {
+	if err := checkStateDir(ctx, dir); err != nil {
 		return err
 	}
 	lock, err := lockState(ctx, dir)

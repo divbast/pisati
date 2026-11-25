@@ -449,7 +449,7 @@ func reason(err error) string {
 // state is a state directory under its lock, with its database open and
 // migrated.
 type state struct {
-	dir  string
+	dir  config.StateDir
 	lock store.Lock
 	db   *store.Store
 }
@@ -458,8 +458,8 @@ type state struct {
 // its lock, opens its database and migrates it. It returns the schema
 // versions it found and left, as Migrate does. On an error it leaves
 // nothing open or held.
-func openState(ctx context.Context, dir string) (_ *state, from, to store.SchemaVersion, err error) {
-	if err := checkStateDir(dir); err != nil {
+func openState(ctx context.Context, dir config.StateDir) (_ *state, from, to store.SchemaVersion, err error) {
+	if err := checkStateDir(ctx, dir); err != nil {
 		return nil, 0, 0, err
 	}
 	lock, err := lockState(ctx, dir)
@@ -495,8 +495,12 @@ const checkFile = ".pisati-write-check-"
 // written to, by making a file in it and removing it again: the one test
 // that sees every reason a write can fail, a read-only mount, a mode or
 // an access list among them. Each error says what to do about its cause.
-func checkStateDir(dir string) error {
-	info, err := os.Stat(dir)
+// Once ctx has ended, it checks nothing, and returns ctx's error.
+func checkStateDir(ctx context.Context, dir config.StateDir) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	info, err := os.Stat(dir.String())
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return explain.New(err, "the state directory %s does not exist. Create it, and give the user that runs Pisati permission "+
@@ -507,7 +511,7 @@ func checkStateDir(dir string) error {
 	case !info.IsDir():
 		return fmt.Errorf("the state directory %s is not a directory. Set %s to a directory", dir, stateDirSetting)
 	}
-	f, err := os.CreateTemp(dir, checkFile+"*")
+	f, err := os.CreateTemp(dir.String(), checkFile+"*")
 	switch {
 	case errors.Is(err, syscall.EROFS):
 		return explain.New(err, "Pisati cannot write to the state directory %s, because it is on a read-only file system. "+
@@ -544,7 +548,7 @@ func checkStateDir(dir string) error {
 // the state directory dir, and which err says the file system refused to
 // close: the file system reported a fault in writing it, so Pisati cannot
 // be sure that it can write there. What to do follows the fault.
-func closeFailed(err error, name, dir string) error {
+func closeFailed(err error, name string, dir config.StateDir) error {
 	made := fmt.Sprintf("Pisati made the file %s to check that it can write to the state directory %s, and closing "+
 		"that file failed: %s. The file system that holds %s reported this as the file was closed, so Pisati cannot be "+
 		"sure that it can write there", name, dir, reason(err), dir)
@@ -564,7 +568,7 @@ func closeFailed(err error, name, dir string) error {
 
 // lockState takes the lock on the state directory dir, which a running
 // Pisati holds.
-func lockState(ctx context.Context, dir string) (store.Lock, error) {
+func lockState(ctx context.Context, dir config.StateDir) (store.Lock, error) {
 	lock, err := store.AcquireLock(ctx, dir)
 	if errors.Is(err, store.ErrLocked) {
 		return store.Lock{}, explain.New(err, "another Pisati process is using the state directory %s. "+
@@ -588,22 +592,22 @@ const (
 
 // generatedKeyPath returns where Pisati keeps the main key it generates
 // in the state directory dir.
-func generatedKeyPath(dir string) string {
-	return filepath.Join(dir, "keys", "main.key")
+func generatedKeyPath(dir config.StateDir) string {
+	return filepath.Join(dir.String(), "keys", "main.key")
 }
 
 // loadMainKey loads the main key from where src says it is, with the
 // state directory dir opened as a root for the key Pisati generates, and
 // says whether it was generated on this start. It runs under the state
 // directory's lock, so nothing else makes the key meanwhile.
-func loadMainKey(ctx context.Context, src config.SecretSource, creds fs.FS, dir string, log *slog.Logger) (crypto.MainKey, keyOrigin, error) {
+func loadMainKey(ctx context.Context, src config.SecretSource, creds fs.FS, dir config.StateDir, log *slog.Logger) (crypto.MainKey, keyOrigin, error) {
 	origin := keyKept
 	if _, ok := src.(config.Generated); ok {
 		if _, err := os.Lstat(generatedKeyPath(dir)); errors.Is(err, fs.ErrNotExist) {
 			origin = keyGeneratedNow
 		}
 	}
-	root, err := os.OpenRoot(dir)
+	root, err := os.OpenRoot(dir.String())
 	if err != nil {
 		return crypto.MainKey{}, keyKept, err
 	}
@@ -628,7 +632,7 @@ func openKeyring(ctx context.Context, h Host, st *state, src config.SecretSource
 // mainKeyMismatch is the error, around cause, for a main key that does
 // not decrypt the data keys in the database in the state directory dir:
 // it says where the key came from, and where to put the right one.
-func mainKeyMismatch(cause error, src config.SecretSource, dir string, origin keyOrigin) error {
+func mainKeyMismatch(cause error, src config.SecretSource, dir config.StateDir, origin keyOrigin) error {
 	const (
 		needs = "This database needs the main key that its data keys are encrypted with: the one pisati serve " +
 			"used with it, or, after pisati keys rewrap, the new one. A backup made by pisati backup does not hold it. "

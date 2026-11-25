@@ -136,8 +136,8 @@ func warnWithoutProxy(ctx context.Context, srv config.Server, log *slog.Logger) 
 // openServingState opens the state directory dir as openState does, and
 // records the lock and the database in l as soon as each is taken, so that
 // a halt releases the lock explicitly whatever serve is doing.
-func openServingState(ctx context.Context, dir string, l *life) (_ *state, err error) {
-	if err := checkStateDir(dir); err != nil {
+func openServingState(ctx context.Context, dir config.StateDir, l *life) (_ *state, err error) {
+	if err := checkStateDir(ctx, dir); err != nil {
 		return nil, err
 	}
 	lock, err := lockState(ctx, dir)

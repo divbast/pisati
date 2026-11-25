@@ -68,7 +68,7 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	root, err := os.OpenRoot(dir)
+	root, err := os.OpenRoot(dir.String())
 	if err != nil {
 		return explain.New(err, "Pisati cannot open the state directory %s: %s", dir, pathless(err))
 	}
@@ -79,25 +79,26 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	name := databaseFile
 	tmp := name + restoreSuffix
 	copied := append(sidecars(tmp), tmp)
-	if err := refuseOwnFile(root, dir, src, slices.Concat([]string{name}, sidecars(name), copied)); err != nil {
+	if err := refuseOwnFile(root, dir.String(), src, slices.Concat([]string{name}, sidecars(name), copied)); err != nil {
 		return err
 	}
 	// What a restore cut short may have left. The lock keeps any other
 	// Restore from building a copy here meanwhile: one in another process
 	// cannot take it, and one under a copy of the same Lock waits in hold
 	// until this one returns.
-	if err := removeFiles(root, copied...); err != nil {
+	if err := removeFiles(ctx, root, copied...); err != nil {
 		return err
 	}
-	if err := createFile(root, tmp); err != nil {
-		return explain.New(err, "Pisati cannot create the file %s: %s", filepath.Join(dir, tmp), pathless(err))
+	if err := createFile(ctx, root, tmp); err != nil {
+		return explain.New(err, "Pisati cannot create the file %s: %s", filepath.Join(dir.String(), tmp), pathless(err))
 	}
 	defer func() {
 		if err != nil {
-			err = errors.Join(err, removeFiles(root, copied...))
+			// Whatever stopped the restore, the copy goes.
+			err = errors.Join(err, removeFiles(context.WithoutCancel(ctx), root, copied...))
 		}
 	}()
-	tmpPath := filepath.Join(dir, tmp)
+	tmpPath := filepath.Join(dir.String(), tmp)
 	if err := copyFrom(ctx, tmpPath, src); errors.Is(err, sqlite3.NOTADB) {
 		return explain.New(err, "SQLite cannot copy it into %s: %s. It is not a SQLite database: restore from a "+
 			"copy that pisati backup made", tmpPath, err)
@@ -118,16 +119,17 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 		return explain.New(err, "Pisati cannot tell whether SQLite left a write-ahead log, %s-wal, beside the "+
 			"copy: %s", tmpPath, pathless(err))
 	}
-	if err := syncFile(root, tmp); err != nil {
+	if err := syncFile(ctx, root, tmp); err != nil {
 		return explain.New(err, "Pisati cannot make sure that the copy %s is written to disk: %s", tmpPath, pathless(err))
 	}
-	if err := removeFiles(root, sidecars(name)...); err != nil {
+	if err := removeFiles(ctx, root, sidecars(name)...); err != nil {
 		return err
 	}
 	if err := root.Rename(tmp, name); err != nil {
-		return explain.New(err, "Pisati cannot rename the copy %s to %s: %s", tmpPath, filepath.Join(dir, name), pathless(err))
+		return explain.New(err, "Pisati cannot rename the copy %s to %s: %s", tmpPath, filepath.Join(dir.String(), name),
+			pathless(err))
 	}
-	if err := syncDir(root); err != nil {
+	if err := syncDir(ctx, root); err != nil {
 		return explain.New(err, "Pisati cannot make sure that the directory %s is written to disk: %s", dir, pathless(err))
 	}
 	return nil

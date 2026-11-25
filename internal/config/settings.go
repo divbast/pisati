@@ -194,7 +194,7 @@ func settings() []setting {
 			def:   defaultStateDir,
 			kind: text{
 				field: func(l *layer) **string { return &l.Storage.StateDir },
-				apply: into(parsePath, func(c *Config) *string { return &c.Storage.StateDir }),
+				apply: into(ParseStateDir, func(c *Config) *StateDir { return &c.Storage.StateDir }),
 			},
 		},
 		{
@@ -370,14 +370,6 @@ func fileSource(s string) (SecretSource, error) {
 func filePath(s string) (string, error) {
 	if why, fix := pathRule(s); why != "" {
 		return "", &badValue{hidden: "it may be a secret, such as a key, given in place of a path", why: why, fix: fix}
-	}
-	return s, nil
-}
-
-// parsePath returns s when it is an absolute, clean path.
-func parsePath(s string) (string, error) {
-	if why, fix := pathRule(s); why != "" {
-		return "", &badValue{value: s, why: why, fix: fix}
 	}
 	return s, nil
 }

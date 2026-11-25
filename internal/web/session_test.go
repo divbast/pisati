@@ -35,11 +35,15 @@ const (
 func newStore(t *testing.T) *store.Store {
 	t.Helper()
 	dir := t.TempDir()
-	lock, err := store.AcquireLock(t.Context(), dir)
+	state, err := config.ParseStateDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := store.AcquireLock(t.Context(), state)
 	if err != nil {
 		t.Fatalf("AcquireLock(%s): %v", dir, err)
 	}
-	s, err := store.Open(t.Context(), store.DatabasePath(dir))
+	s, err := store.Open(t.Context(), store.DatabasePath(state))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

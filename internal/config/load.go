@@ -113,10 +113,11 @@ func Load(ctx context.Context, src Sources, stateDirEnv string) (Config, error) 
 		}
 	}
 	if merged.Keys.MainKeyFile == nil {
-		if err := stopped(ctx); err != nil {
+		cfg.Keys.MainKey, err = credentialSource(ctx, src.Credentials)
+		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 			return Config{}, err
 		}
-		if cfg.Keys.MainKey, err = credentialSource(src.Credentials); err != nil {
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -516,22 +517,26 @@ func deref(p *string) (string, bool) {
 
 // stateDirectory returns systemd's $STATE_DIRECTORY, s, as the state
 // directory: one absolute, clean path.
-func stateDirectory(s string) (string, error) {
+func stateDirectory(s string) (StateDir, error) {
 	if strings.Contains(s, ":") {
-		return "", explain.New(ErrInvalid, "STATE_DIRECTORY is set to %q, which has \":\" in it. \":\" separates two "+
-			"directories there, as systemd writes it for a service with more than one StateDirectory=, and Pisati "+
+		return StateDir{}, explain.New(ErrInvalid, "STATE_DIRECTORY is set to %q, which has \":\" in it. \":\" separates "+
+			"two directories there, as systemd writes it for a service with more than one StateDirectory=, and Pisati "+
 			"uses one. Set it to one directory, or set %s to the directory Pisati should use", s, label("storage.state_dir"))
 	}
-	dir, err := parsePath(s)
+	dir, err := ParseStateDir(s)
 	if b, ok := errors.AsType[*badValue](err); ok {
-		return "", explain.New(err, "%s", b.of("STATE_DIRECTORY"))
+		return StateDir{}, explain.New(err, "%s", b.of("STATE_DIRECTORY"))
 	}
 	return dir, err
 }
 
 // credentialSource returns the credential as the main key's source
-// when creds holds it, else Generated.
-func credentialSource(creds fs.FS) (SecretSource, error) {
+// when creds holds it, else Generated. It checks ctx before it looks, and
+// returns ctx's error, as stopped words it, once ctx has ended.
+func credentialSource(ctx context.Context, creds fs.FS) (SecretSource, error) {
+	if err := stopped(ctx); err != nil {
+		return nil, err
+	}
 	if creds == nil {
 		return Generated{}, nil
 	}

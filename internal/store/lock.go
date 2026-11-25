@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/divbast/pisati/internal/config"
 	"github.com/divbast/pisati/internal/explain"
 )
 
@@ -43,8 +44,8 @@ type Lock struct {
 }
 
 type heldLock struct {
-	// dir is the state directory, as filepath.Clean leaves it.
-	dir string
+	// dir is the state directory.
+	dir config.StateDir
 	// slot holds a token while a Migrate or Restore runs under the lock,
 	// so that the lock is not released under it, and so that two under
 	// copies of one Lock never run at once: two Restores would each build
@@ -61,23 +62,24 @@ type heldLock struct {
 	file *os.File
 }
 
-// AcquireLock takes the lock on stateDir, an absolute path to a directory
-// that exists, creating pisati.lock in it, mode 0600, if there is none. It
-// does not wait: while another process, or another Lock in this one,
-// holds the lock, it returns ErrLocked.
-func AcquireLock(ctx context.Context, stateDir string) (_ Lock, err error) {
+// AcquireLock takes the lock on stateDir, a directory that exists,
+// creating pisati.lock in it, mode 0600, if there is none. It does not
+// wait: while another process, or another Lock in this one, holds the
+// lock, it returns ErrLocked. The zero StateDir is a bug, and gets an
+// error.
+func AcquireLock(ctx context.Context, stateDir config.StateDir) (_ Lock, err error) {
 	defer func() {
 		if err != nil {
 			err = explain.Wrap(err, "Pisati cannot lock the state directory %s", stateDir)
 		}
 	}()
-	if err := absolute(stateDir, "store.AcquireLock"); err != nil {
-		return Lock{}, err
+	if stateDir == (config.StateDir{}) {
+		return Lock{}, errors.New("store.AcquireLock was given no state directory, which is a bug in Pisati")
 	}
 	if err := ctx.Err(); err != nil {
 		return Lock{}, err
 	}
-	root, err := os.OpenRoot(stateDir)
+	root, err := os.OpenRoot(stateDir.String())
 	if err != nil {
 		// The message gives the reason alone, as the words around it name
 		// the directory; the chain keeps the error as it came.
@@ -86,7 +88,7 @@ func AcquireLock(ctx context.Context, stateDir string) (_ Lock, err error) {
 	// A file opened through the root stays open once the root is closed.
 	f, err := root.OpenFile(lockFile, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
-		err = explain.New(err, "Pisati cannot open the file %s: %s", filepath.Join(stateDir, lockFile), pathless(err))
+		err = explain.New(err, "Pisati cannot open the file %s: %s", filepath.Join(stateDir.String(), lockFile), pathless(err))
 	}
 	if err := errors.Join(err, root.Close()); err != nil {
 		if f != nil {
@@ -98,7 +100,7 @@ func AcquireLock(ctx context.Context, stateDir string) (_ Lock, err error) {
 		return Lock{}, errors.Join(err, f.Close())
 	}
 	return Lock{held: &heldLock{
-		dir:      filepath.Clean(stateDir),
+		dir:      stateDir,
 		slot:     make(chan struct{}, 1),
 		released: make(chan struct{}),
 		file:     f,
@@ -162,27 +164,27 @@ func (h *heldLock) release() error {
 // the state directory l locks. While another runs under l, hold waits for
 // it, and returns ctx's error if ctx ends first. It returns ErrLockNotHeld
 // unless l holds its lock, as it no longer does once Release has begun.
-func (l Lock) hold(ctx context.Context) (stateDir string, unhold func(), err error) {
+func (l Lock) hold(ctx context.Context) (stateDir config.StateDir, unhold func(), err error) {
 	h := l.held
 	if h == nil {
-		return "", nil, ErrLockNotHeld
+		return config.StateDir{}, nil, ErrLockNotHeld
 	}
 	if err := ctx.Err(); err != nil {
-		return "", nil, err
+		return config.StateDir{}, nil, err
 	}
 	select {
 	case h.slot <- struct{}{}:
 	case <-h.released:
-		return "", nil, ErrLockNotHeld
+		return config.StateDir{}, nil, ErrLockNotHeld
 	case <-ctx.Done():
-		return "", nil, ctx.Err()
+		return config.StateDir{}, nil, ctx.Err()
 	}
 	// select chooses at random among the cases ready at once, so the slot
 	// may have come free just as Release began.
 	select {
 	case <-h.released:
 		<-h.slot
-		return "", nil, ErrLockNotHeld
+		return config.StateDir{}, nil, ErrLockNotHeld
 	default:
 	}
 	return h.dir, func() { <-h.slot }, nil

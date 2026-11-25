@@ -462,7 +462,7 @@ func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (MainK
 	if err := ctx.Err(); err != nil {
 		return MainKey{}, explain.Wrap(err, "Pisati stopped before it read %s", where)
 	}
-	if err := keysDirectory(state, dirPath); err != nil {
+	if err := keysDirectory(ctx, state, dirPath); err != nil {
 		return MainKey{}, err
 	}
 	fi, err := state.Lstat(name)
@@ -498,8 +498,12 @@ func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (MainK
 // keysDirectory makes the keys directory in state, mode 0700, when there
 // is none, and returns an error wrapping ErrKeyFile unless it is a
 // directory, not a symbolic link, that others cannot use. Its group may,
-// and it may be setgid, as fsGroup makes it.
-func keysDirectory(state *os.Root, dirPath string) error {
+// and it may be setgid, as fsGroup makes it. Once ctx has ended, it looks
+// at nothing, and returns ctx's error.
+func keysDirectory(ctx context.Context, state *os.Root, dirPath string) error {
+	if err := ctx.Err(); err != nil {
+		return explain.Wrap(err, "Pisati stopped before it checked the directory %s", dirPath)
+	}
 	fi, err := state.Lstat(keysDir)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := state.Mkdir(keysDir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
@@ -579,7 +583,7 @@ func generate(ctx context.Context, state *os.Root, name, keyPath string, log *sl
 	}
 	text := append(base64.StdEncoding.AppendEncode(nil, key[:]), '\n')
 	defer clear(text)
-	if err := writeKey(state, name, text); err != nil {
+	if err := writeKey(ctx, state, name, text); err != nil {
 		return MainKey{}, explain.Wrap(err, "Pisati cannot write the main key it generated to %s", keyPath)
 	}
 	log.WarnContext(ctx, "main key generated on the data volume", "path", keyPath, "action", generatedAction)
@@ -588,8 +592,12 @@ func generate(ctx context.Context, state *os.Root, name, keyPath string, log *sl
 
 // writeKey writes text to the new file name in state, mode 0600, and
 // flushes it and the directories that hold it to stable storage. On a
-// failure, it removes the file: no key it held was used.
-func writeKey(state *os.Root, name string, text []byte) (err error) {
+// failure, it removes the file: no key it held was used. Once ctx has
+// ended, it writes nothing, and returns ctx's error.
+func writeKey(ctx context.Context, state *os.Root, name string, text []byte) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f, err := state.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return pathless(err)

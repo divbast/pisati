@@ -27,6 +27,7 @@ import (
 
 	"go.uber.org/goleak"
 
+	"github.com/divbast/pisati/internal/config"
 	"github.com/divbast/pisati/internal/store"
 	"github.com/divbast/pisati/internal/store/storedb"
 )
@@ -405,12 +406,23 @@ func get(t *testing.T, method, url string) (int, string) {
 	return status, body
 }
 
+// stateDir returns dir as a state directory, failing the test unless it is
+// an absolute, clean path.
+func stateDir(t *testing.T, dir string) config.StateDir {
+	t.Helper()
+	d, err := config.ParseStateDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 // withStore opens the database in the state directory state, beside any
 // Pisati that has it open, runs f on it, and closes it again, so that a
 // Pisati that stops after is the last to close it.
 func withStore(t *testing.T, state string, f func(db *store.Store)) {
 	t.Helper()
-	db, err := store.Open(t.Context(), store.DatabasePath(state))
+	db, err := store.Open(t.Context(), store.DatabasePath(stateDir(t, state)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,7 +531,7 @@ func mustOwnerOnly(t *testing.T, state string, want ...string) {
 // writes waits for it, up to SQLite's busy timeout.
 func holdWriteLock(t *testing.T, state string) (release func()) {
 	t.Helper()
-	db, err := store.Open(t.Context(), store.DatabasePath(state))
+	db, err := store.Open(t.Context(), store.DatabasePath(stateDir(t, state)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +562,7 @@ func holdWriteLock(t *testing.T, state string) (release func()) {
 // to the store's busy timeout.
 func holdReadLock(t *testing.T, state string) (release func()) {
 	t.Helper()
-	db, err := store.Open(t.Context(), store.DatabasePath(state))
+	db, err := store.Open(t.Context(), store.DatabasePath(stateDir(t, state)))
 	if err != nil {
 		t.Fatal(err)
 	}

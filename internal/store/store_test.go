@@ -16,21 +16,33 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/divbast/pisati/internal/config"
 	"github.com/divbast/pisati/internal/store"
 	"github.com/divbast/pisati/internal/store/storedb"
 )
+
+// stateDir returns dir as a state directory, failing the test unless it is
+// an absolute, clean path.
+func stateDir(t testing.TB, dir string) config.StateDir {
+	t.Helper()
+	d, err := config.ParseStateDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
 
 // dbPath returns where a test's database lives: pisati.db in a new
 // state directory of its own.
 func dbPath(t *testing.T) string {
 	t.Helper()
-	return store.DatabasePath(t.TempDir())
+	return store.DatabasePath(stateDir(t, t.TempDir()))
 }
 
 // lockOn takes the lock on the state directory dir until the test ends.
 func lockOn(t *testing.T, dir string) store.Lock {
 	t.Helper()
-	l, err := store.AcquireLock(t.Context(), dir)
+	l, err := store.AcquireLock(t.Context(), stateDir(t, dir))
 	if err != nil {
 		t.Fatalf("AcquireLock(%s): %v", dir, err)
 	}
@@ -46,7 +58,7 @@ func lockOn(t *testing.T, dir string) store.Lock {
 // directory, which it takes for the call alone.
 func migrate(t *testing.T, s *store.Store, path string) (from, to store.SchemaVersion, err error) {
 	t.Helper()
-	l, err := store.AcquireLock(t.Context(), filepath.Dir(path))
+	l, err := store.AcquireLock(t.Context(), stateDir(t, filepath.Dir(path)))
 	if err != nil {
 		t.Fatalf("AcquireLock(%s): %v", filepath.Dir(path), err)
 	}
@@ -421,7 +433,7 @@ func TestAcquireLockKeepsThePathError(t *testing.T) {
 	t.Parallel()
 
 	missing := filepath.Join(t.TempDir(), "missing")
-	_, err := store.AcquireLock(t.Context(), missing)
+	_, err := store.AcquireLock(t.Context(), stateDir(t, missing))
 	if err == nil {
 		t.Fatal("AcquireLock of a directory that does not exist succeeded")
 	}

@@ -25,6 +25,7 @@ import (
 	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/driver"
 
+	"github.com/divbast/pisati/internal/config"
 	"github.com/divbast/pisati/internal/explain"
 	"github.com/divbast/pisati/internal/store/storedb"
 )
@@ -36,8 +37,8 @@ const databaseFile = "pisati.db"
 // directory stateDir: stateDir/pisati.db. It is the file to Open, and the
 // one Migrate and Restore act on under the lock AcquireLock takes on
 // stateDir.
-func DatabasePath(stateDir string) string {
-	return filepath.Join(stateDir, databaseFile)
+func DatabasePath(stateDir config.StateDir) string {
+	return filepath.Join(stateDir.String(), databaseFile)
 }
 
 const (
@@ -307,8 +308,13 @@ func splitPath(path, fn string) (dir, name string, err error) {
 }
 
 // removeFiles removes each file names, in root, that exists. Each error
-// names the file, by its path, and says why it is still there.
-func removeFiles(root *os.Root, names ...string) error {
+// names the file, by its path, and says why it is still there. Once ctx
+// has ended, it removes nothing, and returns ctx's error: a removal that
+// must run whatever stopped its caller is given a context that never ends.
+func removeFiles(ctx context.Context, root *os.Root, names ...string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var errs []error
 	for _, name := range names {
 		if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -390,8 +396,12 @@ func sidecars(name string) []string {
 }
 
 // createFile creates the empty file name in root, mode 0600, refusing one
-// that exists with an error wrapping fs.ErrExist.
-func createFile(root *os.Root, name string) error {
+// that exists with an error wrapping fs.ErrExist. Once ctx has ended, it
+// creates nothing, and returns ctx's error.
+func createFile(ctx context.Context, root *os.Root, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
@@ -399,8 +409,12 @@ func createFile(root *os.Root, name string) error {
 	return f.Close()
 }
 
-// syncFile flushes the file name in root to stable storage.
-func syncFile(root *os.Root, name string) (err error) {
+// syncFile flushes the file name in root to stable storage. Once ctx has
+// ended, it flushes nothing, and returns ctx's error.
+func syncFile(ctx context.Context, root *os.Root, name string) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f, err := root.OpenFile(name, os.O_RDWR, 0)
 	if err != nil {
 		return err
@@ -412,8 +426,12 @@ func syncFile(root *os.Root, name string) (err error) {
 }
 
 // syncDir flushes root's directory, and so the files created, renamed and
-// removed in it, to stable storage.
-func syncDir(root *os.Root) (err error) {
+// removed in it, to stable storage. Once ctx has ended, it flushes
+// nothing, and returns ctx's error.
+func syncDir(ctx context.Context, root *os.Root) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	d, err := root.Open(".")
 	if err != nil {
 		return err

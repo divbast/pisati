@@ -182,11 +182,11 @@ func TestMigrateRollsBackAFailedStep(t *testing.T) {
 
 func TestMigrateRefusesWithoutTheLock(t *testing.T) {
 	state := t.TempDir()
-	path := store.DatabasePath(state)
+	path := store.DatabasePath(stateDir(t, state))
 	s := openStore(t, path)
 	ctx := t.Context()
 
-	released, err := store.AcquireLock(ctx, state)
+	released, err := store.AcquireLock(ctx, stateDir(t, state))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestMigrateRefusesWithoutTheLock(t *testing.T) {
 }
 
 func TestDatabasePath(t *testing.T) {
-	if got, want := store.DatabasePath("/var/lib/pisati"), "/var/lib/pisati/pisati.db"; got != want {
+	if got, want := store.DatabasePath(stateDir(t, "/var/lib/pisati")), "/var/lib/pisati/pisati.db"; got != want {
 		t.Errorf("DatabasePath = %s, want %s", got, want)
 	}
 }

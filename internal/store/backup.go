@@ -85,7 +85,7 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	}
 	// Created here, refusing one that exists: SQLite would open an
 	// existing file and write over it.
-	if err := createFile(root, name); errors.Is(err, fs.ErrExist) {
+	if err := createFile(ctx, root, name); errors.Is(err, fs.ErrExist) {
 		return explain.New(err, "the file %s is there already, and a backup is written only to a new file. Back up to "+
 			"a path where there is no file yet", dest)
 	} else if errors.Is(err, fs.ErrPermission) {
@@ -102,7 +102,8 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	// Backup's own.
 	defer func() {
 		if err != nil {
-			err = errors.Join(err, removeFiles(root, append(sidecars(name), name)...))
+			// Whatever stopped the backup, the copy goes.
+			err = errors.Join(err, removeFiles(context.WithoutCancel(ctx), root, append(sidecars(name), name)...))
 		}
 	}()
 	path := filepath.Join(dir, name)
@@ -112,7 +113,7 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	if err := useRollbackJournal(ctx, path); err != nil {
 		return explain.Wrap(err, "Pisati cannot finish the copy %s", path)
 	}
-	if err := syncDir(root); err != nil {
+	if err := syncDir(ctx, root); err != nil {
 		return explain.New(err, "Pisati cannot make sure that the directory %s is written to disk: %s", filepath.Clean(dir),
 			pathless(err))
 	}
