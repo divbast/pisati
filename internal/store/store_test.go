@@ -376,3 +376,22 @@ func TestTouchSessionOnlyWhenDue(t *testing.T) {
 		}
 	}
 }
+
+// TestAcquireLockKeepsThePathError: a state directory that cannot be
+// opened is reported in Pisati's words, and the operating system's error
+// stays in the chain, *fs.PathError and all, as callers may look for it.
+func TestAcquireLockKeepsThePathError(t *testing.T) {
+	t.Parallel()
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	_, err := store.AcquireLock(t.Context(), missing)
+	if err == nil {
+		t.Fatal("AcquireLock of a directory that does not exist succeeded")
+	}
+	if pe, ok := errors.AsType[*fs.PathError](err); !ok || !errors.Is(pe, fs.ErrNotExist) {
+		t.Errorf("errors.AsType[*fs.PathError](%q) = %v, %v; want the error that opening the directory gave", err, pe, ok)
+	}
+	if !strings.Contains(err.Error(), "Pisati cannot lock the state directory "+missing) {
+		t.Errorf("error %q does not name the state directory", err)
+	}
+}

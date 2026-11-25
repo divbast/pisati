@@ -94,7 +94,7 @@ func (k *Keyring) Open(sealed, assoc []byte) ([]byte, error) {
 		return nil, explain.New(ErrUnknownKey, "%s: it is encrypted with the data key %d, which Pisati has not loaded", cannot, id)
 	}
 	// Seal makes no value longer; XChaCha20-Poly1305 would panic on one.
-	const notAuthentic = "it fails its check, so it is not a value Pisati encrypted there, or it has changed since"
+	const notAuthentic = "it does not pass the check that proves Pisati encrypted it for this place, unchanged"
 	if len(sealed)-sealedOverhead > maxPlain || len(assoc) > maxAssoc {
 		return nil, explain.New(ErrNotAuthentic, "%s: it is longer than any value Pisati encrypts", cannot)
 	}

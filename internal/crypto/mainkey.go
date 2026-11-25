@@ -229,10 +229,19 @@ func LoadMainKey(ctx context.Context, src config.SecretSource, creds fs.FS, stat
 
 // loadFile loads the key from the file at path, which the operator named.
 func loadFile(ctx context.Context, path string, log *slog.Logger) (MainKey, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path || looksLikeKey(path) {
-		return MainKey{}, explain.New(ErrInvalid, "Pisati cannot load the main key, because the path of its file is not "+
-			"a full path, written with no \".\" or \"..\" in it, or is a key itself. Give the full path of the file "+
-			"that holds the key. Pisati does not show the path, because it may be the key itself")
+	// The path is never shown: a key given by mistake in its place would be.
+	const notShown = "Pisati does not show the path, because it may be the key itself"
+	switch {
+	case looksLikeKey(path):
+		return MainKey{}, explain.New(ErrInvalid, "Pisati cannot load the main key, because the path of its file "+
+			"reads as a key, not as a path. Give the full path of the file that holds the key. %s", notShown)
+	case !filepath.IsAbs(path):
+		return MainKey{}, explain.New(ErrInvalid, "Pisati cannot load the main key, because the path of its file is "+
+			"not a full path. Give the full path of the file that holds the key, which starts with \"/\". %s", notShown)
+	case filepath.Clean(path) != path:
+		return MainKey{}, explain.New(ErrInvalid, "Pisati cannot load the main key, because the path of its file has "+
+			"\"//\", \".\" or \"..\" in it, or ends with \"/\". Give the full path of the file, written without them. %s",
+			notShown)
 	}
 	where := "the main key file " + path
 	if err := ctx.Err(); err != nil {
@@ -242,9 +251,9 @@ func loadFile(ctx context.Context, path string, log *slog.Logger) (MainKey, erro
 	// refused, as no regular file, rather than waited on for a writer.
 	f, err := os.OpenFile(filepath.Clean(path), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return MainKey{}, cannotRead(err, where)
+		return MainKey{}, cannotRead(err, where, aFile)
 	}
-	key, othersRead, err := readNamed(f, where)
+	key, othersRead, err := readNamed(f, where, aFile)
 	defer clear(key[:])
 	if err := errors.Join(err, f.Close()); err != nil {
 		return MainKey{}, err
@@ -274,7 +283,7 @@ func loadCredential(ctx context.Context, creds fs.FS, name string, log *slog.Log
 	// opens is checked again, as what it reads.
 	fi, err := fs.Stat(creds, name)
 	if err != nil {
-		return MainKey{}, cannotRead(err, where)
+		return MainKey{}, cannotRead(err, where, aCredential)
 	}
 	if err := checkNamed(fi, where); err != nil {
 		return MainKey{}, err
@@ -284,9 +293,9 @@ func loadCredential(ctx context.Context, creds fs.FS, name string, log *slog.Log
 	}
 	f, err := creds.Open(name)
 	if err != nil {
-		return MainKey{}, cannotRead(err, where)
+		return MainKey{}, cannotRead(err, where, aCredential)
 	}
-	key, othersRead, err := readNamed(f, where)
+	key, othersRead, err := readNamed(f, where, aCredential)
 	defer clear(key[:])
 	if err := errors.Join(err, f.Close()); err != nil {
 		return MainKey{}, err
@@ -297,17 +306,18 @@ func loadCredential(ctx context.Context, creds fs.FS, name string, log *slog.Log
 	return newMainKey(key), nil
 }
 
-// readNamed reads the key from f, a file the operator named, once its
-// own Stat passes checkNamed, and reports whether others can read it.
-func readNamed(f fs.File, where string) ([keySize]byte, bool, error) {
+// readNamed reads the key from f, a file the operator named, of the
+// kind named is, once its own Stat passes checkNamed, and reports whether
+// others can read it.
+func readNamed(f fs.File, where string, named namedKind) ([keySize]byte, bool, error) {
 	fi, err := f.Stat()
 	if err != nil {
-		return [keySize]byte{}, false, cannotRead(err, where)
+		return [keySize]byte{}, false, cannotRead(err, where, named)
 	}
 	if err := checkNamed(fi, where); err != nil {
 		return [keySize]byte{}, false, err
 	}
-	key, err := readKey(f, where)
+	key, err := readKey(f, where, named)
 	return key, fi.Mode().Perm()&0o004 != 0, err
 }
 
@@ -334,9 +344,9 @@ func checkSize(n int64, where string) error {
 	return nil
 }
 
-// readKey reads the key from r, a key file, or returns an error wrapping
-// ErrKeyFile that does not show what r holds.
-func readKey(r io.Reader, where string) ([keySize]byte, error) {
+// readKey reads the key from r, a key file of the kind named is, or
+// returns an error wrapping ErrKeyFile that does not show what r holds.
+func readKey(r io.Reader, where string, named namedKind) ([keySize]byte, error) {
 	// One byte more than a key file holds, so a file grown since its
 	// size was checked is refused rather than cut short.
 	text, err := io.ReadAll(io.LimitReader(r, keyChars+2))
@@ -344,7 +354,7 @@ func readKey(r io.Reader, where string) ([keySize]byte, error) {
 	// though Go may have made others.
 	defer clear(text)
 	if err != nil {
-		return [keySize]byte{}, cannotRead(err, where)
+		return [keySize]byte{}, cannotRead(err, where, named)
 	}
 	key, ok := parseKey(text)
 	if !ok {
@@ -389,15 +399,43 @@ func pathless(err error) error {
 	return err
 }
 
-// cannotRead is the error for where, a key file or a credential, that err
-// says Pisati cannot open or read: the operating system's reason, and,
-// for a lack of permission, what to do.
-func cannotRead(err error, where string) error {
-	if errors.Is(err, fs.ErrPermission) {
-		return explain.New(err, "Pisati cannot read %s, because the user that runs Pisati does not have permission to. "+
-			"%s", where, namedFix)
+// namedKind is the kind of key file the operator names: a file, by its
+// path, or a credential, in $CREDENTIALS_DIRECTORY.
+type namedKind uint8
+
+const (
+	aFile namedKind = iota
+	aCredential
+)
+
+// cannotRead is the error for where, a key file of the kind named is,
+// that err says Pisati cannot open or read: what Pisati can tell of the
+// cause from the operating system's reason, and what to check. Its cause
+// is the error inside err's *fs.PathError, whose path where names.
+//
+// A lack of permission may be the file's own mode or a directory above
+// it, which the operating system does not tell apart, and the mode of a
+// credential is not the operator's to set: so it says what the user that
+// runs Pisati needs, and gives no mode.
+func cannotRead(err error, where string, named namedKind) error {
+	reason := pathless(err)
+	above, it := "a directory above it", "the file"
+	if named == aCredential {
+		above, it = "the directory that CREDENTIALS_DIRECTORY names", "the credential"
 	}
-	return explain.New(err, "Pisati cannot read %s: %s", where, pathless(err))
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return explain.New(reason, "Pisati cannot read %s, because the operating system does not let the user that "+
+			"runs Pisati read it. That user needs permission to read %s, and to enter %s", where, it, above)
+	case errors.Is(err, fs.ErrNotExist) && named == aCredential:
+		return explain.New(reason, "Pisati cannot read %s, because the directory that CREDENTIALS_DIRECTORY names "+
+			"holds no credential of that name", where)
+	case errors.Is(err, fs.ErrNotExist):
+		return explain.New(reason, "Pisati cannot read %s, because there is no file at that path. Check that the "+
+			"path names the file that holds the main key", where)
+	}
+	return explain.New(reason, "Pisati cannot read %s: %s. Check that %s is a regular file that the user that runs "+
+		"Pisati can read", where, reason, it)
 }
 
 // loadGenerated loads the key Pisati keeps at <state>/keys/main.key,
@@ -425,7 +463,7 @@ func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (MainK
 		}
 		return generate(ctx, state, name, keyPath, log)
 	case err != nil:
-		return MainKey{}, explain.New(err, "Pisati cannot check %s: %s", where, pathless(err))
+		return MainKey{}, explain.New(pathless(err), "Pisati cannot check %s: %s", where, pathless(err))
 	}
 	if err := checkGenerated(fi, keyPath); err != nil {
 		return MainKey{}, err
@@ -435,7 +473,7 @@ func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (MainK
 	}
 	f, err := state.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return MainKey{}, explain.New(err, "Pisati cannot read %s: %s", where, pathless(err))
+		return MainKey{}, explain.New(pathless(err), "Pisati cannot read %s: %s", where, pathless(err))
 	}
 	key, err := readGenerated(f, fi, where)
 	defer clear(key[:])
@@ -453,13 +491,13 @@ func keysDirectory(state *os.Root, dirPath string) error {
 	fi, err := state.Lstat(keysDir)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := state.Mkdir(keysDir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-			return explain.New(err, "Pisati cannot make the directory %s, for the main key it generates: %s", dirPath,
-				pathless(err))
+			return explain.New(pathless(err), "Pisati cannot make the directory %s, for the main key it generates: %s",
+				dirPath, pathless(err))
 		}
 		fi, err = state.Lstat(keysDir)
 	}
 	if err != nil {
-		return explain.New(err, "Pisati cannot check the directory %s, which holds the main key it generates: %s",
+		return explain.New(pathless(err), "Pisati cannot check the directory %s, which holds the main key it generates: %s",
 			dirPath, pathless(err))
 	}
 	switch mode := fi.Mode(); {
@@ -503,7 +541,7 @@ func checkGenerated(fi fs.FileInfo, keyPath string) error {
 func readGenerated(f *os.File, checked fs.FileInfo, where string) ([keySize]byte, error) {
 	opened, err := f.Stat()
 	if err != nil {
-		return [keySize]byte{}, explain.New(err, "Pisati cannot read %s: %s", where, pathless(err))
+		return [keySize]byte{}, explain.New(pathless(err), "Pisati cannot read %s: %s", where, pathless(err))
 	}
 	// os.Root follows a link inside the root, so a link put in the
 	// file's place since it was checked would be opened: the file opened
@@ -512,7 +550,7 @@ func readGenerated(f *os.File, checked fs.FileInfo, where string) ([keySize]byte
 		return [keySize]byte{}, explain.New(ErrKeyFile, "Pisati cannot use %s, because it was replaced while Pisati read "+
 			"it. Only Pisati should write this file", where)
 	}
-	return readKey(f, where)
+	return readKey(f, where, aFile)
 }
 
 // generate generates a key into the file name in state, keyPath, which

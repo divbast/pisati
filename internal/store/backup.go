@@ -58,7 +58,14 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 		return err
 	}
 	root, err := os.OpenRoot(dir)
-	if err != nil {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return explain.New(err, "the directory %s does not exist. Back up to a file in a directory that exists",
+			filepath.Clean(dir))
+	case errors.Is(err, fs.ErrPermission):
+		return explain.New(err, "the user that runs Pisati may not open the directory %s. Back up to a file in a "+
+			"directory that this user can write to", filepath.Clean(dir))
+	case err != nil:
 		return explain.New(err, "Pisati cannot open the directory %s: %s", filepath.Clean(dir), pathless(err))
 	}
 	defer func() {
@@ -80,6 +87,9 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	if err := createFile(root, name); errors.Is(err, fs.ErrExist) {
 		return explain.New(err, "the file %s is there already, and a backup is written only to a new file. Back up to "+
 			"a path where there is no file yet", dest)
+	} else if errors.Is(err, fs.ErrPermission) {
+		return explain.New(err, "the user that runs Pisati may not create the file %s. Back up to a file in a "+
+			"directory that this user can write to", dest)
 	} else if err != nil {
 		return explain.New(err, "Pisati cannot create the file %s: %s", dest, pathless(err))
 	}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/divbast/pisati/internal/store"
@@ -104,6 +105,27 @@ func TestBackupRefusesExisting(t *testing.T) {
 				t.Error("Backup changed the file it refused")
 			}
 		})
+	}
+}
+
+// TestBackupRefusesUncheckableSidecar: a file beside the copy whose
+// presence Pisati cannot check is refused as one that exists, and said to
+// be unknown. A name of 250 bytes is one the system takes, while its
+// rollback journal's, 258 bytes, is too long to look up.
+func TestBackupRefusesUncheckableSidecar(t *testing.T) {
+	s := migratedStore(t, dbPath(t))
+	dir := t.TempDir()
+	name := strings.Repeat("b", 250)
+	err := s.Backup(t.Context(), filepath.Join(dir, name))
+	if !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("Backup to a name whose journal's is too long: %v, want fs.ErrExist", err)
+	}
+	journal := filepath.Join(dir, name+"-journal")
+	if want := "Pisati cannot tell whether the file " + journal + " is there"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not say %q", err, want)
+	}
+	if got := listDir(t, dir); len(got) != 0 {
+		t.Errorf("directory after the refused backup = %v, want it empty", got)
 	}
 }
 

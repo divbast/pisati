@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/driver"
 
 	"github.com/divbast/pisati/internal/explain"
@@ -112,14 +113,14 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 
 	db, err := driver.Open(dataSourceName(path))
 	if err != nil {
-		return nil, explain.Wrap(err, "Pisati cannot open the database %s", path)
+		return nil, cannotOpen(err, path)
 	}
 	// Idle connections stay at database/sql's default of two: each one
 	// kept keeps an instance of SQLite, with its cache.
 	db.SetMaxOpenConns(maxConns)
 	// sql.Open connects to nothing; a connection opens the file.
 	if err := db.PingContext(ctx); err != nil {
-		return nil, errors.Join(explain.Wrap(err, "Pisati cannot open the database %s", path), db.Close())
+		return nil, errors.Join(cannotOpen(err, path), db.Close())
 	}
 	return &Store{
 		db:         db,
@@ -212,7 +213,7 @@ func (s *Store) InTx(ctx context.Context, fn func(*storedb.Queries) error) (err 
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return explain.Wrap(err, "Pisati cannot start a change to the database %s", s.path)
+		return cannotChange(err, "Pisati cannot start a change to the database %s", s.path)
 	}
 	// Rolled back on every way out but the commit, a panic in fn included:
 	// otherwise the connection would never return to the pool, and would
@@ -228,7 +229,7 @@ func (s *Store) InTx(ctx context.Context, fn func(*storedb.Queries) error) (err 
 	}
 	committing = true
 	if err := tx.Commit(); err != nil {
-		return explain.Wrap(err, "Pisati cannot save a change to the database %s", s.path)
+		return cannotChange(err, "Pisati cannot save a change to the database %s", s.path)
 	}
 	return nil
 }
@@ -253,7 +254,7 @@ func (s *Store) open() error {
 // absolute returns an error unless path is absolute.
 func absolute(path string) error {
 	if !filepath.IsAbs(path) {
-		return errors.New("its path is not a full path, which is a bug in Pisati: the store takes full paths alone")
+		return errors.New("its path is not a full path, which is a bug in Pisati: the store is only ever given full paths")
 	}
 	return nil
 }
@@ -282,6 +283,42 @@ func removeFiles(root *os.Root, names ...string) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// cannotOpen is the error for the database at path, which err says SQLite
+// cannot open: SQLite's reason, and what to do when the reason says.
+func cannotOpen(err error, path string) error {
+	switch {
+	case errors.Is(err, sqlite3.NOTADB), errors.Is(err, sqlite3.CORRUPT):
+		return explain.New(err, "Pisati cannot open the database %s: %s. It is not a SQLite database, or it is "+
+			"damaged: restore a backup of it with pisati restore", path, err)
+	case errors.Is(err, sqlite3.CANTOPEN):
+		return explain.New(err, "Pisati cannot open the database %s: %s. Check that the user that runs Pisati "+
+			"can read and write the file, and the directory that holds it", path, err)
+	case errors.Is(err, sqlite3.BUSY):
+		return explain.New(err, "Pisati cannot open the database %s: %s. Another connection kept it locked for "+
+			"more than %d seconds: run the command again once that connection is done", path, err,
+			busyTimeoutMillis/1000)
+	}
+	return explain.Wrap(err, "Pisati cannot open the database %s", path)
+}
+
+// cannotChange is the error, worded as format and args say, for a change
+// to the database that err says SQLite refused: SQLite's reason, and what
+// to do when the reason says.
+func cannotChange(err error, format string, args ...any) error {
+	words := fmt.Sprintf(format, args...)
+	switch {
+	case errors.Is(err, sqlite3.FULL):
+		return explain.New(err, "%s: %s. The disk that holds it is full: free some space on it", words, err)
+	case errors.Is(err, sqlite3.READONLY):
+		return explain.New(err, "%s: %s. Pisati may only read it: let the user that runs Pisati write to the "+
+			"file and to the directory that holds it", words, err)
+	case errors.Is(err, sqlite3.BUSY):
+		return explain.New(err, "%s: %s. Another change kept the database locked for more than %d seconds", words,
+			err, busyTimeoutMillis/1000)
+	}
+	return explain.Wrap(err, "%s", words)
 }
 
 // pathless returns the error inside err when err is an *fs.PathError,

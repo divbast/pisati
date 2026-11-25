@@ -335,17 +335,17 @@ func (r *Reencrypter) Kind() jobs.Kind {
 // with it.
 func (r *Reencrypter) Handle(ctx context.Context, payload []byte) error {
 	if r == nil || r.keyring == nil {
-		return &jobs.Permanent{Err: fmt.Errorf("the re-encryption job ran on a crypto.Reencrypter that "+
+		return &jobs.Permanent{Err: explain.New(nil, "The re-encryption job ran on a crypto.Reencrypter that "+
 			"crypto.NewReencrypter did not make, %s", bug)}
 	}
 	if len(payload) != 4 {
-		return &jobs.Permanent{Err: fmt.Errorf("the re-encryption job's payload is %d bytes, but it must be the 4-byte "+
-			"ID of a data key, so the job cannot run", len(payload))}
+		return &jobs.Permanent{Err: explain.New(nil, "The re-encryption job's payload is %s long, but it must be the "+
+			"4-byte ID of a data key, so the job cannot run", explain.Bytes(int64(len(payload))))}
 	}
 	target := keyID(binary.BigEndian.Uint32(payload))
 	if _, ok := r.keyring.key(target); !ok {
-		return fmt.Errorf("the re-encryption job is for the data key %d, which this Pisati has not loaded, as the key "+
-			"was made after this Pisati loaded its keys. The job can run once pisati serve restarts", target)
+		return explain.New(nil, "The re-encryption job is for the data key %d, which this Pisati has not loaded, as "+
+			"the key was made after this Pisati loaded its keys. The job can run once pisati serve restarts", target)
 	}
 	for _, f := range r.fields {
 		if err := r.reencrypt(ctx, f); err != nil {
@@ -366,8 +366,8 @@ func (r *Reencrypter) reencrypt(ctx context.Context, f registered) error {
 			continue
 		}
 		if unopened > 0 {
-			return fmt.Errorf("%d values in %s.%s cannot be decrypted with any data key that Pisati holds, so Pisati "+
-				"leaves them as they are", unopened, f.Table, f.Column)
+			return explain.New(nil, "The job could not decrypt %d values in %s.%s, and left them as they were",
+				unopened, f.Table, f.Column)
 		}
 		return nil
 	}

@@ -24,7 +24,7 @@ type SchemaVersion int64
 
 // ErrSchemaNewer is a database whose schema a newer Pisati migrated. This
 // Pisati cannot know what that schema means, so it changes nothing in it.
-var ErrSchemaNewer = errors.New("a newer version of Pisati has updated its schema")
+var ErrSchemaNewer = errors.New("a newer version of Pisati has updated its schema, the layout of its tables")
 
 // migrations are the goose migrations Pisati is built with.
 //
@@ -36,7 +36,8 @@ var migrations embed.FS
 func pisatiMigrations() (fs.FS, error) {
 	sub, err := fs.Sub(migrations, "migrations")
 	if err != nil {
-		return nil, fmt.Errorf("the schema updates built into Pisati cannot be read, which is a bug in Pisati: %w", err)
+		return nil, fmt.Errorf("the schema updates (the changes to the database's layout) built into Pisati cannot "+
+			"be read, which is a bug in Pisati: %w", err)
 	}
 	return sub, nil
 }
@@ -64,7 +65,8 @@ func (s *Store) Migrate(ctx context.Context, lock Lock) (from, to SchemaVersion,
 	}
 	dir, unhold, err := lock.hold(ctx)
 	if err != nil {
-		return 0, 0, explain.Wrap(err, "Pisati cannot update the schema of the database %s", s.path)
+		return 0, 0, explain.Wrap(err, "Pisati cannot update the schema of the database %s, the layout of its tables",
+			s.path)
 	}
 	defer unhold()
 	if db := DatabasePath(dir); filepath.Clean(s.path) != db {
@@ -73,19 +75,21 @@ func (s *Store) Migrate(ctx context.Context, lock Lock) (from, to SchemaVersion,
 	}
 	p, err := newProvider(s.db, s.migrations)
 	if err != nil {
-		return 0, 0, explain.Wrap(err, "Pisati cannot update the schema of the database %s", s.path)
+		return 0, 0, explain.Wrap(err, "Pisati cannot update the schema of the database %s, the layout of its tables",
+			s.path)
 	}
 	// goose creates its table of versions if there is none, as in a
 	// database never migrated. A newer database has the table, so reading
 	// its version writes nothing to it.
 	current, latest, err := p.GetVersions(ctx)
 	if err != nil {
-		return 0, 0, explain.Wrap(err, "Pisati cannot read the schema version of the database %s", s.path)
+		return 0, 0, explain.Wrap(err, "Pisati cannot read the schema version of the database %s, the version of "+
+			"the layout of its tables", s.path)
 	}
 	from, newest := SchemaVersion(current), SchemaVersion(latest)
 	if from > newest {
-		return from, from, explain.New(ErrSchemaNewer, "the database %s has schema version %d, but this version of "+
-			"Pisati knows schema versions up to %d only, so a newer version of Pisati has updated it. Pisati "+
+		return from, from, explain.New(ErrSchemaNewer, "the database %s has schema version %d, the version of the "+
+			"layout of its tables, but this Pisati knows versions up to %d only: a newer Pisati has updated it. Pisati "+
 			"changes nothing in it. Run a version of Pisati that knows schema version %d", s.path, from, newest, from)
 	}
 
@@ -100,7 +104,8 @@ func (s *Store) Migrate(ctx context.Context, lock Lock) (from, to SchemaVersion,
 		to = SchemaVersion(applied[len(applied)-1].Source.Version)
 	}
 	if err != nil {
-		return from, to, explain.Wrap(err, "Pisati cannot update the schema of the database %s past version %d", s.path, to)
+		return from, to, explain.Wrap(err, "Pisati cannot update the schema of the database %s, the layout of its "+
+			"tables, past version %d", s.path, to)
 	}
 	return from, to, nil
 }

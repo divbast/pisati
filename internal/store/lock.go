@@ -79,7 +79,9 @@ func AcquireLock(ctx context.Context, stateDir string) (_ Lock, err error) {
 	}
 	root, err := os.OpenRoot(stateDir)
 	if err != nil {
-		return Lock{}, pathless(err)
+		// The message gives the reason alone, as the words around it name
+		// the directory; the chain keeps the error as it came.
+		return Lock{}, explain.New(err, "%s", pathless(err))
 	}
 	// A file opened through the root stays open once the root is closed.
 	f, err := root.OpenFile(lockFile, os.O_RDWR|os.O_CREATE, 0o600)
