@@ -61,16 +61,17 @@ breaking change.
 | Privileges | **no new ones** (`--security-opt no-new-privileges`), under the engine's **seccomp** filter |
 | Root filesystem | **read-only** |
 | User | uid/gid **65532**, never root |
-| Listen port | **8080** for the page — never 80 |
-| Health port | **8081** — health only, never serves the page, meant to stay unpublished |
+| Listen port | **8080** for the site — never 80 |
+| Internal port | **8081** — `/healthz` and `/metrics` only, never the site, meant to stay unpublished |
 | Other listeners | **none** |
 | tmpfs required | exactly one: `/tmp`, at **16 MiB**, `noexec,nosuid,nodev` |
-| Writable mounts | `/tmp` alone, and nothing written can run; on Podman, `--read-only-tmpfs=false` |
-| Volume | **none** |
-| Outbound network | **none** |
+| Writable mounts | `/tmp`, where nothing written can run, and the state volume; on Podman, `--read-only-tmpfs=false` |
+| Volume | **one**, which the operator mounts at `/var/lib/pisati` for Pisati's state; the image declares **no** `VOLUME` |
+| Required setting | `PISATI_SERVER_BASE_URL`, the site's address: `https://`, or `http://` on localhost, 127.0.0.1 or [::1] alone. It has no default |
+| Outbound network | **none** with the default settings |
 | Shell, package manager | **none** |
 | Processes | **one**, the app as PID 1: `pisati serve` |
-| Healthy | the shipped probe, `pisati health`: `/healthz` **200** and loopback `GET /` **exactly** `Hello from pisati` |
+| Healthy | the shipped probe, `pisati health`: `GET /healthz` on 8081 answers **200** within 4 s, as it does while the database answers |
 | Engine healthcheck | Docker runs it automatically. **Podman does not** — pass `--health-cmd` yourself |
 
 - **Podman never sees this image's `HEALTHCHECK`.** Its `libimage` reads a
@@ -84,33 +85,45 @@ breaking change.
   contract suite checks the image's `HEALTHCHECK` is that array in exec
   form, and has each engine judge the container: Docker by the image's
   `HEALTHCHECK`, Podman by the same array passed as `--health-cmd`
-- **The shipped probe asserts two halves, and neither implies the other.**
-  `/healthz` on 8081 shows the server runs, but never goes through 8080's
-  routes. Only the page's exact answer proves the app port serves the app.
-  Anything checking this image should run the probe rather than
-  reimplement either half. It prints nothing when healthy, which the
+- **The shipped probe asks `/healthz` alone.** `pisati health` sends
+  `GET /healthz` to the host `server.internal_listen` names, or 127.0.0.1
+  when it names none. `/healthz` answers 200 `ok` while the database
+  answers, and 503 `unavailable` when it does not, with the reason in
+  `pisati serve`'s log alone. It never goes through 8080's routes: the
+  acceptance tests do. It prints nothing when healthy, which the
   contract's `health-probe` check asserts; each failure is a line,
   `<check>: <reason>`: with no shell, the engine's health log is the only
   record of why
-- **8080 is an allowlist.** It serves `/`, and answers 404 with an empty
-  body to everything else, `/index.php` and `/healthz` included, and so
-  does 8081 to all but `/healthz`. `TestServes` asks for `/index.php`,
-  `/healthz` and a path nothing names, and fails on any answer but an
-  empty 404; the contract's `health-port-only` check fails on `/healthz`
-  answering on 8080
+- **8080 serves the site, and 8081 only health and metrics.** 8080
+  answers every path the site has no page for, `/index.php`, `/healthz`
+  and `/metrics` among them, with the site's HTML 404 page. 8081 answers
+  `/healthz` and `/metrics`, and the profiler only when `telemetry.pprof`
+  is on, and an empty 404 to everything else, `/` and `/login` included.
+  `TestServes` asks 8080 for `/index.php`, `/healthz` and a path nothing
+  names, and fails on any answer but the 404 page;
+  `TestMetricsOnlyInternal` fails on `/metrics` answering on 8080, or not
+  on 8081; the contract's `health-port-only` check fails on `/healthz`
+  answering on 8080, or `/` or `/login` answering on 8081
 - **Nothing listens but 8080 and 8081.** The contract suite reads the
   kernel's socket tables and fails on any other TCP port a process in the
   container listens on, and on any UDP socket one holds
 - **One process, always, and it stops when told.** The app is the
-  ENTRYPOINT, so it is PID 1. Nothing runs before it: it has no state to
-  prepare and no environment to read. The kernel drops a signal PID 1 does
-  not handle, so the app handles SIGTERM and SIGINT itself, finishes what
-  it is answering within 5 s and exits 0; `TestStopsPromptly` fails on a
-  stop that takes longer, or any other exit. Do not add a supervisor or a
-  second long-running process
-- **Zero egress.** The app opens no connection out. The contract suite
-  proves the image serves and is healthy on a genuinely `--internal`
-  network, and cannot connect out
+  ENTRYPOINT, so it is PID 1. Nothing runs before it: Pisati reads its
+  settings and checks its state directory itself as it starts, and exits
+  1 rather than start when either is wrong. The kernel drops a signal
+  PID 1 does not handle, so the app handles SIGTERM and SIGINT itself,
+  finishes what it is doing within one 8 s deadline and exits 0;
+  `TestStopsPromptly` fails on a stop that takes 9 s or more, or any other
+  exit. Do not add a supervisor or a second long-running process
+- **Pisati refuses to start without its state volume or its base URL.**
+  On the read-only root, or on a read-only volume, `pisati serve` exits 1,
+  naming `/var/lib/pisati`; with `PISATI_SERVER_BASE_URL` unset, or plain
+  http away from localhost, it exits 1, naming the variable and never its
+  value. `TestRefusesReadOnlyState`, `TestRefusesWithoutBaseURL` and
+  `TestRefusesPlainHTTPBaseURL` fail on any other outcome
+- **Zero egress.** With its default settings, the app opens no connection
+  out. The contract suite proves the image serves and is healthy on a
+  genuinely `--internal` network, and cannot connect out
 - **Nothing may add a shell or a package manager to the final image.** The
   base is Docker Hardened Images' `static`; that is the point, and the
   contract's `no-shell` and `no-package-manager` checks hold it there. What
@@ -146,8 +159,19 @@ breaking change.
   `file-capability` check, which runs `pisati version`, fails on one, as
   `no-file-capability-xattr` fails on one anywhere in the image
 - **The application is one root-owned file, never written.** The binary
-  is `COPY`'d from the build stage, and the app writes nothing, not even to
-  `/tmp`
+  is `COPY`'d from the build stage. Pisati writes its state, the database,
+  its lock and the main key it generates, to the volume at
+  `/var/lib/pisati` alone: the image holds that directory empty, owned by
+  65532 with mode 0700, so an empty volume mounted there starts out the
+  same, and Pisati sets its umask to 077, so every file it makes is 0600
+  and every directory 0700. `TestStatePersists` fails on any other mode
+  there, and unless a new container on the same volume finds the
+  database and the main key the first one left
+- **The image holds the lockfile its front end was built from.** The
+  stylesheets and scripts are compiled into the binary, and no
+  `node_modules` ships. The `pnpm-lock.yaml` they were built from is at
+  `/usr/share/doc/pisati/pnpm-lock.yaml`, and `TestImageCarriesLockfile`
+  fails unless that is this repository's own
 
 ## Where the shared parts live
 

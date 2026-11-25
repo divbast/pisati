@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/divbast/ci/contract"
+	"github.com/divbast/ci/harness"
 )
 
 // What the image's contract says of every container here.
@@ -17,7 +18,7 @@ const (
 	// gets exactly this, so no check passes on more room than the
 	// contract grants.
 	tmpfsSize = "16m"
-	// appPort serves the page, and healthPort only /healthz.
+	// appPort serves the site, and healthPort /healthz and /metrics.
 	appPort    = 8080
 	healthPort = 8081
 )
@@ -36,12 +37,12 @@ var healthCmd = []string{binary, "health"}
 
 // TestContract runs divbast's confinement contract against the image, on a
 // network with no route out: no capability, no new privileges, a seccomp
-// filter, a read-only root and no writable mount that can execute, uid
-// 65532, the server as PID 1, no shell and no package manager, two
-// listeners, no egress, the HEALTHCHECK and the health port.
+// filter, a read-only root and no writable mount that can execute but the
+// state volume, uid 65532, the server as PID 1, no shell and no package
+// manager, two listeners, no egress, the HEALTHCHECK and the health port.
 func TestContract(t *testing.T) {
 	t.Parallel()
-	_, image := underTest(t)
+	e, image := underTest(t)
 	contract.Run(t, &contract.Config{
 		Image:      image,
 		AppPort:    appPort,
@@ -57,8 +58,12 @@ func TestContract(t *testing.T) {
 			StartPeriod: 60 * time.Second,
 			Retries:     3,
 		},
-		// The health port's root, and a path a PHP app would serve: neither
-		// may answer there
-		HealthOnly404: []string{"/", "/index.php"},
+		Env: pisatiEnv(),
+		Mounts: func(tb testing.TB) []harness.Mount {
+			return []harness.Mount{stateMount(tb, e)}
+		},
+		// The health port's root, and the site's sign-in page: neither may
+		// answer there
+		HealthOnly404: []string{"/", "/login"},
 	})
 }
