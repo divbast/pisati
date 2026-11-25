@@ -63,6 +63,16 @@ WHERE id IN (
     LIMIT sqlc.arg(batch)
 );
 
+-- name: ReleaseOrphanedJobs :many
+-- ReleaseOrphanedJobs makes every leased job ready again, as due as it
+-- was, recording last_error, and returns each one's ID, kind and
+-- attempts. It leaves attempts as they are, so that the try each lease
+-- was claimed for counts, and the lease token as it is. It is run only
+-- while no worker runs: every lease is then one a run that stopped left.
+UPDATE jobs SET state = 'ready', lease_until = NULL, last_error = ?
+WHERE state = 'leased'
+RETURNING id, kind, attempts;
+
 -- The licence closes this file rather than opening it: sqlc copies the
 -- comments above a query into the code it generates, so a new query goes
 -- above these lines.

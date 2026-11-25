@@ -404,3 +404,33 @@ func (s *Sessions) Sweep(ctx context.Context) (int, error) {
 		}
 	}
 }
+
+// SweepEvery runs Sweep at once, and then again each time every has
+// passed, until ctx ends; it returns nil then. A sweep that fails is
+// logged as a warning and changes nothing else: the next one runs on
+// time. A sweep cut off because ctx ended is no failure, and is not
+// logged. The batches a sweep committed before it was cut off stay
+// deleted.
+//
+// It returns an error at once, sweeping nothing, for an every that is not
+// positive, or for Sessions NewSessions did not make.
+func (s *Sessions) SweepEvery(ctx context.Context, every time.Duration) error {
+	if err := s.made(); err != nil {
+		return err
+	}
+	if every <= 0 {
+		return fmt.Errorf("app: sweep sessions every %v: the interval must be positive", every)
+	}
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		if _, err := s.Sweep(ctx); err != nil && ctx.Err() == nil {
+			s.log.WarnContext(ctx, "expired sessions not deleted", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+		}
+	}
+}

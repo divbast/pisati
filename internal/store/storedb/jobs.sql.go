@@ -157,6 +157,46 @@ func (q *Queries) ReleaseJob(ctx context.Context, arg ReleaseJobParams) (int64, 
 	return result.RowsAffected()
 }
 
+const releaseOrphanedJobs = `-- name: ReleaseOrphanedJobs :many
+UPDATE jobs SET state = 'ready', lease_until = NULL, last_error = ?
+WHERE state = 'leased'
+RETURNING id, kind, attempts
+`
+
+type ReleaseOrphanedJobsRow struct {
+	ID       int64
+	Kind     string
+	Attempts int64
+}
+
+// ReleaseOrphanedJobs makes every leased job ready again, as due as it
+// was, recording last_error, and returns each one's ID, kind and
+// attempts. It leaves attempts as they are, so that the try each lease
+// was claimed for counts, and the lease token as it is. It is run only
+// while no worker runs: every lease is then one a run that stopped left.
+func (q *Queries) ReleaseOrphanedJobs(ctx context.Context, lastError sql.NullString) ([]ReleaseOrphanedJobsRow, error) {
+	rows, err := q.db.QueryContext(ctx, releaseOrphanedJobs, lastError)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ReleaseOrphanedJobsRow
+	for rows.Next() {
+		var i ReleaseOrphanedJobsRow
+		if err := rows.Scan(&i.ID, &i.Kind, &i.Attempts); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const retryJob = `-- name: RetryJob :execrows
 UPDATE jobs SET state = 'ready', run_at = ?, lease_until = NULL, last_error = ?
 WHERE id = ? AND state = 'leased' AND lease_token = ?

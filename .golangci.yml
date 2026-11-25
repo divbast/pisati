@@ -161,6 +161,9 @@ linters:
             - github.com/a-h/templ$
             - github.com/a-h/templ/runtime$
             - golang.org/x/crypto/chacha20poly1305 # XChaCha20-Poly1305, which seals fields and wraps the data keys
+            - github.com/alecthomas/kong$ # the command line's parser, which the design names
+            - golang.org/x/sync/errgroup # serve's goroutines, which stop together
+            - go.opentelemetry.io/otel$ # SetErrorHandler alone, which serve sets once, so the SDK's errors reach the log
             # The OpenTelemetry SDK and its exporters, for metrics and traces
             - go.opentelemetry.io/otel/attribute
             - go.opentelemetry.io/otel/codes
