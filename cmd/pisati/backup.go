@@ -21,7 +21,12 @@ type backupCmd struct {
 // Run writes a copy of the database to the file c.Dest names. It takes no
 // lock, so serve can run beside it. With no database, it refuses, and
 // writes nothing: the store would make an empty one to copy.
-func (c backupCmd) Run(ctx context.Context, h Host) (err error) {
+func (c backupCmd) Run(ctx context.Context, h Host) error {
+	return untilHalt(h, func() error { return c.backup(ctx, h) })
+}
+
+// backup is Run's work.
+func (c backupCmd) backup(ctx context.Context, h Host) (err error) {
 	cfg, _, err := loadConfig(ctx, h)
 	if err != nil {
 		return err
@@ -35,7 +40,7 @@ func (c backupCmd) Run(ctx context.Context, h Host) (err error) {
 	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("there is no database to back up at %s. Nothing was written", path)
 	case err != nil:
-		return explain(err, "cannot read the database %s: %s", path, reason(err))
+		return explain(err, "Pisati cannot read the database %s: %s", path, reason(err))
 	}
 	db, err := store.Open(ctx, path)
 	if err != nil {
@@ -54,7 +59,12 @@ type restoreCmd struct {
 
 // Run replaces the database with the copy c.Src names, under the state
 // directory's lock, which serve holds while it runs.
-func (c restoreCmd) Run(ctx context.Context, h Host) (err error) {
+func (c restoreCmd) Run(ctx context.Context, h Host) error {
+	return untilHalt(h, func() error { return c.restore(ctx, h) })
+}
+
+// restore is Run's work.
+func (c restoreCmd) restore(ctx context.Context, h Host) (err error) {
 	cfg, _, err := loadConfig(ctx, h)
 	if err != nil {
 		return err

@@ -16,7 +16,7 @@ import (
 // keysCmd is pisati keys.
 type keysCmd struct {
 	Rewrap rewrapCmd `cmd:"" help:"Encrypt the data keys with a new main key, in place of the one in use. Stop pisati serve first."`
-	Rotate rotateCmd `cmd:"" help:"Make a new data key, and use it from now on for new data. Stop pisati serve first. The next time pisati serve runs, it encrypts again with the new key what older data keys encrypted."`
+	Rotate rotateCmd `cmd:"" help:"Make a new data key, and use it from now on. Stop pisati serve first."`
 }
 
 // rewrapCmd is pisati keys rewrap.
@@ -27,7 +27,12 @@ type rewrapCmd struct {
 // Run wraps the data keys under the main key in c.NewMainKeyFile, in
 // place of the configured one, under the state directory's lock, which
 // serve holds while it runs, and once the database is migrated.
-func (c rewrapCmd) Run(ctx context.Context, h Host) (err error) {
+func (c rewrapCmd) Run(ctx context.Context, h Host) error {
+	return untilHalt(h, func() error { return c.rewrap(ctx, h) })
+}
+
+// rewrap is Run's work.
+func (c rewrapCmd) rewrap(ctx context.Context, h Host) (err error) {
 	cfg, creds, err := loadConfig(ctx, h)
 	if err != nil {
 		return err
@@ -73,7 +78,12 @@ type rotateCmd struct{}
 // under the state directory's lock, which serve holds while it runs, and
 // once the database is migrated. serve runs the re-encryption when it
 // next starts.
-func (rotateCmd) Run(ctx context.Context, h Host) (err error) {
+func (c rotateCmd) Run(ctx context.Context, h Host) error {
+	return untilHalt(h, func() error { return c.rotate(ctx, h) })
+}
+
+// rotate is Run's work.
+func (rotateCmd) rotate(ctx context.Context, h Host) (err error) {
 	cfg, creds, err := loadConfig(ctx, h)
 	if err != nil {
 		return err
@@ -97,7 +107,6 @@ func (rotateCmd) Run(ctx context.Context, h Host) (err error) {
 	if err := crypto.Rotate(ctx, st.db, keyring); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(h.Stdout, "A new data key is now in use for new data. The next time pisati serve runs, "+
-		"it encrypts again with the new key what older data keys encrypted.")
+	_, err = fmt.Fprintln(h.Stdout, "A new data key is now in use.")
 	return err
 }

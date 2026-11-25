@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/goleak"
+
 	"github.com/divbast/pisati/internal/store"
 	"github.com/divbast/pisati/internal/store/storedb"
 )
@@ -191,6 +193,45 @@ func (s *site) run(t *testing.T, args ...string) result {
 	return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
+// halting starts a command of s with its own Host.Halt, and returns a
+// function that closes it, as a second SIGTERM or SIGINT does, and one
+// that waits for the command's result. Its context is the test's: no first
+// signal ends it.
+func (s *site) halting(t *testing.T, args ...string) (halt func(), wait func() result) {
+	t.Helper()
+	h, stdout, stderr := s.host(args...)
+	halted := make(chan struct{})
+	h.Halt = halted
+	done := make(chan int, 1)
+	go func() { done <- run(t.Context(), h) }()
+	return func() { close(halted) }, func() result {
+		select {
+		case code := <-done:
+			return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+		case <-time.After(20 * time.Second):
+			t.Fatal("the command did not return within 20 s")
+			return result{}
+		}
+	}
+}
+
+// settle waits, for at most 5 s, until no goroutine is left but the
+// test's own, failing the test if one still runs then. net/http keeps a
+// connection's goroutine 500 ms after its handler returns with the
+// request's body unread, as a cut-off request's always is: longer than
+// goleak's own retries at the end of the package wait. It changes nothing
+// goleak checks; it only waits for that goroutine to end.
+func settle(t *testing.T) {
+	t.Helper()
+	var err error
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if err = goleak.Find(); err == nil {
+			return
+		}
+	}
+	t.Fatalf("goroutines still running 5 s after the test's work: %v", err)
+}
+
 // mustRun runs a command of s, failing the test unless it exits 0.
 func (s *site) mustRun(t *testing.T, args ...string) result {
 	t.Helper()
@@ -242,6 +283,23 @@ func (s *site) serve(t *testing.T) *serving {
 	}
 	t.Fatalf("pisati serve did not answer %s within 10 s:\n%s", healthz, stderr.String())
 	return nil
+}
+
+// serveStarting starts pisati serve for s, as serve does, but returns at
+// once, without waiting for it to answer: for a test that holds serve in
+// its start.
+func (s *site) serveStarting(t *testing.T) *serving {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	h, stdout, stderr := s.host("serve")
+	v := &serving{t: t, cancel: cancel, halted: make(chan struct{}), done: make(chan struct{}), stdout: stdout, stderr: stderr}
+	h.Halt = v.halted
+	go func() {
+		defer close(v.done)
+		v.code = run(ctx, h)
+	}()
+	t.Cleanup(func() { v.stop() })
+	return v
 }
 
 // stop cancels serve's context, as SIGTERM does, and returns its exit
@@ -436,6 +494,37 @@ func mustOwnerOnly(t *testing.T, state string, want ...string) {
 			t.Errorf("%s is not in the state directory, which holds %v", name, slices.Sorted(maps.Keys(seen)))
 		}
 	}
+}
+
+// holdWriteLock takes the database's write lock at state, in a
+// transaction of its own, and keeps it until the function it returns is
+// called, which waits for the transaction to end. A Pisati command that
+// writes waits for it, up to SQLite's busy timeout.
+func holdWriteLock(t *testing.T, state string) (release func()) {
+	t.Helper()
+	db, err := store.Open(t.Context(), store.DatabasePath(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, unhold, ended := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		ended <- db.InTx(context.WithoutCancel(t.Context()), func(*storedb.Queries) error {
+			close(held)
+			<-unhold
+			return nil
+		})
+	}()
+	<-held
+	release = sync.OnceFunc(func() {
+		close(unhold)
+		if err := errors.Join(<-ended, db.Close()); err != nil {
+			t.Error(err)
+		}
+	})
+	// Released at the test's end too, should the test stop before it
+	// releases it itself.
+	t.Cleanup(release)
+	return release
 }
 
 // orphanJob leaves a job of kind in the database at state as a run of

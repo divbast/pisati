@@ -254,14 +254,60 @@ generate-check:
 # opens no browser itself: open the base URL Pisati is set to, as
 # http://localhost:7331, so that the page's origin is the site's. Stopping
 # either stops both.
+#
+# templ stops the command it runs, on each restart and at the end, with
+# SIGINT and then SIGTERM to the command's process group, and a second
+# signal stops Pisati at once, without its drain. So templ runs serve, a
+# wrapper, with bash (SHELL is bash for templ alone, so that its command
+# is the wrapper itself). The wrapper builds Pisati and runs it in a
+# process group of its own, which neither templ's signals nor Ctrl-C
+# reach. Pisati gets one SIGTERM, from whichever stops it first: the
+# wrapper, on templ's first signal, or this recipe as it exits, since
+# templ kills the wrapper outright when it stops itself. Only the one that
+# moves Pisati's pid file away sends it.
 
 # Run Pisati in dev mode: Vite's dev server, and Pisati rebuilt as it changes
 [script("mise", "exec", "--", "bash", "-euo", "pipefail")]
 dev:
-    trap 'kill 0' EXIT
+    run=$(mktemp -d)
+    export DEV_SERVE_RUN="${run}"
+    cat >"${run}/stop" <<'EOF'
+    if mv "${DEV_SERVE_RUN}/pid" "${DEV_SERVE_RUN}/stopping" 2>/dev/null; then
+        kill -TERM -- "-$(cat "${DEV_SERVE_RUN}/stopping")" 2>/dev/null || true
+    fi
+    EOF
+    finish() {
+        bash "${run}/stop"
+        # The prompt comes back once Pisati has stopped, after its last record.
+        if pid=$(cat "${run}/stopping" 2>/dev/null); then
+            while kill -0 "${pid}" 2>/dev/null; do sleep 0.1; done
+        fi
+        rm -rf -- "${run}"
+        kill 0
+    }
+    trap finish EXIT
     pnpm exec vp dev &
-    go tool -modfile=tools/go.mod templ generate --watch --proxy=http://localhost:8080 --open-browser=false \
-        --cmd="go run ./cmd/pisati serve" --watch-pattern='(.+\.go$)|(.+\.templ$)'
+    serve=$(cat <<'EOF'
+    set -m
+    go build -o "${DEV_SERVE_RUN}/pisati" ./cmd/pisati || exit
+    "${DEV_SERVE_RUN}/pisati" serve &
+    pid=$!
+    echo "${pid}" >"${DEV_SERVE_RUN}/pid"
+    trap 'trap "" INT TERM; bash "${DEV_SERVE_RUN}/stop"' INT TERM
+    status=0
+    wait "${pid}" || status=$?
+    # A signal ends the first wait early: wait for Pisati to stop.
+    if kill -0 "${pid}" 2>/dev/null; then
+        status=0
+        wait "${pid}" || status=$?
+    fi
+    rm -f -- "${DEV_SERVE_RUN}/pid"
+    echo "pisati serve exited with status ${status}" >&2
+    exit "${status}"
+    EOF
+    )
+    SHELL=bash go tool -modfile=tools/go.mod templ generate --watch --proxy=http://localhost:8080 --open-browser=false \
+        --cmd="${serve}" --watch-pattern='(.+\.go$)|(.+\.templ$)'
 
 # Every lint gate. Needs a running Docker daemon, for docker build --check
 lint:

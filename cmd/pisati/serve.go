@@ -6,12 +6,16 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -45,25 +49,40 @@ const (
 // serveCmd is pisati serve.
 type serveCmd struct{}
 
-// Run serves until ctx ends.
+// Run serves until ctx ends, and stops at once, whatever serve is doing,
+// when h.Halt closes, as a second SIGTERM or SIGINT does: see life.halt.
+// serve then goes on without Run, and ends with the process, which exits
+// just after.
 func (serveCmd) Run(ctx context.Context, h Host) error {
-	return serve(ctx, h)
+	l := &life{}
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, h, l) }()
+	select {
+	case err := <-done:
+		return err
+	case <-h.Halt:
+		return l.halt(ctx)
+	}
 }
 
 // serve checks and wires everything, and then serves the public listener,
 // the internal listener, the job worker and the session sweeper together
 // until ctx ends or one of them fails. Nothing listens or runs until every
 // check has passed, so a refusal never leaves Pisati half started. A stop
-// during the start is no failure: serve returns nil then.
+// during the start is no failure: serve returns nil then. It records in l
+// what it opens, as it opens it, for a halt to close.
 //
 // Once ctx ends it stops: see running.serve. Then it closes the database
 // and releases the state directory's lock.
-func serve(ctx context.Context, h Host) (err error) {
+func serve(ctx context.Context, h Host, l *life) (err error) {
 	cfg, creds, err := loadConfig(ctx, h)
 	if err != nil {
 		return ignoreStop(ctx, err)
 	}
-	log := telemetry.NewLogger(h.Stdout, cfg.Log)
+	if err := sameAddress(cfg.Server); err != nil {
+		return err
+	}
+	log := l.logger(telemetry.NewLogger(h.Stdout, cfg.Log).Handler())
 	// The SDK's own errors go to log rather than to Go's log package, and
 	// so to stderr in another format. It is the one global setting Pisati
 	// makes, and it makes it here alone.
@@ -71,7 +90,7 @@ func serve(ctx context.Context, h Host) (err error) {
 		log.WarnContext(ctx, "OpenTelemetry reported an error", "error", err)
 	}))
 
-	st, _, _, err := openState(ctx, cfg.Storage.StateDir)
+	st, err := openServingState(ctx, cfg.Storage.StateDir, l)
 	if err != nil {
 		return ignoreStop(ctx, err)
 	}
@@ -82,11 +101,170 @@ func serve(ctx context.Context, h Host) (err error) {
 			log.InfoContext(ctx, "stopped")
 		}
 	}()
-	r, err = start(ctx, h, cfg, creds, st, log)
+	r, err = start(ctx, h, cfg, creds, st, log, l)
 	if err != nil {
 		return ignoreStop(ctx, err)
 	}
-	return r.serve(ctx, h)
+	return r.serve(ctx, h, l)
+}
+
+// openServingState opens the state directory dir as openState does, and
+// records the lock and the database in l as soon as each is taken, so that
+// a halt releases the lock explicitly whatever serve is doing.
+func openServingState(ctx context.Context, dir string, l *life) (_ *state, err error) {
+	if err := checkStateDir(dir); err != nil {
+		return nil, err
+	}
+	lock, err := lockState(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	l.opened(lock.Release)
+	db, err := store.Open(ctx, store.DatabasePath(dir))
+	if err != nil {
+		return nil, errors.Join(err, lock.Release())
+	}
+	l.opened(db.Close)
+	st := &state{dir: dir, lock: lock, db: db}
+	if _, _, err := db.Migrate(ctx, lock); err != nil {
+		return nil, errors.Join(err, st.close())
+	}
+	return st, nil
+}
+
+// sameAddress refuses two listeners that would listen on the same port at
+// the same address: the same address, or the same port with one of them
+// on every address. It refuses them before anything is opened, the same
+// on every system, though some would let one of them listen.
+func sameAddress(srv config.Server) error {
+	public, internal := srv.Listen, srv.InternalListen
+	if public.Port() != internal.Port() {
+		return nil
+	}
+	a, b := listenHost(public), listenHost(internal)
+	if a != b && !everyAddress(a) && !everyAddress(b) {
+		return nil
+	}
+	return fmt.Errorf("server.listen (PISATI_SERVER_LISTEN) is %s and server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) "+
+		"is %s. Both would listen on port %d at the same address, which only one of them can do. Set one of them to "+
+		"another port", public, internal, public.Port())
+}
+
+// listenHost returns the host a listens on: "" for none.
+func listenHost(a config.ListenAddr) string {
+	host, _, err := net.SplitHostPort(a.String())
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
+// everyAddress reports whether host stands for every address of the
+// machine: none, 0.0.0.0 or [::].
+func everyAddress(host string) bool {
+	ip, err := netip.ParseAddr(host)
+	return host == "" || (err == nil && ip.IsUnspecified())
+}
+
+// life is what serve has opened so far, so that a halt can close it from
+// outside serve's goroutine, whatever serve is doing then, and the
+// logger serve logs through, which a halt shuts. Its methods are safe for
+// concurrent use.
+type life struct {
+	mu sync.Mutex
+	// log is serve's logger, through gate; direct is the same handler
+	// without it, for the halt's own record. Both are nil until serve has
+	// read its configuration.
+	log, direct *slog.Logger
+	shut        *atomic.Bool
+	// closers close what serve has opened, in the order it opened it.
+	closers  []func() error
+	stopOnce sync.Once
+}
+
+// logger returns the logger serve logs through, to h, until a halt, after
+// which it drops every record.
+func (l *life) logger(h slog.Handler) *slog.Logger {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.shut = &atomic.Bool{}
+	l.direct = slog.New(h)
+	l.log = slog.New(gate{inner: h, shut: l.shut})
+	return l.log
+}
+
+// opened records close, which closes what serve has just opened, for a
+// halt to call. Each close must be safe to call again, and alongside
+// serve's own call: serve closes all it opened as well.
+func (l *life) opened(close func() error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.closers = append(l.closers, close)
+}
+
+// stopping logs "stopping", once, as the stop begins: from the first
+// signal, a failure among serve's goroutines, or a halt, whichever comes
+// first.
+func (l *life) stopping(ctx context.Context) {
+	l.stopOnce.Do(func() {
+		l.mu.Lock()
+		log := l.log
+		l.mu.Unlock()
+		if log != nil {
+			log.InfoContext(ctx, "stopping")
+		}
+	})
+}
+
+// halt stops serve at once, whatever it is doing. It logs "stopping", if
+// that is not logged yet, and then the halt's one record, after which the
+// log takes no record more. It then closes everything serve has opened,
+// in the reverse order: the servers, cutting their connections, telemetry,
+// without waiting for it to send what it holds, the database, and the
+// state directory's lock, released explicitly. It returns a *haltError
+// that says whether the halt was logged, and holds every failure in
+// closing.
+func (l *life) halt(ctx context.Context) error {
+	l.stopping(ctx)
+	l.mu.Lock()
+	direct, shut, closers := l.direct, l.shut, slices.Clone(l.closers)
+	l.mu.Unlock()
+	if direct != nil {
+		shut.Store(true)
+		direct.ErrorContext(ctx, "stop cut short: a second SIGTERM or SIGINT signal arrived, so Pisati stops now, "+
+			"without waiting for requests and jobs to finish")
+	}
+	errs := make([]error, 0, len(closers))
+	for _, closeIt := range slices.Backward(closers) {
+		errs = append(errs, closeIt())
+	}
+	return &haltError{logged: direct != nil, closing: errors.Join(errs...)}
+}
+
+// gate is a slog.Handler that passes each record to inner until shut is
+// set, and drops it after.
+type gate struct {
+	inner slog.Handler
+	shut  *atomic.Bool
+}
+
+func (g gate) Enabled(ctx context.Context, level slog.Level) bool {
+	return !g.shut.Load() && g.inner.Enabled(ctx, level)
+}
+
+func (g gate) Handle(ctx context.Context, r slog.Record) error {
+	if g.shut.Load() {
+		return nil
+	}
+	return g.inner.Handle(ctx, r)
+}
+
+func (g gate) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return gate{inner: g.inner.WithAttrs(attrs), shut: g.shut}
+}
+
+func (g gate) WithGroup(name string) slog.Handler {
+	return gate{inner: g.inner.WithGroup(name), shut: g.shut}
 }
 
 // ignoreStop returns nil when err is only ctx's own, ctx having ended:
@@ -144,8 +322,11 @@ func (g *group) Wait() error {
 
 // running is everything serve runs, once start has made it.
 type running struct {
-	log                  *slog.Logger
-	tel                  telemetry.Providers
+	log *slog.Logger
+	tel telemetry.Providers
+	// telStopping is taken by whichever stops tel first: the flush, or a
+	// halt.
+	telStopping          *atomic.Bool
 	public, internal     *http.Server
 	publicLn, internalLn net.Listener
 	worker               *jobs.Worker
@@ -156,7 +337,7 @@ type running struct {
 // keyring, the job worker, with the leases a stopped run left released,
 // the sessions, telemetry, both listeners' handlers, and, last, the two
 // listeners. On an error it leaves nothing open but st.
-func start(ctx context.Context, h Host, cfg config.Config, creds fs.FS, st *state, log *slog.Logger) (_ *running, err error) {
+func start(ctx context.Context, h Host, cfg config.Config, creds fs.FS, st *state, log *slog.Logger, l *life) (_ *running, err error) {
 	key, origin, err := loadMainKey(ctx, cfg.Keys.MainKey, creds, st.dir, log)
 	if err != nil {
 		return nil, err
@@ -189,6 +370,23 @@ func start(ctx context.Context, h Host, cfg config.Config, creds fs.FS, st *stat
 	if err != nil {
 		return nil, err
 	}
+	// Whichever stops telemetry first, the flush or a halt, takes this:
+	// Shutdown runs once, and a second call waits for the first, which a
+	// halt must not.
+	telStopping := &atomic.Bool{}
+	l.opened(func() error {
+		if !telStopping.CompareAndSwap(false, true) {
+			return nil
+		}
+		// An ended context: Shutdown stops both providers at once,
+		// without waiting for an export.
+		now, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		cancel()
+		if err := tel.Shutdown(now); !errors.Is(err, context.Canceled) {
+			return err
+		}
+		return nil
+	})
 	defer func() {
 		if err != nil {
 			stop, cancel := context.WithTimeout(context.WithoutCancel(ctx), drain)
@@ -206,14 +404,15 @@ func start(ctx context.Context, h Host, cfg config.Config, creds fs.FS, st *stat
 		return nil, err
 	}
 	return &running{
-		log:        log,
-		tel:        tel,
-		public:     httpx.NewServer(cfg.Server.Listen, public, httpx.DefaultTimeouts(), log),
-		internal:   httpx.NewServer(cfg.Server.InternalListen, internal, httpx.DefaultTimeouts(), log),
-		publicLn:   publicLn,
-		internalLn: internalLn,
-		worker:     worker,
-		sessions:   sessions,
+		log:         log,
+		tel:         tel,
+		telStopping: telStopping,
+		public:      httpx.NewServer(cfg.Server.Listen, public, httpx.DefaultTimeouts(), log),
+		internal:    httpx.NewServer(cfg.Server.InternalListen, internal, httpx.DefaultTimeouts(), log),
+		publicLn:    publicLn,
+		internalLn:  internalLn,
+		worker:      worker,
+		sessions:    sessions,
 	}, nil
 }
 
@@ -253,10 +452,10 @@ func listen(ctx context.Context, lc *net.ListenConfig, addr config.ListenAddr, s
 	ln, err := lc.Listen(ctx, "tcp", addr.String())
 	switch {
 	case errors.Is(err, syscall.EADDRINUSE):
-		return nil, explain(err, "cannot listen on %s, the address that %s sets, because another program already uses it. "+
-			"Stop that program, or set %s to another address", addr, setting, setting)
+		return nil, explain(err, "Pisati cannot listen on %s, the address that %s sets, because another process already "+
+			"uses it. Stop that process, or set %s to another address", addr, setting, setting)
 	case err != nil:
-		return nil, explain(err, "cannot listen on %s, the address that %s sets: %s", addr, setting, reason(err))
+		return nil, explain(err, "Pisati cannot listen on %s, the address that %s sets: %s", addr, setting, reason(err))
 	}
 	return ln, nil
 }
@@ -336,21 +535,26 @@ func healthz(db *store.Store, log *slog.Logger) http.Handler {
 // the deadline is closed, cutting its connections. Then telemetry sends
 // what it holds, within what is left of the deadline.
 //
-// When h.Halt closes, serve stops at once instead: it closes both servers,
-// stops telemetry, and returns without waiting for the job worker, whose
-// running jobs the next start's ReleaseOrphans makes ready again.
+// It records the servers in l, and the end of the group's work, for a halt
+// to close: the halt does not wait for the job worker, whose running jobs
+// the next start's ReleaseOrphans makes ready again.
 //
-// It returns nil once stopped, even when the deadline cut work off;
-// errReported when h.Halt cut the stop short, which it logs; and every
-// error of a listener that failed, joined.
-func (r *running) serve(ctx context.Context, h Host) error {
-	// Ended by the halt too, so that the worker and the sweeper stop
-	// taking work then, even had no signal ended ctx first.
+// It returns nil once stopped, even when the deadline cut work off, and
+// every error of a listener that failed, joined.
+func (r *running) serve(ctx context.Context, h Host, l *life) error {
+	// Ended by a halt too, so that the worker and the sweeper stop taking
+	// work then, even had no signal ended ctx first.
 	serving, stopServing := context.WithCancel(ctx)
 	defer stopServing()
+	l.opened(r.public.Close)
+	l.opened(r.internal.Close)
+	l.opened(func() error {
+		stopServing()
+		return nil
+	})
 	g, gctx := newGroup(serving)
 	stopAt := sync.OnceValue(func() time.Time {
-		r.log.InfoContext(ctx, "stopping")
+		l.stopping(ctx)
 		return h.Clock().Add(drain)
 	})
 	r.log.InfoContext(ctx, "serving started",
@@ -376,42 +580,16 @@ func (r *running) serve(ctx context.Context, h Host) error {
 	g.Go(func() error { return r.worker.Run(gctx) })
 	g.Go(func() error { return r.sessions.SweepEvery(gctx, sessionSweepEvery) })
 
-	// Waited for apart from the halt, which must not wait for it. On a
-	// halt this goroutine ends once the group does, within the drain.
-	waited := make(chan error, 1)
-	go func() { waited <- g.Wait() }()
-	select {
-	case err := <-waited:
-		deadline, cancel := context.WithDeadline(context.WithoutCancel(ctx), stopAt())
-		defer cancel()
-		if ferr := r.tel.Shutdown(deadline); ferr != nil {
-			r.log.WarnContext(deadline, "telemetry did not stop cleanly: what it held may not have been sent", "error", ferr)
-		}
-		return err
-	case <-h.Halt:
-		stopServing()
-		return r.halt(ctx)
+	err := g.Wait()
+	if !r.telStopping.CompareAndSwap(false, true) {
+		return err // a halt stopped it
 	}
-}
-
-// halt stops serving at once, as a second SIGTERM or SIGINT asks: it
-// closes both servers, cutting their connections, and stops telemetry
-// without waiting for it to send what it holds. It returns errReported,
-// having logged the halt, or the servers' errors in closing.
-func (r *running) halt(ctx context.Context) error {
-	r.log.ErrorContext(ctx, "stop cut short: a second SIGTERM or SIGINT signal arrived, so Pisati stops now, "+
-		"without waiting for requests and jobs to finish")
-	if err := errors.Join(r.public.Close(), r.internal.Close()); err != nil {
-		return err
+	deadline, cancel := context.WithDeadline(context.WithoutCancel(ctx), stopAt())
+	defer cancel()
+	if ferr := r.tel.Shutdown(deadline); ferr != nil {
+		r.log.WarnContext(deadline, "telemetry stopped before it could send every trace it held", "error", ferr)
 	}
-	// A context already ended: Shutdown stops both providers without
-	// waiting for an export.
-	now, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	cancel()
-	if err := r.tel.Shutdown(now); err != nil && !errors.Is(err, context.Canceled) {
-		r.log.WarnContext(ctx, "telemetry did not stop cleanly: what it held may not have been sent", "error", err)
-	}
-	return errReported
+	return err
 }
 
 // serveOn serves srv on ln until srv is shut down, and returns why it
@@ -421,7 +599,7 @@ func serveOn(srv *http.Server, ln net.Listener, setting string) error {
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
-	return explain(err, "stopped serving on %s, the address that %s sets, because accepting connections there failed: %s",
+	return explain(err, "Pisati stopped serving on %s, the address that %s sets, because accepting connections there failed: %s",
 		ln.Addr(), setting, reason(err))
 }
 

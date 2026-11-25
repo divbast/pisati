@@ -32,21 +32,23 @@ type healthCmd struct{}
 // is a "config: " line for each problem; anything else, one "healthz: "
 // line.
 func (healthCmd) Run(ctx context.Context, h Host) error {
-	cfg, _, err := loadConfig(ctx, h)
-	if ce, ok := errors.AsType[*configError](err); ok {
-		for _, line := range problems(ce) {
-			say(h.Stderr, "config: %s\n", line)
+	return untilHalt(h, func() error {
+		cfg, _, err := loadConfig(ctx, h)
+		if ce, ok := errors.AsType[*configError](err); ok {
+			for _, line := range problems(ce) {
+				say(h.Stderr, "config: %s\n", line)
+			}
+			return errReported
 		}
-		return errReported
-	}
-	if err != nil {
-		return err
-	}
-	if why := probe(ctx, cfg.Server.InternalListen); why != "" {
-		say(h.Stderr, "healthz: %s\n", why)
-		return errReported
-	}
-	return nil
+		if err != nil {
+			return err
+		}
+		if why := probe(ctx, cfg.Server.InternalListen); why != "" {
+			say(h.Stderr, "healthz: %s\n", why)
+			return errReported
+		}
+		return nil
+	})
 }
 
 // healthAddr returns the address pisati health calls for the internal
@@ -62,20 +64,21 @@ func healthAddr(a config.ListenAddr) string {
 
 // probe sends GET /healthz to the internal listener a within
 // healthWithin, and returns why the answer is not 200, or "" when it is.
-// Each reason names the address called, and the address a gives when
-// that is another.
+// Each reason names the address called, and ends with a sentence on where
+// that address comes from.
 func probe(ctx context.Context, a config.ListenAddr) string {
 	addr := healthAddr(a)
-	where := fmt.Sprintf("%s, the address that %s sets", addr, internalSetting)
+	about := fmt.Sprintf(" This is the address that %s sets.", internalSetting)
 	if set := a.String(); set != addr {
-		where = fmt.Sprintf("%s, for the address %s that %s sets", addr, set, internalSetting)
+		about = fmt.Sprintf(" %s is %s, which means every address of this machine, so pisati health calls 127.0.0.1.",
+			internalSetting, set)
 	}
 	ctx, cancel := context.WithTimeout(ctx, healthWithin)
 	defer cancel()
 	target := url.URL{Scheme: "http", Host: addr, Path: "/healthz"}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), http.NoBody)
 	if err != nil {
-		return fmt.Sprintf("cannot make the request GET /healthz to %s: %s.", addr, reason(err))
+		return fmt.Sprintf("pisati health cannot make the request GET /healthz to %s: %s.%s", addr, reason(err), about)
 	}
 	// A transport of its own: no proxy, whatever the environment says,
 	// and no connection kept open after the one request.
@@ -84,11 +87,11 @@ func probe(ctx context.Context, a config.ListenAddr) string {
 	resp, err := client.Do(req)
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		return fmt.Sprintf("%s, did not answer GET /healthz within %d seconds.", where, int(healthWithin/time.Second))
+		return fmt.Sprintf("%s did not answer GET /healthz within %d seconds.%s", addr, int(healthWithin/time.Second), about)
 	case errors.Is(err, syscall.ECONNREFUSED):
-		return fmt.Sprintf("nothing accepts connections on %s. Check that pisati serve is running.", where)
+		return fmt.Sprintf("nothing accepts connections on %s. Check that pisati serve is running.%s", addr, about)
 	case err != nil:
-		return fmt.Sprintf("the request GET /healthz to %s, did not complete: %s.", where, reason(err))
+		return fmt.Sprintf("the request GET /healthz to %s did not complete: %s.%s", addr, reason(err), about)
 	}
 	status := resp.StatusCode
 	//nolint:errcheck // the body is never read: closing it frees the connection, and its error changes nothing about the answer
@@ -97,10 +100,10 @@ func probe(ctx context.Context, a config.ListenAddr) string {
 	case http.StatusOK:
 		return ""
 	case http.StatusServiceUnavailable:
-		return fmt.Sprintf("%s, answered GET /healthz with status 503, not 200: pisati serve runs, but its database "+
-			"did not answer. The log of pisati serve says why.", where)
+		return fmt.Sprintf("%s answered GET /healthz with status 503, not 200: pisati serve runs, but its database "+
+			"did not answer. The log of pisati serve says why.%s", addr, about)
 	default:
-		return fmt.Sprintf("%s, answered GET /healthz with status %d, not 200. Check that it is the internal "+
-			"address of pisati serve.", where, status)
+		return fmt.Sprintf("%[1]s answered GET /healthz with status %[2]d, not 200. pisati serve answers only 200 or 503 "+
+			"there, so another program may be listening at %[1]s.%[3]s", addr, status, about)
 	}
 }

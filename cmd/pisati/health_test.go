@@ -63,8 +63,8 @@ func TestHealthCommand(t *testing.T) {
 	t.Run("nothing listening", func(t *testing.T) {
 		s := newSite(t)
 		r := s.run(t, "health")
-		want := fmt.Sprintf("healthz: nothing accepts connections on 127.0.0.1:%d, the address that server.internal_listen "+
-			"(PISATI_SERVER_INTERNAL_LISTEN) sets. Check that pisati serve is running.", s.internal)
+		want := fmt.Sprintf("healthz: nothing accepts connections on 127.0.0.1:%d. Check that pisati serve is running. "+
+			"This is the address that server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) sets.", s.internal)
 		if r.code != 1 || r.line(t) != want || r.stdout != "" {
 			t.Errorf("pisati health = %d, %q, %q; want 1, %q", r.code, r.stdout, r.stderr, want)
 		}
@@ -74,8 +74,9 @@ func TestHealthCommand(t *testing.T) {
 		s := newSite(t)
 		s.env["PISATI_SERVER_INTERNAL_LISTEN"] = fmt.Sprintf(":%d", s.internal)
 		r := s.run(t, "health")
-		want := fmt.Sprintf("healthz: nothing accepts connections on 127.0.0.1:%[1]d, for the address :%[1]d that "+
-			"server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) sets. Check that pisati serve is running.", s.internal)
+		want := fmt.Sprintf("healthz: nothing accepts connections on 127.0.0.1:%[1]d. Check that pisati serve is running. "+
+			"server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) is :%[1]d, which means every address of this machine, "+
+			"so pisati health calls 127.0.0.1.", s.internal)
 		if r.code != 1 || r.line(t) != want {
 			t.Errorf("pisati health = %d, %q; want 1, %q", r.code, r.stderr, want)
 		}
@@ -97,8 +98,8 @@ func TestHealthCommand(t *testing.T) {
 			// A host named: that host, here the one the fake listens on.
 			{fmt.Sprintf("127.0.0.1:%d", port), 0, ""},
 			// IPv6 loopback, where nothing listens on the port.
-			{fmt.Sprintf("[::1]:%d", port), 1, fmt.Sprintf("healthz: nothing accepts connections on [::1]:%d, the address "+
-				"that server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) sets. Check that pisati serve is running.\n", port)},
+			{fmt.Sprintf("[::1]:%d", port), 1, fmt.Sprintf("healthz: nothing accepts connections on [::1]:%d. Check that "+
+				"pisati serve is running. This is the address that server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) sets.\n", port)},
 		} {
 			s := newSite(t)
 			s.env["PISATI_SERVER_INTERNAL_LISTEN"] = tc.listen
@@ -123,9 +124,9 @@ func TestHealthCommand(t *testing.T) {
 		s := newSite(t)
 		s.env["PISATI_SERVER_INTERNAL_LISTEN"] = fmt.Sprintf("127.0.0.1:%d", port)
 		r := s.run(t, "health")
-		want := fmt.Sprintf("healthz: 127.0.0.1:%d, the address that server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) "+
-			"sets, answered GET /healthz with status 503, not 200: pisati serve runs, but its database did not answer. "+
-			"The log of pisati serve says why.", port)
+		want := fmt.Sprintf("healthz: 127.0.0.1:%d answered GET /healthz with status 503, not 200: pisati serve runs, "+
+			"but its database did not answer. The log of pisati serve says why. This is the address that "+
+			"server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) sets.", port)
 		if r.code != 1 || r.line(t) != want {
 			t.Errorf("pisati health = %d, %q; want 1, %q", r.code, r.stderr, want)
 		}
@@ -133,8 +134,9 @@ func TestHealthCommand(t *testing.T) {
 		// Another program, answering another status.
 		status.Store(http.StatusNotFound)
 		r = s.run(t, "health")
-		want = fmt.Sprintf("healthz: 127.0.0.1:%d, the address that server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) "+
-			"sets, answered GET /healthz with status 404, not 200. Check that it is the internal address of pisati serve.", port)
+		want = fmt.Sprintf("healthz: 127.0.0.1:%[1]d answered GET /healthz with status 404, not 200. pisati serve answers "+
+			"only 200 or 503 there, so another program may be listening at 127.0.0.1:%[1]d. This is the address that "+
+			"server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) sets.", port)
 		if r.code != 1 || r.line(t) != want {
 			t.Errorf("pisati health = %d, %q; want 1, %q", r.code, r.stderr, want)
 		}
@@ -171,8 +173,8 @@ func TestHealthCommand(t *testing.T) {
 		start := time.Now()
 		r := s.run(t, "health")
 		took := time.Since(start)
-		want := fmt.Sprintf("healthz: 127.0.0.1:%d, the address that server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) "+
-			"sets, did not answer GET /healthz within 4 seconds.", port)
+		want := fmt.Sprintf("healthz: 127.0.0.1:%d did not answer GET /healthz within 4 seconds. This is the address that "+
+			"server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) sets.", port)
 		if r.code != 1 || r.line(t) != want {
 			t.Errorf("pisati health = %d, %q; want 1, %q", r.code, r.stderr, want)
 		}

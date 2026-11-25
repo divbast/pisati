@@ -67,9 +67,9 @@ const description = "Pisati serves a blog. These commands run it, and look after
 type cli struct {
 	Serve   serveCmd   `cmd:"" help:"Serve the blog on server.listen, and /healthz and /metrics on server.internal_listen. Keep running until a SIGTERM or SIGINT signal arrives."`
 	Migrate migrateCmd `cmd:"" help:"Update the database's schema to the one this Pisati uses. Print the schema's number before and after, as: schema <before> -> <after>."`
-	Backup  backupCmd  `cmd:"" help:"Copy the database to a new file. pisati serve can keep running. The copy does not hold the main key: keep a copy of the main key too, because the database cannot be read without it."`
+	Backup  backupCmd  `cmd:"" help:"Copy the database to a new file. pisati serve can keep running. The copy does not hold the main key, so keep a copy of the main key too: pisati serve refuses to start with a restored database whose main key it does not have."`
 	Restore restoreCmd `cmd:"" help:"Replace the database with a copy that pisati backup made. Stop pisati serve first. Pisati then needs the main key that was in use when the copy was made."`
-	Keys    keysCmd    `cmd:"" help:"Change the encryption keys: the main key, and the data keys that the main key encrypts. This version of Pisati does not yet encrypt any other data with them."`
+	Keys    keysCmd    `cmd:"" help:"Change the encryption keys: the main key, and the data keys that the main key encrypts. This version of Pisati encrypts no other data with them yet."`
 	Health  healthCmd  `cmd:"" help:"Send GET /healthz to the running pisati serve, on server.internal_listen. Print nothing and exit 0 when it answers 200, which means that it runs and its database answers. Otherwise print why, and exit 1."`
 	Version versionCmd `cmd:"" help:"Print the version of Pisati."`
 }
@@ -111,16 +111,66 @@ func run(ctx context.Context, h Host) int {
 		return exitUsage
 	}
 	err = cmd.Run()
-	switch {
-	case err == nil:
+	if err == nil {
 		return exitOK
+	}
+	if halted, ok := errors.AsType[*haltError](err); ok {
+		if !halted.logged {
+			say(h.Stderr, "pisati: Pisati stopped at once, because a second SIGTERM or SIGINT signal arrived.\n")
+		}
+		if halted.closing != nil {
+			report(h.Stderr, halted.closing)
+		}
+		return exitFailed
+	}
+	switch {
 	case errors.Is(err, errReported):
+	case errors.Is(err, errHalted):
+		report(h.Stderr, errors.New("the command stopped at once, before it finished, because a second SIGTERM or SIGINT "+
+			"signal arrived"))
 	case stopped(ctx, err):
 		report(h.Stderr, errors.New("the command stopped before it finished, because a SIGTERM or SIGINT signal arrived"))
 	default:
 		report(h.Stderr, err)
 	}
 	return exitFailed
+}
+
+// errHalted is the error of a command that a second SIGTERM or SIGINT
+// stopped at once: run exits 1, saying so.
+var errHalted = errors.New("halted")
+
+// haltError is serve stopped at once by a second SIGTERM or SIGINT, at any
+// point of its life. logged says whether serve's log holds the halt's
+// record already; closing holds every failure in closing what serve had
+// opened, joined, or nil.
+type haltError struct {
+	logged  bool
+	closing error
+}
+
+func (e *haltError) Error() string {
+	if e.closing != nil {
+		return "halted: " + e.closing.Error()
+	}
+	return "halted"
+}
+
+func (e *haltError) Unwrap() error { return e.closing }
+
+// untilHalt runs work, and returns its error, or errHalted as soon as
+// h.Halt closes: a second SIGTERM or SIGINT ends a command at once,
+// whatever it is doing. work then goes on without the command, and ends
+// with the process, which exits just after.
+func untilHalt(h Host, work func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- work() }()
+	select {
+	case err := <-done:
+		return err
+	case <-h.Halt:
+		return errHalted
+	}
 }
 
 // stopped reports whether err is ctx's own error, after ctx has ended: the
@@ -152,23 +202,58 @@ func report(w io.Writer, err error) {
 	}
 }
 
-// problems returns each problem err reports, one a line, each ending with
-// a full stop so that it reads as a whole sentence. errors.Join puts each
-// error it joins on a line of its own, so independent failures, and each
-// problem config.Load finds, are a line each.
+// problems returns each problem err reports, one a line, each a whole
+// sentence: it ends with a full stop, which takes the place of a trailing
+// ":". Each error a join holds is a problem of its own, and so is each of
+// a wrapped join's, with the wrapper's words before it; any other error is
+// one problem, its lines joined with spaces.
 func problems(err error) []string {
 	var lines []string
-	for line := range strings.Lines(err.Error()) {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	for _, p := range leaves(err) {
+		p = strings.Join(strings.Fields(p), " ")
+		if p == "" {
 			continue
 		}
-		if !strings.HasSuffix(line, ".") {
-			line += "."
+		p = strings.TrimSuffix(p, ":")
+		if !strings.HasSuffix(p, ".") {
+			p += "."
 		}
-		lines = append(lines, line)
+		lines = append(lines, p)
 	}
 	return lines
+}
+
+// joined is an error that joins others, as errors.Join's do.
+type joined interface {
+	error
+	Unwrap() []error
+}
+
+// leaves returns the messages of the separate problems err reports: one
+// for each error a join holds, the wrapper's words kept before each of a
+// wrapped join's, and err's own message for any other error.
+func leaves(err error) []string {
+	//nolint:errorlint // err itself, not an error it wraps: only a join at the top holds separate problems
+	if j, ok := err.(joined); ok {
+		var out []string
+		for _, e := range j.Unwrap() {
+			if e != nil {
+				out = append(out, leaves(e)...)
+			}
+		}
+		return out
+	}
+	//nolint:errorlint // the error err wraps directly, for its wrapper's words
+	if inner, ok := errors.Unwrap(err).(joined); ok {
+		if words, ok := strings.CutSuffix(err.Error(), inner.Error()); ok {
+			var out []string
+			for _, l := range leaves(inner) {
+				out = append(out, words+l)
+			}
+			return out
+		}
+	}
+	return []string{err.Error()}
 }
 
 // say writes to stderr, w. A failure to write is not reported: stderr is
@@ -283,11 +368,29 @@ func directory(h Host, name string) (string, error) {
 	if !ok || v == "" {
 		return "", nil
 	}
-	if !filepath.IsAbs(v) || filepath.Clean(v) != v || strings.Contains(v, ":") {
-		return "", fmt.Errorf(`%s is set to %q, which Pisati cannot use. Set it to one directory, as a full path that starts with "/", `+
-			`with no ":", no "//", no "." or ".." part, and no "/" at the end`, name, v)
+	if rule := directoryRule(v); rule != "" {
+		return "", fmt.Errorf("%s is set to %q, %s", name, v, rule)
 	}
 	return v, nil
+}
+
+// directoryRule returns the rule a directory variable's value v breaks,
+// as the end of the sentence that names it, or "" when it is one absolute,
+// clean path.
+func directoryRule(v string) string {
+	switch {
+	case strings.Contains(v, ":"):
+		return "which names more than one directory. Set it to one directory"
+	case !filepath.IsAbs(v):
+		return `which is not a full path. Set it to a full path that starts with "/"`
+	case strings.Contains(v, "//"):
+		return `which has "//" in it. Write one "/" there instead`
+	case len(v) > 1 && strings.HasSuffix(v, "/"):
+		return `which ends with "/". Remove the "/" at the end`
+	case filepath.Clean(v) != v:
+		return `which has "." or ".." as one of its directory names. Write the path without them`
+	}
+	return ""
 }
 
 // absolute returns path as an absolute path: a relative one is resolved
@@ -295,7 +398,7 @@ func directory(h Host, name string) (string, error) {
 func absolute(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", explain(err, "cannot find the full path of %s, because the current directory cannot be read: %s. "+
+		return "", explain(err, "Pisati cannot find the full path of %s, because it cannot read the current directory: %s. "+
 			`Give the full path instead, starting with "/"`, path, reason(err))
 	}
 	return abs, nil
@@ -370,26 +473,37 @@ func checkStateDir(dir string) error {
 		return explain(err, "the state directory %s does not exist. Create it, and give the user that runs Pisati permission "+
 			"to write to it. Or set %s to another directory", dir, stateDirSetting)
 	case err != nil:
-		return explain(err, "cannot read the state directory %s: %s. Set %s to a directory that the user that runs Pisati "+
-			"can read and write", dir, reason(err), stateDirSetting)
+		return explain(err, "Pisati cannot read the state directory %s: %s. Set %s to a directory that the user that "+
+			"runs Pisati can read and write", dir, reason(err), stateDirSetting)
 	case !info.IsDir():
 		return fmt.Errorf("the state directory %s is not a directory. Set %s to a directory", dir, stateDirSetting)
 	}
 	f, err := os.CreateTemp(dir, checkFile+"*")
 	switch {
 	case errors.Is(err, syscall.EROFS):
-		return explain(err, "cannot write to the state directory %s, because it is on a read-only file system. "+
+		return explain(err, "Pisati cannot write to the state directory %s, because it is on a read-only file system. "+
 			"Mount a writable volume at %s, or set %s to a writable directory", dir, dir, stateDirSetting)
 	case errors.Is(err, fs.ErrPermission):
-		return explain(err, "cannot write to the state directory %s, because the user that runs Pisati does not have "+
-			"permission to. Give that user permission to write to %s, or set %s to a directory it can write to",
+		return explain(err, "Pisati cannot write to the state directory %s, because the user that runs Pisati does not "+
+			"have permission to. Give that user permission to write to %s, or set %s to a directory it can write to",
 			dir, dir, stateDirSetting)
+	case errors.Is(err, syscall.ENOSPC):
+		return explain(err, "Pisati cannot write to the state directory %s, because its disk is full. Free some space "+
+			"on that disk, or set %s to a directory on another disk", dir, stateDirSetting)
+	case errors.Is(err, syscall.EDQUOT):
+		return explain(err, "Pisati cannot write to the state directory %s, because the user that runs Pisati has used "+
+			"up its disk quota. Free some of that user's space, or raise its quota", dir)
 	case err != nil:
-		return explain(err, "cannot write to the state directory %s: %s. Set %s to a directory that the user that runs "+
-			"Pisati can write to", dir, reason(err), stateDirSetting)
+		return explain(err, "Pisati cannot write to the state directory %s: %s. Set %s to a directory that the user "+
+			"that runs Pisati can write to", dir, reason(err), stateDirSetting)
 	}
 	name := f.Name()
-	if err := errors.Join(f.Close(), os.Remove(name)); err != nil {
+	closeErr, removeErr := f.Close(), os.Remove(name)
+	if errors.Is(removeErr, fs.ErrNotExist) {
+		// Something else removed it already: nothing of it is left.
+		removeErr = nil
+	}
+	if err := errors.Join(closeErr, removeErr); err != nil {
 		return explain(err, "Pisati wrote a file to the state directory %s to check that it can, but cannot remove it: %s. "+
 			"Remove the file whose name starts with %s from %s", dir, reason(err), checkFile, dir)
 	}
@@ -463,25 +577,27 @@ func openKeyring(ctx context.Context, h Host, st *state, src config.SecretSource
 // not decrypt the data keys in the database in the state directory dir:
 // it says where the key came from, and where to put the right one.
 func mainKeyMismatch(cause error, src config.SecretSource, dir string, origin keyOrigin) error {
-	const other = "set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it"
+	const (
+		needs = "The database needs the main key it was used with, for example the one backed up with it. "
+		other = "set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it"
+	)
 	switch s := src.(type) {
 	case config.Generated:
 		path := generatedKeyPath(dir)
-		made := "which Pisati created when it first used this state directory"
+		what := fmt.Sprintf("the main key in %s cannot decrypt the data keys in this database. ", path)
 		if origin == keyGeneratedNow {
-			made = "which Pisati created on this start, because there was none"
+			what = fmt.Sprintf("there was no main key in %s, so Pisati created one on this start. "+
+				"That key cannot decrypt the data keys in this database. ", path)
 		}
-		return explain(cause, "the main key in %[1]s, %[2]s, cannot decrypt the data keys in this database. "+
-			"The database needs the main key it was used with, for example the one backed up with it. "+
-			"Put that key at %[1]s, or %[3]s, or put it in the credential pisati-main-key", path, made, other)
+		return explain(cause, "%s%sPut that key at %s, or %s, or put it in the credential pisati-main-key",
+			what, needs, path, other)
 	case config.FromFile:
-		return explain(cause, "the main key in %[1]s, the file that keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE names, "+
-			"cannot decrypt the data keys in this database. The database needs the main key it was used with, "+
-			"for example the one backed up with it. Put that key in %[1]s, or %[2]s", s.Path, other)
+		return explain(cause, "the main key in %[1]s cannot decrypt the data keys in this database. "+
+			"keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE names that file. %[2]sPut that key in %[1]s, or %[3]s",
+			s.Path, needs, other)
 	case config.FromCredential:
 		return explain(cause, "the main key in the credential %[1]s cannot decrypt the data keys in this database. "+
-			"The database needs the main key it was used with, for example the one backed up with it. "+
-			"Put that key in the credential %[1]s, or %[2]s", s.Name, other)
+			"%[2]sPut that key in the credential %[1]s, or %[3]s", s.Name, needs, other)
 	default:
 		// config.Load returns no other source: a bug.
 		return explain(cause, "the main key cannot decrypt the data keys in this database, and it came from a source "+

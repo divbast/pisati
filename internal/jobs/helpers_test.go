@@ -144,11 +144,13 @@ func wantRow(t *testing.T, row storedb.Job, state string, attempts int64, lastEr
 }
 
 // logRecord is one record a recorder kept: its level, message and
-// attributes, each value as fmt prints it.
+// attributes, each value as fmt prints it, and each value's kind, which
+// says how a JSON handler writes it.
 type logRecord struct {
 	level slog.Level
 	msg   string
 	attrs map[string]string
+	kinds map[string]slog.Kind
 }
 
 // recorder is a slog.Handler that keeps every record, for a test to read.
@@ -167,13 +169,16 @@ func (*recorder) Enabled(context.Context, slog.Level) bool { return true }
 
 func (r *recorder) Handle(_ context.Context, rec slog.Record) error {
 	attrs := map[string]string{}
+	kinds := map[string]slog.Kind{}
 	rec.Attrs(func(a slog.Attr) bool {
-		attrs[a.Key] = a.Value.Resolve().String()
+		v := a.Value.Resolve()
+		attrs[a.Key] = v.String()
+		kinds[a.Key] = v.Kind()
 		return true
 	})
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.records = append(r.records, logRecord{level: rec.Level, msg: rec.Message, attrs: attrs})
+	r.records = append(r.records, logRecord{level: rec.Level, msg: rec.Message, attrs: attrs, kinds: kinds})
 	return nil
 }
 

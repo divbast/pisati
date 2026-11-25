@@ -5,8 +5,11 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestVersion(t *testing.T) {
@@ -104,20 +107,82 @@ func TestConfigProblemsOneLineEach(t *testing.T) {
 
 func TestDirectoryVariablesRefused(t *testing.T) {
 	for _, name := range []string{"CONFIGURATION_DIRECTORY", "CREDENTIALS_DIRECTORY"} {
-		for _, value := range []string{"etc/pisati", "/etc/pisati/", "/etc//pisati", "/etc/./pisati", "/a:/b"} {
+		for _, tc := range []struct{ value, rule string }{
+			{"/a:/b", "which names more than one directory. Set it to one directory."},
+			{"etc/pisati", `which is not a full path. Set it to a full path that starts with "/".`},
+			{"/etc//pisati", `which has "//" in it. Write one "/" there instead.`},
+			{"/etc/pisati/", `which ends with "/". Remove the "/" at the end.`},
+			{"/etc/./pisati", `which has "." or ".." as one of its directory names. Write the path without them.`},
+			{"/etc/pisati/..", `which has "." or ".." as one of its directory names. Write the path without them.`},
+		} {
 			s := newSite(t)
-			s.env[name] = value
+			s.env[name] = tc.value
 			r := s.run(t, "migrate")
-			want := "pisati: " + name + ` is set to "` + value + `", which Pisati cannot use. Set it to one directory, ` +
-				`as a full path that starts with "/", with no ":", no "//", no "." or ".." part, and no "/" at the end.`
+			want := "pisati: " + name + ` is set to "` + tc.value + `", ` + tc.rule
 			if r.code != 1 || r.line(t) != want {
-				t.Errorf("%s=%q: pisati migrate = %d, %q; want 1, %q", name, value, r.code, r.stderr, want)
+				t.Errorf("%s=%q: pisati migrate = %d, %q; want 1, %q", name, tc.value, r.code, r.stderr, want)
 			}
 		}
 	}
 	s := newSite(t)
 	s.env["CREDENTIALS_DIRECTORY"] = ""
 	s.mustRun(t, "migrate")
+}
+
+func TestSecondSignalStopsOtherCommands(t *testing.T) {
+	const line = "pisati: the command stopped at once, before it finished, because a second SIGTERM or SIGINT signal arrived."
+	t.Run("keys rotate, waiting for the write lock", func(t *testing.T) {
+		s := newSite(t)
+		s.mustRun(t, "migrate")
+		release := holdWriteLock(t, s.state)
+		halt, wait := s.halting(t, "keys", "rotate")
+		time.Sleep(500 * time.Millisecond)
+		halting := time.Now()
+		halt()
+		r := wait()
+		// Its log, on stderr too, holds the warning of the key it
+		// generated: the halt's line comes last.
+		lines := r.lines(t)
+		if took := time.Since(halting); r.code != 1 || lines[len(lines)-1] != line || took >= time.Second {
+			t.Errorf("pisati keys rotate halted = %d, %q after %v; want 1, %q last, at once", r.code, r.stderr, took, line)
+		}
+		release()
+		settle(t)
+	})
+	t.Run("health, waiting for an answer", func(t *testing.T) {
+		var lc net.ListenConfig
+		ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		accepted := make(chan net.Conn, 1)
+		go func() {
+			conn, err := ln.Accept()
+			if err == nil {
+				accepted <- conn
+			}
+			close(accepted)
+		}()
+		s := newSite(t)
+		s.env["PISATI_SERVER_INTERNAL_LISTEN"] = fmt.Sprintf("127.0.0.1:%d", portOf(t, ln))
+		halt, wait := s.halting(t, "health")
+		time.Sleep(500 * time.Millisecond)
+		halting := time.Now()
+		halt()
+		r := wait()
+		if took := time.Since(halting); r.code != 1 || r.line(t) != line || took >= time.Second {
+			t.Errorf("pisati health halted = %d, %q after %v; want 1, %q at once", r.code, r.stderr, took, line)
+		}
+		if err := ln.Close(); err != nil {
+			t.Error(err)
+		}
+		for conn := range accepted {
+			if err := conn.Close(); err != nil {
+				t.Error(err)
+			}
+		}
+		settle(t)
+	})
 }
 
 func TestDirectoryVariablesAmongOtherProblems(t *testing.T) {

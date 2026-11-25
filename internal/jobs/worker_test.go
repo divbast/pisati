@@ -657,8 +657,9 @@ func TestRunDrainsOnShutdown(t *testing.T) {
 						t.Errorf("the job is due at %d with lease %v, want due at %d, as before, and no lease",
 							row.RunAt, row.LeaseUntil, runAt.UnixMilli())
 					}
-					if got := log.find("job drain deadline passed"); len(got) != 1 || got[0].level != slog.LevelWarn {
-						t.Errorf("logged %+v, want one warning", got)
+					if got := log.find("job handlers told to stop: the stop deadline is near"); len(got) != 1 ||
+						got[0].level != slog.LevelWarn || got[0].attrs["after"] != "7s" || got[0].kinds["after"] != slog.KindString {
+						t.Errorf("logged %+v, want one warning, after the string 7s", got)
 					}
 					if c.state != "ready" {
 						return
@@ -693,7 +694,7 @@ func TestRunDrainsOnShutdown(t *testing.T) {
 				t.Errorf("Run returned %v after its context ended, want the whole drain, %v", took, opts.Drain)
 			}
 			id := strconv.FormatInt(onlyRow(t, s).ID, 10)
-			running := log.find("job still running at the stop deadline")
+			running := log.find("job not finished by the stop deadline")
 			if len(running) != 1 || running[0].level != slog.LevelError || running[0].attrs["kind"] != k.String() ||
 				running[0].attrs["job_id"] != id || running[0].attrs["attempt"] != "1" {
 				t.Errorf("logged %+v, want one error naming the job, its kind and its try", running)
@@ -701,13 +702,105 @@ func TestRunDrainsOnShutdown(t *testing.T) {
 			wantRow(t, onlyRow(t, s), "leased", 1, "")
 
 			// Its goroutine goes on without Run, and a new Run waits
-			// for it to end.
+			// for it to end. Its outcome, once it returns, is not
+			// recorded, as the drain has ended: the job keeps its lease,
+			// for the next start's ReleaseOrphans.
 			if err := w.Run(t.Context()); err == nil {
 				t.Error("a second Run started while the first one's handler still ran")
 			}
 			close(release)
 			synctest.Wait()
-			wantRow(t, onlyRow(t, s), "done", 1, "")
+			wantRow(t, onlyRow(t, s), "leased", 1, "")
+			if failed := log.find("job outcome not recorded"); len(failed) != 1 {
+				t.Errorf("logged %d failed records, want the late outcome's one", len(failed))
+			}
+		})
+	})
+
+	t.Run("a try claimed again by the same Worker", func(t *testing.T) {
+		inBubble(t, func(t *testing.T, s *store.Store) {
+			k := kind(t, "test.deaf")
+			// Two tries of one job, each ignoring its context: the first
+			// until its lease has expired and the second has begun.
+			firstIn, firstOut := make(chan struct{}), make(chan struct{})
+			secondIn, secondOut := make(chan struct{}), make(chan struct{})
+			var tries atomic.Int32
+			opts := jobs.DefaultOptions()
+			opts.Workers = 2
+			w, log := newWorker(t, s, map[jobs.Kind]jobs.Handler{k: func(context.Context, []byte) error {
+				if tries.Add(1) == 1 {
+					close(firstIn)
+					<-firstOut
+					return nil
+				}
+				close(secondIn)
+				<-secondOut
+				return nil
+			}}, opts, half)
+			enqueue(t, s, jobs.Job{Kind: k})
+
+			stop := start(t, w)
+			<-firstIn
+			<-secondIn // claimed again by the Worker's other goroutine, once the lease expired
+			close(firstOut)
+			synctest.Wait()
+			stopped(t, stop)
+			running := log.find("job not finished by the stop deadline")
+			if len(running) != 1 || running[0].attrs["attempt"] != "2" {
+				t.Errorf("logged %+v, want the second try named as not finished", running)
+			}
+			close(secondOut)
+			synctest.Wait()
+		})
+	})
+
+	t.Run("an outcome waiting for the write lock at the stop deadline", func(t *testing.T) {
+		inBubble(t, func(t *testing.T, s *store.Store) {
+			k := kind(t, "test.cut")
+			entered := make(chan struct{})
+			opts := oneWorker()
+			w, log := newWorker(t, s, map[jobs.Kind]jobs.Handler{k: func(ctx context.Context, _ []byte) error {
+				close(entered)
+				<-ctx.Done()
+				return ctx.Err()
+			}}, opts, half)
+			enqueue(t, s, jobs.Job{Kind: k})
+
+			stop := start(t, w)
+			<-entered
+			// The write lock is taken a second before the handler is
+			// cut, and held past the drain: the cut job's free retry
+			// waits for it.
+			held, release := make(chan struct{}), make(chan struct{})
+			holder := make(chan error, 1)
+			go func() {
+				time.Sleep(opts.Drain - opts.Reserve - time.Second)
+				holder <- s.InTx(context.WithoutCancel(t.Context()), func(*storedb.Queries) error {
+					close(held)
+					<-release
+					return nil
+				})
+			}()
+			stopping := time.Now()
+			stopped(t, stop)
+			<-held
+			if took := time.Since(stopping); took != opts.Drain {
+				t.Errorf("Run returned %v after its context ended, want the drain, %v", took, opts.Drain)
+			}
+			// The record ends with the drain, not with SQLite's busy
+			// timeout: SQLite looks at the record's context between its
+			// retries, a few milliseconds apart, so the record has failed
+			// by then, and nothing of the Worker is left.
+			time.Sleep(10 * time.Millisecond)
+			synctest.Wait()
+			if failed := log.find("job outcome not recorded"); len(failed) != 1 {
+				t.Errorf("logged %d failed records, want the free retry's one, ended at the drain", len(failed))
+			}
+			close(release)
+			if err := <-holder; err != nil {
+				t.Fatal(err)
+			}
+			wantRow(t, onlyRow(t, s), "leased", 1, "")
 		})
 	})
 

@@ -135,28 +135,92 @@ func TestServeAndShutdown(t *testing.T) {
 	mustOwnerOnly(t, s.state, "pisati.db", "pisati.lock", filepath.Join("keys", "main.key"))
 }
 
+// stalledRequest opens a connection to s's public listener and sends a
+// request whose body never comes in full, so that its handler keeps
+// reading it. It returns the connection, which the test closes before it
+// settles.
+func stalledRequest(t *testing.T, s *site) net.Conn {
+	t.Helper()
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", s.public))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(conn, "POST /_/theme HTTP/1.1\r\nHost: localhost:%d\r\n"+
+		"Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 100\r\n\r\ntheme=", s.public); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	return conn
+}
+
+// closeAndSettle closes conn, then waits for every goroutine of the run to
+// end (settle).
+func closeAndSettle(t *testing.T, conn net.Conn) {
+	t.Helper()
+	if err := conn.Close(); err != nil {
+		t.Error(err)
+	}
+	settle(t)
+}
+
+// haltRecord is the one record a halt logs.
+const haltRecord = "stop cut short: a second SIGTERM or SIGINT signal arrived, so Pisati stops now, " +
+	"without waiting for requests and jobs to finish"
+
+// mustHaveHalted fails the test unless serve, run as v, ended as a halt
+// ends it: exit 1, took after the halt, which is at once; "stopping"
+// logged, and then the halt's one record, last; nothing on stderr; and the
+// state directory's lock free.
+func mustHaveHalted(t *testing.T, s *site, v *serving, code int, took time.Duration) {
+	t.Helper()
+	if code != 1 {
+		t.Errorf("serve stopped by a second signal exited %d, want 1", code)
+	}
+	if took >= time.Second {
+		t.Errorf("serve took %v to stop after the second signal, want it at once", took)
+	}
+	if v.stderr.String() != "" {
+		t.Errorf("serve wrote to stderr: %q; the log holds why it stopped", v.stderr.String())
+	}
+	var msgs []string
+	for _, rec := range v.stdout.records(t) {
+		msgs = append(msgs, fmt.Sprint(rec["msg"]))
+	}
+	stopping := slices.Index(msgs, "stopping")
+	if n := len(msgs); n == 0 || msgs[n-1] != haltRecord || stopping < 0 || stopping > n-2 {
+		t.Errorf("serve logged %q; want \"stopping\", and the halt's record last", msgs)
+	}
+	if cut := v.stdout.logged(t, haltRecord); len(cut) != 1 || cut[0]["level"] != "ERROR" {
+		t.Errorf("serve logged %v, want one error record of the halt", cut)
+	}
+	lock, err := store.AcquireLock(t.Context(), s.state)
+	if err != nil {
+		t.Errorf("the state directory's lock is still held once serve stopped: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Error(err)
+	}
+}
+
+// mustLogNothingAfterHalt fails the test unless the halt's record is still
+// serve's last, once everything serve left running has ended: the log
+// takes no record after the halt's.
+func mustLogNothingAfterHalt(t *testing.T, v *serving) {
+	t.Helper()
+	records := v.stdout.records(t)
+	if last := records[len(records)-1]["msg"]; last != haltRecord {
+		t.Errorf("serve logged %q after the halt's record; want nothing after it", last)
+	}
+}
+
 func TestServeDrainsWithinDeadline(t *testing.T) {
 	s := newSite(t)
 	v := s.serve(t)
 
 	// A request whose body never comes in full keeps its handler reading
 	// past the stop deadline.
-	var d net.Dialer
-	conn, err := d.DialContext(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", s.public))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := conn.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	if _, err := fmt.Fprintf(conn, "POST /_/theme HTTP/1.1\r\nHost: localhost:%d\r\n"+
-		"Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 100\r\n\r\ntheme=", s.public); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(300 * time.Millisecond)
-
+	conn := stalledRequest(t, s)
 	stopping := time.Now()
 	code := v.stop()
 	took := time.Since(stopping)
@@ -170,6 +234,7 @@ func TestServeDrainsWithinDeadline(t *testing.T) {
 		cut[0]["listener"] != "server.listen (PISATI_SERVER_LISTEN)" || cut[0]["waited"] != "8s" {
 		t.Errorf("serve logged %v, want one record of the public listener's connections closed after 8 s", cut)
 	}
+	closeAndSettle(t, conn)
 }
 
 func TestServeStoppedDuringStart(t *testing.T) {
@@ -242,8 +307,8 @@ func TestServeRefusesUnwritableState(t *testing.T) {
 		})
 		holdPorts(t, s)
 		r := s.run(t, "serve")
-		want := "pisati: cannot write to the state directory " + s.state + ", because the user that runs Pisati does not " +
-			"have permission to. Give that user permission to write to " + s.state + ", or set " + stateDirAdvice +
+		want := "pisati: Pisati cannot write to the state directory " + s.state + ", because the user that runs Pisati " +
+			"does not have permission to. Give that user permission to write to " + s.state + ", or set " + stateDirAdvice +
 			" to a directory it can write to."
 		if r.code != 1 || r.line(t) != want {
 			t.Errorf("serve = %d, %q; want 1, %q", r.code, r.stderr, want)
@@ -282,8 +347,8 @@ func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 			name: "a key generated on this start",
 			want: func(s *site) string {
 				path := filepath.Join(s.state, "keys", "main.key")
-				return "pisati: the main key in " + path + ", which Pisati created on this start, because there was none, " +
-					"cannot decrypt the data keys in this database. " + advice + "Put that key at " + path +
+				return "pisati: there was no main key in " + path + ", so Pisati created one on this start. " +
+					"That key cannot decrypt the data keys in this database. " + advice + "Put that key at " + path +
 					", or set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it, " +
 					"or put it in the credential pisati-main-key."
 			},
@@ -293,8 +358,8 @@ func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 			before: true,
 			want: func(s *site) string {
 				path := filepath.Join(s.state, "keys", "main.key")
-				return "pisati: the main key in " + path + ", which Pisati created when it first used this state directory, " +
-					"cannot decrypt the data keys in this database. " + advice + "Put that key at " + path +
+				return "pisati: the main key in " + path + " cannot decrypt the data keys in this database. " +
+					advice + "Put that key at " + path +
 					", or set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it, " +
 					"or put it in the credential pisati-main-key."
 			},
@@ -306,8 +371,8 @@ func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 			},
 			want: func(s *site) string {
 				path := s.env["PISATI_KEYS_MAIN_KEY_FILE"]
-				return "pisati: the main key in " + path + ", the file that keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE " +
-					"names, cannot decrypt the data keys in this database. " + advice + "Put that key in " + path +
+				return "pisati: the main key in " + path + " cannot decrypt the data keys in this database. " +
+					"keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE names that file. " + advice + "Put that key in " + path +
 					", or set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it."
 			},
 		},
@@ -365,11 +430,11 @@ func TestServeReportsEveryPortRefused(t *testing.T) {
 	holdPorts(t, s)
 	r := s.run(t, "serve")
 	want := []string{
-		fmt.Sprintf("pisati: cannot listen on 127.0.0.1:%d, the address that server.listen (PISATI_SERVER_LISTEN) sets, "+
-			"because another program already uses it. Stop that program, or set server.listen (PISATI_SERVER_LISTEN) "+
+		fmt.Sprintf("pisati: Pisati cannot listen on 127.0.0.1:%d, the address that server.listen (PISATI_SERVER_LISTEN) "+
+			"sets, because another process already uses it. Stop that process, or set server.listen (PISATI_SERVER_LISTEN) "+
 			"to another address.", s.public),
-		fmt.Sprintf("pisati: cannot listen on 127.0.0.1:%d, the address that server.internal_listen "+
-			"(PISATI_SERVER_INTERNAL_LISTEN) sets, because another program already uses it. Stop that program, or set "+
+		fmt.Sprintf("pisati: Pisati cannot listen on 127.0.0.1:%d, the address that server.internal_listen "+
+			"(PISATI_SERVER_INTERNAL_LISTEN) sets, because another process already uses it. Stop that process, or set "+
 			"server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) to another address.", s.internal),
 	}
 	if got := r.lines(t); r.code != 1 || !slices.Equal(got, want) {
@@ -379,56 +444,65 @@ func TestServeReportsEveryPortRefused(t *testing.T) {
 }
 
 func TestSecondSignalCutsStopShort(t *testing.T) {
-	s := newSite(t)
-	v := s.serve(t)
-
-	// A request whose body never comes in full would keep the stop
-	// waiting for the whole deadline.
-	var d net.Dialer
-	conn, err := d.DialContext(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", s.public))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := conn.Close(); err != nil {
-			t.Error(err)
-		}
+	t.Run("during the drain", func(t *testing.T) {
+		s := newSite(t)
+		v := s.serve(t)
+		// A request whose body never comes in full would keep the stop
+		// waiting for the whole deadline.
+		conn := stalledRequest(t, s)
+		v.cancel()
+		time.Sleep(200 * time.Millisecond)
+		halting := time.Now()
+		v.halt()
+		code := v.wait()
+		mustHaveHalted(t, s, v, code, time.Since(halting))
+		closeAndSettle(t, conn)
+		mustLogNothingAfterHalt(t, v)
 	})
-	if _, err := fmt.Fprintf(conn, "POST /_/theme HTTP/1.1\r\nHost: localhost:%d\r\n"+
-		"Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 100\r\n\r\ntheme=", s.public); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(300 * time.Millisecond)
 
-	stopping := time.Now()
-	v.cancel()
-	time.Sleep(200 * time.Millisecond)
-	v.halt()
-	code := v.wait()
-	if took := time.Since(stopping); took >= 2*time.Second {
-		t.Errorf("serve took %v to stop after the second signal, want it at once", took)
-	}
-	if code != 1 {
-		t.Errorf("serve stopped by a second signal exited %d, want 1", code)
-	}
-	if v.stderr.String() != "" {
-		t.Errorf("serve wrote to stderr: %q; the log holds why it stopped", v.stderr.String())
-	}
-	cut := v.stdout.logged(t, "stop cut short: a second SIGTERM or SIGINT signal arrived, so Pisati stops now, "+
-		"without waiting for requests and jobs to finish")
-	if len(cut) != 1 || cut[0]["level"] != "ERROR" {
-		t.Errorf("serve logged %v, want one error record of the stop cut short", cut)
-	}
-	if records := v.stdout.records(t); records[len(records)-1]["msg"] != "stopped" {
-		t.Errorf("serve's last record is %v, want stopped", records[len(records)-1]["msg"])
-	}
-	lock, err := store.AcquireLock(t.Context(), s.state)
-	if err != nil {
-		t.Errorf("the state directory's lock is still held once serve stopped: %v", err)
-	}
-	if err := lock.Release(); err != nil {
-		t.Error(err)
-	}
+	t.Run("during the telemetry flush", func(t *testing.T) {
+		// A collector that holds every export until the test lets it go,
+		// so that the stop waits in the flush for the whole deadline.
+		hold := make(chan struct{})
+		collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := io.Copy(io.Discard, r.Body); err != nil {
+				t.Errorf("read the export: %v", err)
+			}
+			<-hold
+		}))
+		s := newSite(t)
+		s.env["PISATI_TELEMETRY_OTLP_ENDPOINT"] = collector.URL
+		v := s.serve(t)
+		get(t, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/login", s.public)) // a span to send
+		v.cancel()
+		time.Sleep(500 * time.Millisecond)
+		halting := time.Now()
+		v.halt()
+		code := v.wait()
+		mustHaveHalted(t, s, v, code, time.Since(halting))
+		close(hold)
+		collector.Close()
+		settle(t)
+		mustLogNothingAfterHalt(t, v)
+	})
+
+	t.Run("during the start", func(t *testing.T) {
+		s := newSite(t)
+		s.mustRun(t, "migrate")
+		release := holdWriteLock(t, s.state)
+		v := s.serveStarting(t)
+		time.Sleep(500 * time.Millisecond) // serve waits for the write lock, in its start
+		halting := time.Now()
+		v.halt()
+		code := v.wait()
+		mustHaveHalted(t, s, v, code, time.Since(halting))
+		if strings.Contains(v.stdout.String(), "serving started") {
+			t.Errorf("serve started serving before the halt:\n%s", v.stdout.String())
+		}
+		release()
+		settle(t)
+		mustLogNothingAfterHalt(t, v)
+	})
 }
 
 func TestServeWithPprof(t *testing.T) {
@@ -457,5 +531,34 @@ func TestServeWithPprof(t *testing.T) {
 	}
 	if code := v.stop(); code != 0 {
 		t.Errorf("serve exited %d", code)
+	}
+}
+
+func TestServeRefusesSameAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name, public, internal string
+	}{
+		{"the same address", "127.0.0.1:%d", "127.0.0.1:%d"},
+		{"every address and one of them", ":%d", "127.0.0.1:%d"},
+		{"one address and every address", "127.0.0.1:%d", "[::]:%d"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSite(t)
+			public, internal := fmt.Sprintf(tc.public, s.public), fmt.Sprintf(tc.internal, s.public)
+			s.env["PISATI_SERVER_LISTEN"] = public
+			s.env["PISATI_SERVER_INTERNAL_LISTEN"] = internal
+			holdPorts(t, s)
+			r := s.run(t, "serve")
+			want := fmt.Sprintf("pisati: server.listen (PISATI_SERVER_LISTEN) is %s and server.internal_listen "+
+				"(PISATI_SERVER_INTERNAL_LISTEN) is %s. Both would listen on port %d at the same address, which only one "+
+				"of them can do. Set one of them to another port.", public, internal, s.public)
+			if r.code != 1 || r.line(t) != want {
+				t.Errorf("serve = %d, %q; want 1, %q", r.code, r.stderr, want)
+			}
+			if entries, err := os.ReadDir(s.state); err != nil || len(entries) != 0 {
+				t.Errorf("the state directory holds %v (%v), want nothing: serve refuses before anything else", entries, err)
+			}
+			mustNotHaveStarted(t, r)
+		})
 	}
 }

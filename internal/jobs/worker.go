@@ -229,10 +229,11 @@ type Worker struct {
 	// them.
 	running atomic.Bool
 
-	// activeMu guards active, the jobs being processed, by ID: what Run
-	// names when it stops without them.
+	// activeMu guards active, the tries being processed, by try: what
+	// Run names when it stops without them. A job claimed again while an
+	// earlier try still runs has two.
 	activeMu sync.Mutex
-	active   map[int64]storedb.ClaimJobRow
+	active   map[try]storedb.ClaimJobRow
 
 	// rndMu makes reads of rnd one at a time: an io.Reader need not be
 	// safe for concurrent use.
@@ -289,7 +290,7 @@ func NewWorker(s *store.Store, h map[Kind]Handler, clock func() time.Time, rnd i
 		opts:     opts,
 		wake:     make(chan struct{}, 1),
 		rnd:      rnd,
-		active:   map[int64]storedb.ClaimJobRow{},
+		active:   map[try]storedb.ClaimJobRow{},
 	}, nil
 }
 
@@ -310,10 +311,12 @@ func NewWorker(s *store.Store, h map[Kind]Handler, clock func() time.Time, rnd i
 // it was, its attempt not counted, as being cut off says nothing of the
 // job. A Handler that returns nil all the same has its job done, and one
 // that panics, dead. Each outcome is recorded even after ctx has ended,
-// within the Reserve left, so that no job is left leased.
+// under a context that ends with Drain, so that no record outlasts Run:
+// one still waiting for the write lock then fails, logged, and its job
+// keeps its lease.
 //
 // Run returns once every goroutine it started has, or once Drain has
-// passed since ctx ended, whichever comes first. A job still being
+// passed since ctx ended, whichever comes first. A try still being
 // processed then, its Handler ignoring its context or its outcome not yet
 // written, is logged, and its goroutine goes on without Run: the job
 // keeps its lease, and ReleaseOrphans makes it ready again at the next
@@ -338,10 +341,15 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.sweep(ctx)
 	work, stopWork := context.WithCancelCause(context.WithoutCancel(ctx))
 	defer stopWork(nil)
+	// Outcomes are recorded under records, which ends with the drain, so
+	// that no record outlasts Run, however long it waits for the write
+	// lock.
+	records, stopRecords := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopRecords()
 	var workers sync.WaitGroup
 	workers.Go(func() { w.sweepEvery(ctx) })
 	for range w.opts.Workers {
-		workers.Go(func() { w.work(ctx, work) })
+		workers.Go(func() { w.work(ctx, work, records) })
 	}
 	finished := make(chan struct{})
 	go func() {
@@ -361,7 +369,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	case <-finished:
 		return nil
 	case <-cut.C:
-		w.log.WarnContext(ctx, "job drain deadline passed", "drain", handlers)
+		w.log.WarnContext(ctx, "job handlers told to stop: the stop deadline is near", "after", handlers.String())
 		stopWork(errDrained)
 	}
 	reserve := time.NewTimer(w.opts.Reserve)
@@ -370,19 +378,26 @@ func (w *Worker) Run(ctx context.Context) error {
 	case <-finished:
 	case <-reserve.C:
 		for _, j := range w.stillActive() {
-			w.log.ErrorContext(ctx, "job still running at the stop deadline", "kind", j.Kind, "job_id", j.ID, "attempt", j.Attempts)
+			w.log.ErrorContext(ctx, "job not finished by the stop deadline", "kind", j.Kind, "job_id", j.ID, "attempt", j.Attempts)
 		}
+		stopRecords()
 	}
 	return nil
 }
 
-// stillActive returns the jobs being processed, in the order of their
-// IDs.
+// try names one claim of a job: its ID, and the lease token the claim
+// raised it to.
+type try struct {
+	id, token int64
+}
+
+// stillActive returns the tries being processed, in the order of their
+// jobs' IDs and then their claims.
 func (w *Worker) stillActive() []storedb.ClaimJobRow {
 	w.activeMu.Lock()
 	defer w.activeMu.Unlock()
 	return slices.SortedFunc(maps.Values(w.active), func(a, b storedb.ClaimJobRow) int {
-		return cmp.Compare(a.ID, b.ID)
+		return cmp.Or(cmp.Compare(a.ID, b.ID), cmp.Compare(a.LeaseToken, b.LeaseToken))
 	})
 }
 
@@ -407,8 +422,10 @@ func (w *Worker) Notify() {
 }
 
 // work claims and runs jobs until ctx ends, running each Handler under
-// handlers, the context that outlives ctx by the drain.
-func (w *Worker) work(ctx, handlers context.Context) {
+// handlers, the context that outlives ctx by the handlers' share of the
+// drain, and recording each outcome under records, which ends with the
+// drain.
+func (w *Worker) work(ctx, handlers, records context.Context) {
 	for ctx.Err() == nil {
 		j, ok := w.claim(ctx)
 		if !ok {
@@ -418,7 +435,7 @@ func (w *Worker) work(ctx, handlers context.Context) {
 		// Pass the wake on, so that the jobs one Notify announced reach
 		// every idle worker rather than this one alone.
 		w.Notify()
-		w.process(handlers, j)
+		w.process(handlers, records, j)
 	}
 }
 
@@ -461,20 +478,19 @@ func (w *Worker) claim(ctx context.Context) (storedb.ClaimJobRow, bool) {
 	return storedb.ClaimJobRow{}, false
 }
 
-// process runs the job j has leased, under ctx, and records the outcome.
-// Until it has, j is among the jobs Run names should it stop without it.
-func (w *Worker) process(ctx context.Context, j storedb.ClaimJobRow) {
+// process runs the job j has leased, under ctx, and records the outcome
+// under rec. Until it has, this try of j is among those Run names should
+// it stop without it.
+func (w *Worker) process(ctx, rec context.Context, j storedb.ClaimJobRow) {
+	this := try{id: j.ID, token: j.LeaseToken}
 	w.activeMu.Lock()
-	w.active[j.ID] = j
+	w.active[this] = j
 	w.activeMu.Unlock()
 	defer func() {
 		w.activeMu.Lock()
-		delete(w.active, j.ID)
+		delete(w.active, this)
 		w.activeMu.Unlock()
 	}()
-	// Recorded under a context that does not end with the drain: an
-	// outcome recorded beats a lease left to expire.
-	rec := context.WithoutCancel(ctx)
 	if j.Attempts > int64(w.opts.MaxAttempts) {
 		// A job comes back to a claim with no attempts left only when
 		// its last try never recorded an outcome: its lease expired, or
