@@ -37,6 +37,12 @@ func (c rewrapCmd) rewrap(ctx context.Context, h Host) (err error) {
 	if err != nil {
 		return err
 	}
+	// Checked as given: resolved against the working directory, a key
+	// pasted here would read as a path, which the errors after name.
+	if crypto.LooksLikeKey(c.NewMainKeyFile) {
+		return errors.New("the value of --new-main-key-file reads as a key, not as the path of a file. Give the path of " +
+			"the file that holds the new main key. Pisati does not show the value, because it may be the key itself")
+	}
 	path, err := absolute(c.NewMainKeyFile)
 	if err != nil {
 		return err

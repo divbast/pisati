@@ -381,6 +381,27 @@ func TestLoadMainKeyRefusesWhatItCannotUse(t *testing.T) {
 	})
 }
 
+func TestLooksLikeKey(t *testing.T) {
+	key := strings.TrimSuffix(string(keyText(randomKey(t))), "\n")
+	for _, tc := range []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"a key", key, true},
+		{"a key and a line break", key + "\n", true},
+		{"a key with space around it", " \t" + key + " \r\n", true},
+		{"a key one character short", key[:len(key)-1], false},
+		{"a path", "/run/secrets/pisati-main-key", false},
+		{"a file name that ends with a key", "keys/" + key, false},
+		{"nothing", "", false},
+	} {
+		if got := crypto.LooksLikeKey(tc.s); got != tc.want {
+			t.Errorf("LooksLikeKey(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // cleanKeyPath returns a key's base64 that is also an absolute, clean
 // path, as a key pasted in place of its file's path might be.
 func cleanKeyPath(t *testing.T) string {

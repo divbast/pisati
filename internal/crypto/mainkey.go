@@ -232,7 +232,7 @@ func loadFile(ctx context.Context, path string, log *slog.Logger) (MainKey, erro
 	// The path is never shown: a key given by mistake in its place would be.
 	const notShown = "Pisati does not show the path, because it may be the key itself"
 	switch {
-	case looksLikeKey(path):
+	case LooksLikeKey(path):
 		return MainKey{}, explain.New(ErrInvalid, "Pisati cannot load the main key, because the path of its file "+
 			"reads as a key, not as a path. Give the full path of the file that holds the key. %s", notShown)
 	case !filepath.IsAbs(path):
@@ -384,10 +384,13 @@ func parseKey(text []byte) ([keySize]byte, bool) {
 	return [keySize]byte(decoded[:keySize]), true
 }
 
-// looksLikeKey reports whether path reads as a key: a key given in place
-// of its file's path, which an error must not repeat.
-func looksLikeKey(path string) bool {
-	_, ok := parseKey([]byte(path))
+// LooksLikeKey reports whether s, given as the path of a key file, reads
+// as a key instead, with or without space around it: a key pasted in
+// place of its file's path. An error about such a path must not repeat
+// it, nor anything made from it, such as the full path it would resolve
+// to, so a caller checks the value as it was given, before anything else.
+func LooksLikeKey(s string) bool {
+	_, ok := parseKey(bytes.TrimSpace([]byte(s)))
 	return ok
 }
 

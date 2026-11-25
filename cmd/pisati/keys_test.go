@@ -4,6 +4,9 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -125,5 +128,31 @@ func TestKeysMigrateFirst(t *testing.T) {
 	}
 	if states := keyStates(t, s.state); strings.Join(states, " ") != "retired current" {
 		t.Errorf("the data keys are %v, want the first retired and the second current", states)
+	}
+}
+
+func TestKeysRewrapNeverShowsAKeyGivenAsItsFile(t *testing.T) {
+	// A key pasted where the path of its file belongs. One that starts
+	// with "/" reads as a full path already: this one does not, so that
+	// the command would resolve it against the working directory.
+	key := "/"
+	for strings.HasPrefix(key, "/") {
+		raw := make([]byte, 32)
+		if _, err := rand.Read(raw); err != nil {
+			t.Fatal(err)
+		}
+		key = base64.StdEncoding.EncodeToString(raw)
+	}
+	s := newSite(t)
+	t.Chdir(t.TempDir())
+	r := s.run(t, "keys", "rewrap", "--new-main-key-file", key)
+	want := "pisati: the value of --new-main-key-file reads as a key, not as the path of a file. Give the path of the " +
+		"file that holds the new main key. Pisati does not show the value, because it may be the key itself."
+	if r.code != 1 || r.line(t) != want || strings.Contains(r.stdout+r.stderr, key) {
+		t.Errorf("pisati keys rewrap --new-main-key-file <a key> = %d, %q, %q; want 1, %q, and the key nowhere", r.code,
+			r.stdout, r.stderr, want)
+	}
+	if entries, err := os.ReadDir(s.state); err != nil || len(entries) != 0 {
+		t.Errorf("the state directory holds %v (%v), want nothing: the command refuses before anything else", entries, err)
 	}
 }
