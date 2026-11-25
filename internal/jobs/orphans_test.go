@@ -22,7 +22,7 @@ import (
 
 // orphanedError is the last error ReleaseOrphans records with each job it
 // releases.
-const orphanedError = "the previous run of Pisati stopped while this attempt was running"
+const orphanedError = "An earlier try did not finish, because the Pisati process that ran it stopped."
 
 // orphan claims the job due first as a Worker of a run that then stopped
 // would leave it: leased until long after the test, its outcome never
@@ -118,7 +118,7 @@ func TestReleaseOrphans(t *testing.T) {
 						row.ID, row.RunAt, row.LeaseToken, was.RunAt, was.LeaseToken)
 				}
 			}
-			logged := log.find("job released: the previous run stopped during it")
+			logged := log.find("job made ready again: the Pisati process that was running it stopped")
 			if len(logged) != 2 {
 				t.Fatalf("logged %d released jobs, want 2", len(logged))
 			}
@@ -188,7 +188,7 @@ func TestReleaseOrphans(t *testing.T) {
 			if n := ran.Load(); n != 0 {
 				t.Errorf("the job ran %d times after its last try, want none", n)
 			}
-			wantRow(t, onlyRow(t, s), "dead", int64(opts.MaxAttempts)+1, "no attempts left: the last attempt's lease expired")
+			wantRow(t, onlyRow(t, s), "dead", int64(opts.MaxAttempts)+1, noTriesLeft)
 			if dead := log.find("job dead-lettered"); len(dead) != 1 {
 				t.Errorf("logged %d dead letters, want 1", len(dead))
 			}

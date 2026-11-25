@@ -4,6 +4,7 @@
 package jobs
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -15,6 +16,7 @@ import (
 	"math"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,7 +36,8 @@ import (
 // kept with the job, so it must not hold the payload or personal data.
 //
 // ctx ends when the job's lease does, or, once Run's context has ended,
-// when the drain deadline passes, and a Handler returns promptly then. A
+// when the handlers' share of the drain passes (Options.Drain less
+// Options.Reserve), and a Handler returns promptly then. A
 // job may run more than once (see the package doc), so a Handler must be
 // idempotent. A Worker may run one Kind's Handler on up to
 // Options.Workers goroutines at once, so a Handler must also be safe for
@@ -128,9 +131,15 @@ type Options struct {
 	// Poll is how long an idle worker waits before it looks for a due job
 	// again, unless Notify wakes it sooner. Positive.
 	Poll time.Duration
-	// Drain is how long the Handlers running when Run's context ends may
-	// go on before their contexts end too. Positive.
+	// Drain is how long Run takes at most to stop, once its context
+	// ends: the Handlers then running may go on for Drain less Reserve,
+	// after which their contexts end, and Reserve is left to record
+	// their outcomes. Positive.
 	Drain time.Duration
+	// Reserve is the end of Drain kept for recording the outcomes of the
+	// Handlers cut off, so that each is recorded within Drain. Positive,
+	// and shorter than Drain.
+	Reserve time.Duration
 	// SweepEvery is how often Run deletes the done and dead jobs past
 	// their retention, after a first sweep as it starts. Positive.
 	SweepEvery time.Duration
@@ -142,8 +151,9 @@ type Options struct {
 
 // DefaultOptions returns the Options Pisati runs with: 4 workers, a 5 min
 // lease, a backoff of 30 s doubling to 6 h with ±20% jitter, 12 attempts,
-// a poll every second, an 8 s drain, and a sweep every 10 minutes that
-// keeps done jobs for 7 days and dead ones for 30.
+// a poll every second, an 8 s drain whose last second is kept for
+// recording outcomes, and a sweep every 10 minutes that keeps done jobs
+// for 7 days and dead ones for 30.
 func DefaultOptions() Options {
 	return Options{
 		Workers:     4,
@@ -154,6 +164,7 @@ func DefaultOptions() Options {
 		MaxAttempts: 12,
 		Poll:        time.Second,
 		Drain:       8 * time.Second,
+		Reserve:     time.Second,
 		SweepEvery:  10 * time.Minute,
 		KeepDone:    7 * 24 * time.Hour,
 		KeepDead:    30 * 24 * time.Hour,
@@ -177,6 +188,7 @@ func (o Options) problems() []error {
 		{"BackoffBase", o.BackoffBase},
 		{"Poll", o.Poll},
 		{"Drain", o.Drain},
+		{"Reserve", o.Reserve},
 		{"SweepEvery", o.SweepEvery},
 		{"KeepDone", o.KeepDone},
 		{"KeepDead", o.KeepDead},
@@ -188,6 +200,9 @@ func (o Options) problems() []error {
 	if o.BackoffCap < o.BackoffBase {
 		errs = append(errs, fmt.Errorf("jobs: %w options: BackoffCap %v is shorter than BackoffBase %v",
 			ErrInvalid, o.BackoffCap, o.BackoffBase))
+	}
+	if o.Reserve > 0 && o.Reserve >= o.Drain {
+		errs = append(errs, fmt.Errorf("jobs: %w options: Reserve %v is not shorter than Drain %v", ErrInvalid, o.Reserve, o.Drain))
 	}
 	if math.IsNaN(o.Jitter) || o.Jitter < 0 || o.Jitter >= 1 {
 		errs = append(errs, fmt.Errorf("jobs: %w options: Jitter is %v, want it in [0, 1)", ErrInvalid, o.Jitter))
@@ -209,8 +224,15 @@ type Worker struct {
 	// wake that comes while every worker is busy is kept for the first to
 	// go idle.
 	wake chan struct{}
-	// running is set while Run runs, so that a second Run is refused.
+	// running is set while Run's goroutines run, so that a second Run is
+	// refused, even once Run has returned at the stop deadline without
+	// them.
 	running atomic.Bool
+
+	// activeMu guards active, the jobs being processed, by ID: what Run
+	// names when it stops without them.
+	activeMu sync.Mutex
+	active   map[int64]storedb.ClaimJobRow
 
 	// rndMu makes reads of rnd one at a time: an io.Reader need not be
 	// safe for concurrent use.
@@ -267,6 +289,7 @@ func NewWorker(s *store.Store, h map[Kind]Handler, clock func() time.Time, rnd i
 		opts:     opts,
 		wake:     make(chan struct{}, 1),
 		rnd:      rnd,
+		active:   map[int64]storedb.ClaimJobRow{},
 	}, nil
 }
 
@@ -279,21 +302,29 @@ func NewWorker(s *store.Store, h map[Kind]Handler, clock func() time.Time, rnd i
 // before any claim, and then again every Options.SweepEvery, a bounded
 // batch to a transaction so that no sweep holds the write lock for long.
 //
-// Once ctx ends, no job is claimed and no sweep starts. The Handlers still
-// running go on under context.WithoutCancel(ctx) for up to Options.Drain,
-// after which their contexts end. A job whose Handler then returns an
-// error, of whatever kind, is given back as a free retry: ready at once,
-// due when it was, its attempt not counted, as being cut off says nothing
-// of the job. A Handler that returns nil all the same has its job done,
-// and one that panics, dead. Each outcome is recorded even after ctx has
-// ended, a write that SQLite's 5 s busy timeout bounds, so that no job is
-// left leased. Run returns when every goroutine it started has, so it
-// waits for each Handler to return once its context ends.
+// Once ctx ends, no job is claimed and no sweep starts, and Run stops
+// within Options.Drain. The Handlers still running go on under
+// context.WithoutCancel(ctx) for Drain less Options.Reserve, after which
+// their contexts end. A job whose Handler then returns an error, of
+// whatever kind, is given back as a free retry: ready at once, due when
+// it was, its attempt not counted, as being cut off says nothing of the
+// job. A Handler that returns nil all the same has its job done, and one
+// that panics, dead. Each outcome is recorded even after ctx has ended,
+// within the Reserve left, so that no job is left leased.
+//
+// Run returns once every goroutine it started has, or once Drain has
+// passed since ctx ended, whichever comes first. A job still being
+// processed then, its Handler ignoring its context or its outcome not yet
+// written, is logged, and its goroutine goes on without Run: the job
+// keeps its lease, and ReleaseOrphans makes it ready again at the next
+// start, its try counted. Pisati's process ends just after, and with it
+// that goroutine. Until every goroutine of a Run has ended, another Run
+// is refused.
 //
 // Run returns nil once it has stopped because ctx ended, even when the
-// drain deadline cut Handlers off. It returns an error at once, running
-// nothing, when the Worker was not made by NewWorker or another Run of it
-// has not returned.
+// drain cut Handlers off. It returns an error at once, running nothing,
+// when the Worker was not made by NewWorker or another Run of it has not
+// ended.
 func (w *Worker) Run(ctx context.Context) error {
 	if w == nil || w.store == nil {
 		return errors.New("jobs: run: the Worker was not made by NewWorker")
@@ -301,7 +332,6 @@ func (w *Worker) Run(ctx context.Context) error {
 	if !w.running.CompareAndSwap(false, true) {
 		return errors.New("jobs: run: the Worker is running already")
 	}
-	defer w.running.Store(false)
 
 	// The first sweep runs before the workers start, so that it never
 	// contends with their claims for the write lock.
@@ -316,21 +346,44 @@ func (w *Worker) Run(ctx context.Context) error {
 	finished := make(chan struct{})
 	go func() {
 		workers.Wait()
+		// Before finished closes, so that a Run that has seen it close
+		// may be followed by another at once.
+		w.running.Store(false)
 		close(finished)
 	}()
 
 	// The workers and the sweeper return only once ctx has ended.
 	<-ctx.Done()
-	drain := time.NewTimer(w.opts.Drain)
-	defer drain.Stop()
+	handlers := w.opts.Drain - w.opts.Reserve
+	cut := time.NewTimer(handlers)
+	defer cut.Stop()
 	select {
 	case <-finished:
-	case <-drain.C:
-		w.log.WarnContext(ctx, "job drain deadline passed", "drain", w.opts.Drain)
+		return nil
+	case <-cut.C:
+		w.log.WarnContext(ctx, "job drain deadline passed", "drain", handlers)
 		stopWork(errDrained)
-		<-finished
+	}
+	reserve := time.NewTimer(w.opts.Reserve)
+	defer reserve.Stop()
+	select {
+	case <-finished:
+	case <-reserve.C:
+		for _, j := range w.stillActive() {
+			w.log.ErrorContext(ctx, "job still running at the stop deadline", "kind", j.Kind, "job_id", j.ID, "attempt", j.Attempts)
+		}
 	}
 	return nil
+}
+
+// stillActive returns the jobs being processed, in the order of their
+// IDs.
+func (w *Worker) stillActive() []storedb.ClaimJobRow {
+	w.activeMu.Lock()
+	defer w.activeMu.Unlock()
+	return slices.SortedFunc(maps.Values(w.active), func(a, b storedb.ClaimJobRow) int {
+		return cmp.Compare(a.ID, b.ID)
+	})
 }
 
 // errDrained is the cause with which Run ends the Handlers' contexts when
@@ -409,14 +462,24 @@ func (w *Worker) claim(ctx context.Context) (storedb.ClaimJobRow, bool) {
 }
 
 // process runs the job j has leased, under ctx, and records the outcome.
+// Until it has, j is among the jobs Run names should it stop without it.
 func (w *Worker) process(ctx context.Context, j storedb.ClaimJobRow) {
+	w.activeMu.Lock()
+	w.active[j.ID] = j
+	w.activeMu.Unlock()
+	defer func() {
+		w.activeMu.Lock()
+		delete(w.active, j.ID)
+		w.activeMu.Unlock()
+	}()
 	// Recorded under a context that does not end with the drain: an
 	// outcome recorded beats a lease left to expire.
 	rec := context.WithoutCancel(ctx)
 	if j.Attempts > int64(w.opts.MaxAttempts) {
-		// Only a lease that expired, on the last attempt, comes back to
-		// a claim with no attempts left.
-		w.bury(rec, j, "no attempts left: the last attempt's lease expired")
+		// A job comes back to a claim with no attempts left only when
+		// its last try never recorded an outcome: its lease expired, or
+		// Pisati stopped while it ran and ReleaseOrphans gave it back.
+		w.bury(rec, j, "The last try did not finish: Pisati stopped while the job ran, or the try ran longer than its time limit.")
 		return
 	}
 	h, ok := w.handler(j.Kind)

@@ -35,7 +35,7 @@ func (c backupCmd) Run(ctx context.Context, h Host) (err error) {
 	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("there is no database to back up at %s. Nothing was written", path)
 	case err != nil:
-		return fmt.Errorf("cannot read the database %s: %s", path, reason(err))
+		return explain(err, "cannot read the database %s: %s", path, reason(err))
 	}
 	db, err := store.Open(ctx, path)
 	if err != nil {
@@ -49,7 +49,7 @@ func (c backupCmd) Run(ctx context.Context, h Host) (err error) {
 
 // restoreCmd is pisati restore.
 type restoreCmd struct {
-	Src string `arg:"" help:"The copy to restore."`
+	Src string `arg:"" help:"The copy that pisati backup made, to restore."`
 }
 
 // Run replaces the database with the copy c.Src names, under the state

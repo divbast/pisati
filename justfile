@@ -250,7 +250,9 @@ generate-check:
 # Vite serves the front end's sources on PISATI_DEV_VITE_URL, which
 # Pisati's dev mode points its pages at. templ regenerates the pages as
 # they change, rebuilds and restarts Pisati as Go files change, and serves
-# it through its proxy, on port 7331, which reloads the browser. Stopping
+# it through its proxy, on port 7331, which reloads the browser. The proxy
+# opens no browser itself: open the base URL Pisati is set to, as
+# http://localhost:7331, so that the page's origin is the site's. Stopping
 # either stops both.
 
 # Run Pisati in dev mode: Vite's dev server, and Pisati rebuilt as it changes
@@ -258,7 +260,7 @@ generate-check:
 dev:
     trap 'kill 0' EXIT
     pnpm exec vp dev &
-    go tool -modfile=tools/go.mod templ generate --watch --proxy=http://localhost:8080 \
+    go tool -modfile=tools/go.mod templ generate --watch --proxy=http://localhost:8080 --open-browser=false \
         --cmd="go run ./cmd/pisati serve" --watch-pattern='(.+\.go$)|(.+\.templ$)'
 
 # Every lint gate. Needs a running Docker daemon, for docker build --check

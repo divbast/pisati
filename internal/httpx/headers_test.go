@@ -159,7 +159,7 @@ func TestSecurityHeadersDevMode(t *testing.T) {
 				httpx.SecurityHeaders(baseURL(t, tt.base), config.HSTSHostOnly, devAt(t, tt.vite))))
 			csp := "default-src 'none'; script-src 'self' 'nonce-" + nonce + "'; " +
 				"style-src 'self' " + tt.origin + " 'nonce-" + nonce + "'; img-src 'self'; font-src 'self'; " +
-				"connect-src 'self' " + tt.origin + " " + tt.live + "; form-action 'self'; frame-ancestors 'none'; " +
+				"connect-src 'self' " + tt.origin + " " + tt.live + "; worker-src 'self' blob:; form-action 'self'; frame-ancestors 'none'; " +
 				"base-uri 'none'; object-src 'none'; report-to csp" + tt.upgrade
 			if want := wantHeaders(tt.base, csp, tt.hsts); !maps.EqualFunc(got, want, slices.Equal) {
 				t.Errorf("headers:\n%v\nwant exactly:\n%v", got, want)

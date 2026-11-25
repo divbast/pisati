@@ -84,6 +84,12 @@ func (c *CSP) value() string {
 	b.WriteString("; img-src 'self'; font-src 'self'; connect-src 'self'")
 	if c.dev.origin != "" {
 		b.WriteString(" " + c.dev.origin + " " + c.dev.socket)
+		// When the dev server goes away, Vite's client polls for its
+		// return from a worker it makes from a blob: URL. Without
+		// worker-src, workers fall back to script-src, which refuses
+		// blob:; 'self' keeps the site's own workers, as script-src
+		// allows them outside dev mode.
+		b.WriteString("; worker-src 'self' blob:")
 	}
 	if c.httpsMedia {
 		b.WriteString("; media-src https:")

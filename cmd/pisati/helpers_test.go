@@ -96,6 +96,17 @@ func (r result) line(t *testing.T) string {
 	return line
 }
 
+// lines returns the result's stderr as its lines, failing the test unless
+// it ends with a newline.
+func (r result) lines(t *testing.T) []string {
+	t.Helper()
+	text, ok := strings.CutSuffix(r.stderr, "\n")
+	if !ok {
+		t.Fatalf("stderr does not end its last line: %q", r.stderr)
+	}
+	return strings.Split(text, "\n")
+}
+
 // site is one installation of Pisati: its environment, with its own state
 // and configuration directories, and the free loopback ports its two
 // listeners take.
@@ -194,6 +205,9 @@ func (s *site) mustRun(t *testing.T, args ...string) result {
 type serving struct {
 	t      *testing.T
 	cancel context.CancelFunc
+	// halted is closed by halt, as main closes Host.Halt on a second
+	// SIGTERM or SIGINT.
+	halted chan struct{}
 	// done is closed once run has returned code.
 	done           chan struct{}
 	code           int
@@ -207,7 +221,8 @@ func (s *site) serve(t *testing.T) *serving {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	h, stdout, stderr := s.host("serve")
-	v := &serving{t: t, cancel: cancel, done: make(chan struct{}), stdout: stdout, stderr: stderr}
+	v := &serving{t: t, cancel: cancel, halted: make(chan struct{}), done: make(chan struct{}), stdout: stdout, stderr: stderr}
+	h.Halt = v.halted
 	go func() {
 		defer close(v.done)
 		v.code = run(ctx, h)
@@ -233,12 +248,41 @@ func (s *site) serve(t *testing.T) *serving {
 // code. Calling it again returns the same.
 func (v *serving) stop() int {
 	v.cancel()
+	return v.wait()
+}
+
+// halt closes Host.Halt, as a second SIGTERM or SIGINT does.
+func (v *serving) halt() {
+	close(v.halted)
+}
+
+// wait waits for serve to return, and returns its exit code.
+func (v *serving) wait() int {
 	select {
 	case <-v.done:
 		return v.code
 	case <-time.After(20 * time.Second):
 		v.t.Errorf("pisati serve did not stop within 20 s")
 		return -1
+	}
+}
+
+// holdPorts listens on both of s's ports itself until the test ends, so
+// that a serve which opened a listener before it refused to start would
+// fail on the port instead, with another message.
+func holdPorts(t *testing.T, s *site) {
+	t.Helper()
+	var lc net.ListenConfig
+	for _, port := range []int{s.public, s.internal} {
+		ln, err := lc.Listen(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := ln.Close(); err != nil {
+				t.Error(err)
+			}
+		})
 	}
 }
 

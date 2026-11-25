@@ -16,8 +16,8 @@ const (
 	rewrapped = "The data keys are now encrypted with the new main key. Before you start pisati serve again, " +
 		"set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the new key file, " +
 		"or put the new key in the credential pisati-main-key.\n"
-	rotated = "A new data key is now in use. The next time pisati serve runs, " +
-		"it encrypts the existing data again with the new key.\n"
+	rotated = "A new data key is now in use for new data. The next time pisati serve runs, " +
+		"it encrypts again with the new key what older data keys encrypted.\n"
 )
 
 // keyStates returns the state of each data key in the database at state,
@@ -62,7 +62,8 @@ func TestKeysRewrapAndRotate(t *testing.T) {
 		t.Errorf("pisati keys rewrap wrote %q and %q, want %q and nothing on stderr", r.stdout, r.stderr, rewrapped)
 	}
 	generated := filepath.Join(s.state, "keys", "main.key")
-	if r := s.run(t, "serve"); r.code != 1 || !strings.HasPrefix(r.line(t), "pisati: the main key in "+generated+" cannot decrypt") {
+	if r := s.run(t, "serve"); r.code != 1 || !strings.HasPrefix(r.line(t), "pisati: the main key in "+generated+
+		", which Pisati created when it first used this state directory, cannot decrypt") {
 		t.Errorf("serve with the old key = %d, %q; want 1, saying the key in %s cannot decrypt the data keys", r.code, r.stderr, generated)
 	}
 

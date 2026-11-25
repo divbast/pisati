@@ -12,8 +12,9 @@ import (
 )
 
 // orphanedError is the last error kept with each job ReleaseOrphans
-// releases, saying why its try counted though it never finished.
-const orphanedError = "the previous run of Pisati stopped while this attempt was running"
+// releases, saying why its try counted though it never finished. It stays
+// with the job once a later try succeeds, so it reads as history.
+const orphanedError = "An earlier try did not finish, because the Pisati process that ran it stopped."
 
 // ReleaseOrphans makes ready again, at once, every job still leased in
 // the Worker's database: the jobs a run of Pisati had claimed when it
@@ -46,7 +47,7 @@ func (w *Worker) ReleaseOrphans(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("jobs: release orphaned jobs: %w", err)
 	}
 	for _, j := range released {
-		w.log.InfoContext(ctx, "job released: the previous run stopped during it",
+		w.log.InfoContext(ctx, "job made ready again: the Pisati process that was running it stopped",
 			"kind", j.Kind, "job_id", j.ID, "attempt", j.Attempts)
 	}
 	return len(released), nil

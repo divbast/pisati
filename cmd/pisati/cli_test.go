@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -60,24 +61,43 @@ func TestHelp(t *testing.T) {
 func TestUnknownEnvRefused(t *testing.T) {
 	for _, tc := range []struct {
 		command []string
-		prefix  string
+		line    string
 	}{
-		{[]string{"serve"}, "pisati: the configuration has these problems:\n"},
-		{[]string{"migrate"}, "pisati: the configuration has these problems:\n"},
-		{[]string{"backup", "/nowhere/copy.db"}, "pisati: the configuration has these problems:\n"},
-		{[]string{"health"}, "config: the configuration has these problems: "},
+		{[]string{"serve"}, "pisati: PISATI_BOGUS: unknown setting."},
+		{[]string{"migrate"}, "pisati: PISATI_BOGUS: unknown setting."},
+		{[]string{"backup", "/nowhere/copy.db"}, "pisati: PISATI_BOGUS: unknown setting."},
+		{[]string{"health"}, "config: PISATI_BOGUS: unknown setting."},
 	} {
 		s := newSite(t)
 		s.env["PISATI_BOGUS"] = "1"
 		r := s.run(t, tc.command...)
-		if r.code != 1 {
-			t.Errorf("pisati %q with PISATI_BOGUS set exited %d, want 1", tc.command, r.code)
+		if r.code != 1 || r.line(t) != tc.line || r.stdout != "" {
+			t.Errorf("pisati %q with PISATI_BOGUS set = %d, %q, %q; want 1 and %q", tc.command, r.code, r.stdout, r.stderr, tc.line)
 		}
-		if !strings.HasPrefix(r.stderr, tc.prefix) || !strings.Contains(r.stderr, "PISATI_BOGUS") {
-			t.Errorf("pisati %q wrote %q to stderr, want %q naming PISATI_BOGUS", tc.command, r.stderr, tc.prefix)
+	}
+}
+
+func TestConfigProblemsOneLineEach(t *testing.T) {
+	for _, tc := range []struct {
+		command []string
+		prefix  string
+	}{
+		{[]string{"migrate"}, "pisati: "},
+		{[]string{"health"}, "config: "},
+	} {
+		s := newSite(t)
+		s.env["PISATI_BOGUS"] = "1"
+		delete(s.env, "PISATI_SERVER_BASE_URL")
+		r := s.run(t, tc.command...)
+		lines := r.lines(t)
+		if r.code != 1 || len(lines) != 2 {
+			t.Fatalf("pisati %q with two problems = %d, %q; want 1 and two lines", tc.command, r.code, r.stderr)
 		}
-		if r.stdout != "" {
-			t.Errorf("pisati %q wrote to stdout: %q", tc.command, r.stdout)
+		for i, want := range []string{"PISATI_BOGUS: unknown setting.", "server.base_url"} {
+			if !strings.HasPrefix(lines[i], tc.prefix) || !strings.Contains(lines[i], want) || !strings.HasSuffix(lines[i], ".") {
+				t.Errorf("pisati %q: line %d is %q, want it to start %q, name %q and end with a full stop",
+					tc.command, i+1, lines[i], tc.prefix, want)
+			}
 		}
 	}
 }
@@ -88,13 +108,62 @@ func TestDirectoryVariablesRefused(t *testing.T) {
 			s := newSite(t)
 			s.env[name] = value
 			r := s.run(t, "migrate")
-			want := "  " + name + ` is "` + value + `": it must be one absolute path`
-			if r.code != 1 || !strings.Contains(r.stderr, want) {
-				t.Errorf("%s=%q: pisati migrate = %d, %q; want 1, naming the variable and its value", name, value, r.code, r.stderr)
+			want := "pisati: " + name + ` is set to "` + value + `", which Pisati cannot use. Set it to one directory, ` +
+				`as a full path that starts with "/", with no ":", no "//", no "." or ".." part, and no "/" at the end.`
+			if r.code != 1 || r.line(t) != want {
+				t.Errorf("%s=%q: pisati migrate = %d, %q; want 1, %q", name, value, r.code, r.stderr, want)
 			}
 		}
 	}
 	s := newSite(t)
 	s.env["CREDENTIALS_DIRECTORY"] = ""
 	s.mustRun(t, "migrate")
+}
+
+func TestDirectoryVariablesAmongOtherProblems(t *testing.T) {
+	// A bad directory variable is reported with every other problem. With
+	// no configuration directory read, no setting is reported missing, as
+	// its files may hold it; with the credentials alone unreadable, the
+	// configuration's own problems are all there.
+	for _, tc := range []struct {
+		name    string
+		missing bool
+	}{
+		{"CONFIGURATION_DIRECTORY", false},
+		{"CREDENTIALS_DIRECTORY", true},
+	} {
+		s := newSite(t)
+		s.env[tc.name] = "relative"
+		s.env["PISATI_BOGUS"] = "1"
+		delete(s.env, "PISATI_SERVER_BASE_URL")
+		r := s.run(t, "migrate")
+		lines := r.lines(t)
+		want := 2
+		if tc.missing {
+			want = 3
+		}
+		if r.code != 1 || len(lines) != want {
+			t.Fatalf("%s bad, PISATI_BOGUS set, no base URL: pisati migrate = %d, %q; want 1 and %d lines", tc.name, r.code, r.stderr, want)
+		}
+		text := r.stderr
+		if !strings.Contains(text, "pisati: "+tc.name+` is set to "relative"`) || !strings.Contains(text, "pisati: PISATI_BOGUS: unknown setting.") {
+			t.Errorf("%s bad: the lines are %q, want the variable and PISATI_BOGUS each named", tc.name, lines)
+		}
+		if named := strings.Contains(text, "server.base_url"); named != tc.missing {
+			t.Errorf("%s bad: server.base_url reported missing: %t, want %t:\n%s", tc.name, named, tc.missing, text)
+		}
+	}
+}
+
+func TestCommandStoppedBySignal(t *testing.T) {
+	s := newSite(t)
+	h, stdout, stderr := s.host("migrate")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	code := run(ctx, h)
+	r := result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	want := "pisati: the command stopped before it finished, because a SIGTERM or SIGINT signal arrived."
+	if r.code != 1 || r.line(t) != want || r.stdout != "" {
+		t.Errorf("pisati migrate stopped by its context = %d, %q, %q; want 1, %q", r.code, r.stdout, r.stderr, want)
+	}
 }

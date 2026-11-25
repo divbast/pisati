@@ -299,6 +299,10 @@ func stopped(t *testing.T, stop func() error) {
 	}
 }
 
+// noTriesLeft is the last error a job claimed with no tries left is
+// dead-lettered with.
+const noTriesLeft = "The last try did not finish: Pisati stopped while the job ran, or the try ran longer than its time limit."
+
 // payloadOf returns the payload of a test's job number n.
 func payloadOf(n int) []byte {
 	return fmt.Appendf(nil, "job-%d", n)

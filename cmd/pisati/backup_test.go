@@ -4,12 +4,39 @@
 package main
 
 import (
+	"crypto/rand"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/divbast/pisati/internal/store"
+	"github.com/divbast/pisati/internal/store/storedb"
 )
+
+// liveSession stores a session in the database at state that expires in
+// an hour, and returns its ID's hash.
+func liveSession(t *testing.T, state string) []byte {
+	t.Helper()
+	id := make([]byte, 32)
+	if _, err := rand.Read(id); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	withStore(t, state, func(db *store.Store) {
+		if err := db.Queries().InsertSession(t.Context(), storedb.InsertSessionParams{
+			IDHash:     id,
+			UserID:     sql.NullInt64{Int64: 1, Valid: true},
+			CreatedAt:  now.UnixMilli(),
+			LastSeenAt: now.UnixMilli(),
+			ExpiresAt:  now.Add(time.Hour).UnixMilli(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	return id
+}
 
 // dataKeys returns how many data keys the database at state holds.
 func dataKeys(t *testing.T, state string) int {
@@ -56,10 +83,18 @@ func TestBackupRestoreCommands(t *testing.T) {
 			t.Errorf("the backup has mode %04o, want 0600", perm)
 		}
 
+		// A session made after the backup would be gone, had the restore
+		// gone ahead.
+		later := liveSession(t, s.state)
 		r := s.run(t, "restore", "copy.db")
 		if want := lockedLine(s.state); r.code != 1 || r.line(t) != want {
 			t.Errorf("pisati restore while serving = %d, %q; want 1, %q", r.code, r.stderr, want)
 		}
+		withStore(t, s.state, func(db *store.Store) {
+			if n := count(t, db, `SELECT count(*) FROM sessions WHERE id_hash = ?`, later); n != 1 {
+				t.Error("the refused restore changed the database: the session made after the backup is gone")
+			}
+		})
 		if code := v.stop(); code != 0 {
 			t.Fatalf("serve exited %d", code)
 		}

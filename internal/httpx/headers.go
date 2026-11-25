@@ -45,9 +45,11 @@ type header struct {
 // In dev mode, when dev.ViteURL is set, every policy also lets the page
 // use the Vite dev server: its origin in style-src and connect-src, its
 // hot-update WebSocket's (ws:, or wss: for an https server) in
-// connect-src, and the response's nonce in style-src too, for the style
-// elements Vite's client adds to the page. script-src is left as it is.
-// Besides CSP's methods, this is the only way a policy is widened.
+// connect-src, the response's nonce in style-src too, for the style
+// elements Vite's client adds to the page, and worker-src 'self' blob:,
+// for the worker Vite's client polls from while the dev server restarts.
+// script-src is left as it is. Besides CSP's methods, this is the only
+// way a policy is widened; outside dev mode no policy has worker-src.
 //
 // The zero BaseURL, an hsts that is none of the HSTSScope constants, or a
 // dev.ViteURL with it or base away from localhost, 127.0.0.1 and [::1],

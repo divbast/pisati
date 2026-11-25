@@ -15,13 +15,13 @@ import (
 
 // keysCmd is pisati keys.
 type keysCmd struct {
-	Rewrap rewrapCmd `cmd:"" help:"Encrypt the data keys with a new main key. Stop pisati serve first."`
-	Rotate rotateCmd `cmd:"" help:"Make a new data key and use it from now on. Stop pisati serve first. The next time pisati serve runs, it encrypts the existing data again with the new key."`
+	Rewrap rewrapCmd `cmd:"" help:"Encrypt the data keys with a new main key, in place of the one in use. Stop pisati serve first."`
+	Rotate rotateCmd `cmd:"" help:"Make a new data key, and use it from now on for new data. Stop pisati serve first. The next time pisati serve runs, it encrypts again with the new key what older data keys encrypted."`
 }
 
 // rewrapCmd is pisati keys rewrap.
 type rewrapCmd struct {
-	NewMainKeyFile string `help:"The file that holds the new main key: 32 bytes in base64, as 'openssl rand -base64 32' writes them." placeholder:"PATH" required:""`
+	NewMainKeyFile string `help:"The file that holds the new main key: 32 bytes in base64, as the command 'openssl rand -base64 32' writes them." placeholder:"PATH" required:""`
 }
 
 // Run wraps the data keys under the main key in c.NewMainKeyFile, in
@@ -46,17 +46,17 @@ func (c rewrapCmd) Run(ctx context.Context, h Host) (err error) {
 	}()
 	// The new key first: a file that holds none fails before anything is
 	// generated for the old one.
-	to, err := loadMainKey(ctx, config.FromFile{Path: path}, nil, st.dir, log)
+	to, _, err := loadMainKey(ctx, config.FromFile{Path: path}, nil, st.dir, log)
 	if err != nil {
 		return err
 	}
-	from, err := loadMainKey(ctx, cfg.Keys.MainKey, creds, st.dir, log)
+	from, origin, err := loadMainKey(ctx, cfg.Keys.MainKey, creds, st.dir, log)
 	if err != nil {
 		return err
 	}
 	switch err := crypto.Rewrap(ctx, st.db, from, to); {
 	case errors.Is(err, crypto.ErrMainKeyMismatch):
-		return mainKeyMismatch(cfg.Keys.MainKey, st.dir)
+		return mainKeyMismatch(err, cfg.Keys.MainKey, st.dir, origin)
 	case err != nil:
 		return err
 	}
@@ -86,18 +86,18 @@ func (rotateCmd) Run(ctx context.Context, h Host) (err error) {
 	defer func() {
 		err = errors.Join(err, st.close())
 	}()
-	key, err := loadMainKey(ctx, cfg.Keys.MainKey, creds, st.dir, log)
+	key, origin, err := loadMainKey(ctx, cfg.Keys.MainKey, creds, st.dir, log)
 	if err != nil {
 		return err
 	}
-	keyring, err := openKeyring(ctx, h, st, cfg.Keys.MainKey, key)
+	keyring, err := openKeyring(ctx, h, st, cfg.Keys.MainKey, key, origin)
 	if err != nil {
 		return err
 	}
 	if err := crypto.Rotate(ctx, st.db, keyring); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(h.Stdout, "A new data key is now in use. The next time pisati serve runs, "+
-		"it encrypts the existing data again with the new key.")
+	_, err = fmt.Fprintln(h.Stdout, "A new data key is now in use for new data. The next time pisati serve runs, "+
+		"it encrypts again with the new key what older data keys encrypted.")
 	return err
 }

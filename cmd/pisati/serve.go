@@ -6,13 +6,13 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"sync"
+	"syscall"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -32,6 +32,8 @@ const (
 	// drain is the one deadline a stop has, from the signal: the two
 	// listeners, the job worker and the session sweeper finish what they
 	// have within it, and telemetry sends what it holds in the time left.
+	// The job worker keeps the last second of it to record the outcomes
+	// of the jobs it cut off (jobs.Options.Reserve).
 	drain = 8 * time.Second
 	// sessionSweepEvery is how often serve deletes the sessions that have
 	// expired, after a first sweep as it starts.
@@ -84,7 +86,7 @@ func serve(ctx context.Context, h Host) (err error) {
 	if err != nil {
 		return ignoreStop(ctx, err)
 	}
-	return r.serve(ctx)
+	return r.serve(ctx, h)
 }
 
 // ignoreStop returns nil when err is only ctx's own, ctx having ended:
@@ -94,6 +96,50 @@ func ignoreStop(ctx context.Context, err error) error {
 		return nil
 	}
 	return err
+}
+
+// group runs functions on goroutines of their own, under one
+// errgroup.Group, and keeps every error they return, not only the first:
+// independent failures are reported together. The first error ends the
+// group's context, as errgroup's does. Go is called from one goroutine.
+type group struct {
+	eg *errgroup.Group
+	// errs holds a slot for each function, in the order Go was called,
+	// so that the joined errors come in that order whichever failed
+	// first. Each goroutine writes its own slot alone.
+	errs []*error
+}
+
+// newGroup returns a group, and the context that ends with ctx or with
+// the group's first error.
+func newGroup(ctx context.Context) (*group, context.Context) {
+	eg, gctx := errgroup.WithContext(ctx)
+	return &group{eg: eg}, gctx
+}
+
+// Go runs f on a goroutine of its own.
+func (g *group) Go(f func() error) {
+	slot := new(error)
+	g.errs = append(g.errs, slot)
+	g.eg.Go(func() error {
+		*slot = f()
+		return *slot
+	})
+}
+
+// Wait waits for every function Go ran to return, and returns all their
+// errors, joined in the order Go ran them, or nil when none failed.
+func (g *group) Wait() error {
+	first := g.eg.Wait()
+	errs := make([]error, 0, len(g.errs))
+	for _, slot := range g.errs {
+		errs = append(errs, *slot)
+	}
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	// Every error is in a slot: first is one of them, and nil here.
+	return first
 }
 
 // running is everything serve runs, once start has made it.
@@ -111,11 +157,11 @@ type running struct {
 // the sessions, telemetry, both listeners' handlers, and, last, the two
 // listeners. On an error it leaves nothing open but st.
 func start(ctx context.Context, h Host, cfg config.Config, creds fs.FS, st *state, log *slog.Logger) (_ *running, err error) {
-	key, err := loadMainKey(ctx, cfg.Keys.MainKey, creds, st.dir, log)
+	key, origin, err := loadMainKey(ctx, cfg.Keys.MainKey, creds, st.dir, log)
 	if err != nil {
 		return nil, err
 	}
-	keyring, err := openKeyring(ctx, h, st, cfg.Keys.MainKey, key)
+	keyring, err := openKeyring(ctx, h, st, cfg.Keys.MainKey, key, origin)
 	if err != nil {
 		return nil, err
 	}
@@ -155,15 +201,9 @@ func start(ctx context.Context, h Host, cfg config.Config, creds fs.FS, st *stat
 		return nil, err
 	}
 	internal := internalHandler(st.db, tel, cfg.Telemetry.Pprof, h.Clock, log)
-
-	var lc net.ListenConfig
-	publicLn, err := listen(ctx, &lc, cfg.Server.Listen, "server.listen")
+	publicLn, internalLn, err := listenBoth(ctx, cfg.Server)
 	if err != nil {
 		return nil, err
-	}
-	internalLn, err := listen(ctx, &lc, cfg.Server.InternalListen, "server.internal_listen")
-	if err != nil {
-		return nil, errors.Join(err, publicLn.Close())
 	}
 	return &running{
 		log:        log,
@@ -177,11 +217,46 @@ func start(ctx context.Context, h Host, cfg config.Config, creds fs.FS, st *stat
 	}, nil
 }
 
+// The settings the two listeners' addresses come from, and their
+// variables, for the errors that name them.
+const (
+	publicSetting   = "server.listen (PISATI_SERVER_LISTEN)"
+	internalSetting = "server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN)"
+)
+
+// listenBoth listens on both of srv's addresses. When either cannot be
+// used, it returns every refusal, and closes the listener it did open.
+func listenBoth(ctx context.Context, srv config.Server) (public, internal net.Listener, err error) {
+	var lc net.ListenConfig
+	both, _ := newGroup(ctx)
+	both.Go(func() (err error) {
+		public, err = listen(ctx, &lc, srv.Listen, publicSetting)
+		return err
+	})
+	both.Go(func() (err error) {
+		internal, err = listen(ctx, &lc, srv.InternalListen, internalSetting)
+		return err
+	})
+	if err := both.Wait(); err != nil {
+		for _, ln := range []net.Listener{public, internal} {
+			if ln != nil {
+				err = errors.Join(err, ln.Close())
+			}
+		}
+		return nil, nil, err
+	}
+	return public, internal, nil
+}
+
 // listen listens on addr, the address the setting named setting gives.
 func listen(ctx context.Context, lc *net.ListenConfig, addr config.ListenAddr, setting string) (net.Listener, error) {
 	ln, err := lc.Listen(ctx, "tcp", addr.String())
-	if err != nil {
-		return nil, fmt.Errorf("cannot listen on %s, the address set by %s: %s", addr, setting, reason(err))
+	switch {
+	case errors.Is(err, syscall.EADDRINUSE):
+		return nil, explain(err, "cannot listen on %s, the address that %s sets, because another program already uses it. "+
+			"Stop that program, or set %s to another address", addr, setting, setting)
+	case err != nil:
+		return nil, explain(err, "cannot listen on %s, the address that %s sets: %s", addr, setting, reason(err))
 	}
 	return ln, nil
 }
@@ -244,7 +319,7 @@ func healthz(db *store.Store, log *slog.Logger) http.Handler {
 		status, body := http.StatusOK, "ok"
 		if err := db.DB().PingContext(ctx); err != nil {
 			if r.Context().Err() == nil {
-				log.ErrorContext(ctx, "health check found the database unavailable", "error", err)
+				log.ErrorContext(ctx, "health check: the database did not answer", "error", err)
 			}
 			status, body = http.StatusServiceUnavailable, "unavailable"
 		}
@@ -254,22 +329,29 @@ func healthz(db *store.Store, log *slog.Logger) http.Handler {
 }
 
 // serve runs both listeners, the job worker and the session sweeper under
-// one errgroup, until ctx ends or one of them fails. Then each stops
-// taking work, and they finish what they have together, within one
-// deadline, drain, from that moment: the servers' Shutdown and the
-// worker's own drain both start then. A server still busy at the deadline
-// is closed, cutting its connections. Then telemetry sends what it holds,
-// within what is left of the deadline.
+// one group, until ctx ends or one of them fails. Then each stops taking
+// work, and they finish what they have together, within one deadline set
+// as the stop begins: drain from h.Clock's time. The servers' Shutdown
+// and the worker's own drain both run to it, and a server still busy at
+// the deadline is closed, cutting its connections. Then telemetry sends
+// what it holds, within what is left of the deadline.
 //
-// It returns nil once stopped, even when the deadline cut work off, and
-// the error of a listener that failed.
-func (r *running) serve(ctx context.Context) error {
-	g, gctx := errgroup.WithContext(ctx)
-	// The one deadline, set once, as the stop begins. It is the runtime's
-	// clock that ends a context, so the deadline is read from it.
+// When h.Halt closes, serve stops at once instead: it closes both servers,
+// stops telemetry, and returns without waiting for the job worker, whose
+// running jobs the next start's ReleaseOrphans makes ready again.
+//
+// It returns nil once stopped, even when the deadline cut work off;
+// errReported when h.Halt cut the stop short, which it logs; and every
+// error of a listener that failed, joined.
+func (r *running) serve(ctx context.Context, h Host) error {
+	// Ended by the halt too, so that the worker and the sweeper stop
+	// taking work then, even had no signal ended ctx first.
+	serving, stopServing := context.WithCancel(ctx)
+	defer stopServing()
+	g, gctx := newGroup(serving)
 	stopAt := sync.OnceValue(func() time.Time {
 		r.log.InfoContext(ctx, "stopping")
-		return time.Now().Add(drain)
+		return h.Clock().Add(drain)
 	})
 	r.log.InfoContext(ctx, "serving started",
 		"public", r.publicLn.Addr().String(), "internal", r.internalLn.Addr().String(), "version", version)
@@ -278,8 +360,8 @@ func (r *running) serve(ctx context.Context) error {
 		ln      net.Listener
 		setting string
 	}{
-		{r.public, r.publicLn, "server.listen"},
-		{r.internal, r.internalLn, "server.internal_listen"},
+		{r.public, r.publicLn, publicSetting},
+		{r.internal, r.internalLn, internalSetting},
 	} {
 		g.Go(func() error {
 			return serveOn(l.srv, l.ln, l.setting)
@@ -293,14 +375,43 @@ func (r *running) serve(ctx context.Context) error {
 	}
 	g.Go(func() error { return r.worker.Run(gctx) })
 	g.Go(func() error { return r.sessions.SweepEvery(gctx, sessionSweepEvery) })
-	err := g.Wait()
 
-	deadline, cancel := context.WithDeadline(context.WithoutCancel(ctx), stopAt())
-	defer cancel()
-	if ferr := r.tel.Shutdown(deadline); ferr != nil {
-		r.log.WarnContext(deadline, "queued traces not sent before stop", "error", ferr)
+	// Waited for apart from the halt, which must not wait for it. On a
+	// halt this goroutine ends once the group does, within the drain.
+	waited := make(chan error, 1)
+	go func() { waited <- g.Wait() }()
+	select {
+	case err := <-waited:
+		deadline, cancel := context.WithDeadline(context.WithoutCancel(ctx), stopAt())
+		defer cancel()
+		if ferr := r.tel.Shutdown(deadline); ferr != nil {
+			r.log.WarnContext(deadline, "telemetry did not stop cleanly: what it held may not have been sent", "error", ferr)
+		}
+		return err
+	case <-h.Halt:
+		stopServing()
+		return r.halt(ctx)
 	}
-	return err
+}
+
+// halt stops serving at once, as a second SIGTERM or SIGINT asks: it
+// closes both servers, cutting their connections, and stops telemetry
+// without waiting for it to send what it holds. It returns errReported,
+// having logged the halt, or the servers' errors in closing.
+func (r *running) halt(ctx context.Context) error {
+	r.log.ErrorContext(ctx, "stop cut short: a second SIGTERM or SIGINT signal arrived, so Pisati stops now, "+
+		"without waiting for requests and jobs to finish")
+	if err := errors.Join(r.public.Close(), r.internal.Close()); err != nil {
+		return err
+	}
+	// A context already ended: Shutdown stops both providers without
+	// waiting for an export.
+	now, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	cancel()
+	if err := r.tel.Shutdown(now); err != nil && !errors.Is(err, context.Canceled) {
+		r.log.WarnContext(ctx, "telemetry did not stop cleanly: what it held may not have been sent", "error", err)
+	}
+	return errReported
 }
 
 // serveOn serves srv on ln until srv is shut down, and returns why it
@@ -310,7 +421,8 @@ func serveOn(srv *http.Server, ln net.Listener, setting string) error {
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
-	return fmt.Errorf("stopped serving on %s, the address set by %s: %s", ln.Addr(), setting, reason(err))
+	return explain(err, "stopped serving on %s, the address that %s sets, because accepting connections there failed: %s",
+		ln.Addr(), setting, reason(err))
 }
 
 // shutdown shuts srv down within ctx's deadline, and closes the
@@ -320,6 +432,6 @@ func shutdown(ctx context.Context, srv *http.Server, setting string, log *slog.L
 	if !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	log.WarnContext(ctx, "connections closed at the stop deadline", "listener", setting, "deadline", drain)
+	log.WarnContext(ctx, "connections still open at the stop deadline were closed", "listener", setting, "waited", drain.String())
 	return srv.Close()
 }

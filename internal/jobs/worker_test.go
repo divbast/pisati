@@ -258,7 +258,7 @@ func TestExpiredLeaseIsReclaimed(t *testing.T) {
 				t.Errorf("the job ran again after its last attempt")
 			}
 			row := onlyRow(t, s)
-			wantRow(t, row, "dead", 2, "no attempts left: the last attempt's lease expired")
+			wantRow(t, row, "dead", 2, noTriesLeft)
 			if dead := secondLog.find("job dead-lettered"); len(dead) != 1 {
 				t.Errorf("logged %d dead letters, want 1", len(dead))
 			}
@@ -648,8 +648,8 @@ func TestRunDrainsOnShutdown(t *testing.T) {
 					<-entered
 					stopping := time.Now()
 					stopped(t, stop)
-					if took := time.Since(stopping); took != opts.Drain {
-						t.Errorf("Run returned %v after its context ended, want the drain deadline, %v", took, opts.Drain)
+					if took, want := time.Since(stopping), opts.Drain-opts.Reserve; took != want {
+						t.Errorf("Run returned %v after its context ended, want the handlers' share of the drain, %v", took, want)
 					}
 					row := onlyRow(t, s)
 					wantRow(t, row, c.state, c.attempts, "")
@@ -675,6 +675,40 @@ func TestRunDrainsOnShutdown(t *testing.T) {
 				})
 			})
 		}
+	})
+
+	t.Run("a handler that ignores its context", func(t *testing.T) {
+		inBubble(t, func(t *testing.T, s *store.Store) {
+			k := kind(t, "test.deaf")
+			entered, release := make(chan struct{}), make(chan struct{})
+			opts := oneWorker()
+			w, log := newWorker(t, s, map[jobs.Kind]jobs.Handler{k: stuck(entered, release)}, opts, half)
+			enqueue(t, s, jobs.Job{Kind: k})
+
+			stop := start(t, w)
+			<-entered
+			stopping := time.Now()
+			stopped(t, stop)
+			if took := time.Since(stopping); took != opts.Drain {
+				t.Errorf("Run returned %v after its context ended, want the whole drain, %v", took, opts.Drain)
+			}
+			id := strconv.FormatInt(onlyRow(t, s).ID, 10)
+			running := log.find("job still running at the stop deadline")
+			if len(running) != 1 || running[0].level != slog.LevelError || running[0].attrs["kind"] != k.String() ||
+				running[0].attrs["job_id"] != id || running[0].attrs["attempt"] != "1" {
+				t.Errorf("logged %+v, want one error naming the job, its kind and its try", running)
+			}
+			wantRow(t, onlyRow(t, s), "leased", 1, "")
+
+			// Its goroutine goes on without Run, and a new Run waits
+			// for it to end.
+			if err := w.Run(t.Context()); err == nil {
+				t.Error("a second Run started while the first one's handler still ran")
+			}
+			close(release)
+			synctest.Wait()
+			wantRow(t, onlyRow(t, s), "done", 1, "")
+		})
 	})
 
 	t.Run("a stale outcome after a free retry", func(t *testing.T) {
@@ -852,22 +886,25 @@ func TestNewWorkerRefusesInvalid(t *testing.T) {
 		},
 	}
 	for name, change := range map[string]func(*jobs.Options){
-		"the zero Options":            func(o *jobs.Options) { *o = jobs.Options{} },
-		"no workers":                  func(o *jobs.Options) { o.Workers = 0 },
-		"negative workers":            func(o *jobs.Options) { o.Workers = -1 },
-		"no lease":                    func(o *jobs.Options) { o.Lease = 0 },
-		"no backoff base":             func(o *jobs.Options) { o.BackoffBase = 0 },
-		"a cap below the base":        func(o *jobs.Options) { o.BackoffCap = o.BackoffBase - 1 },
-		"negative jitter":             func(o *jobs.Options) { o.Jitter = -0.1 },
-		"jitter of the whole delay":   func(o *jobs.Options) { o.Jitter = 1 },
-		"jitter that is not a number": func(o *jobs.Options) { o.Jitter = math.NaN() },
-		"no attempts":                 func(o *jobs.Options) { o.MaxAttempts = 0 },
-		"no poll":                     func(o *jobs.Options) { o.Poll = 0 },
-		"no drain":                    func(o *jobs.Options) { o.Drain = 0 },
-		"a negative drain":            func(o *jobs.Options) { o.Drain = -time.Second },
-		"no sweep interval":           func(o *jobs.Options) { o.SweepEvery = 0 },
-		"no retention for done jobs":  func(o *jobs.Options) { o.KeepDone = 0 },
-		"no retention for dead jobs":  func(o *jobs.Options) { o.KeepDead = -time.Hour },
+		"the zero Options":               func(o *jobs.Options) { *o = jobs.Options{} },
+		"no workers":                     func(o *jobs.Options) { o.Workers = 0 },
+		"negative workers":               func(o *jobs.Options) { o.Workers = -1 },
+		"no lease":                       func(o *jobs.Options) { o.Lease = 0 },
+		"no backoff base":                func(o *jobs.Options) { o.BackoffBase = 0 },
+		"a cap below the base":           func(o *jobs.Options) { o.BackoffCap = o.BackoffBase - 1 },
+		"negative jitter":                func(o *jobs.Options) { o.Jitter = -0.1 },
+		"jitter of the whole delay":      func(o *jobs.Options) { o.Jitter = 1 },
+		"jitter that is not a number":    func(o *jobs.Options) { o.Jitter = math.NaN() },
+		"no attempts":                    func(o *jobs.Options) { o.MaxAttempts = 0 },
+		"no poll":                        func(o *jobs.Options) { o.Poll = 0 },
+		"no drain":                       func(o *jobs.Options) { o.Drain = 0 },
+		"a negative drain":               func(o *jobs.Options) { o.Drain = -time.Second },
+		"no reserve":                     func(o *jobs.Options) { o.Reserve = 0 },
+		"a negative reserve":             func(o *jobs.Options) { o.Reserve = -time.Second },
+		"a reserve as long as the drain": func(o *jobs.Options) { o.Reserve = o.Drain },
+		"no sweep interval":              func(o *jobs.Options) { o.SweepEvery = 0 },
+		"no retention for done jobs":     func(o *jobs.Options) { o.KeepDone = 0 },
+		"no retention for dead jobs":     func(o *jobs.Options) { o.KeepDead = -time.Hour },
 	} {
 		cases[name] = func() (*jobs.Worker, error) {
 			o := jobs.DefaultOptions()

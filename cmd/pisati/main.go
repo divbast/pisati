@@ -18,17 +18,19 @@
 // Every command but version reads the whole configuration first, as serve
 // does, and refuses to run when serve would refuse to start. serve logs to
 // stdout; the other commands log to stderr, so that stdout carries only a
-// command's result. An error that ends a command is reported on stderr,
-// as lines that start with "pisati: ".
+// command's result. The errors that end a command are reported on stderr,
+// one line for each problem, each starting "pisati: ".
 //
 // serve stops on SIGTERM or SIGINT: it accepts no new work, gives what is
-// running 8 s to finish, and exits 0, even when that deadline cut work
-// off.
+// running one deadline, 8 s, to finish, and exits 0, even when that
+// deadline cut work off. A second SIGTERM or SIGINT before then stops it
+// at once, with exit 1.
 //
 // Exit codes:
 //
-//	0  done, healthy, or stopped by a signal
-//	1  refused or failed: the reason is on stderr
+//	0  done, healthy, or stopped by one signal
+//	1  refused or failed, with the reasons on stderr, or stopped at once
+//	   by a second signal
 //	2  the command line is wrong
 package main
 
@@ -47,7 +49,18 @@ import (
 var version = "dev"
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	ctx, cancel := context.WithCancel(context.Background())
+	halt := make(chan struct{})
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	// It lives as long as the process: the first signal ends run's
+	// context, and the second closes halt, which stops serve at once.
+	go func() {
+		<-signals
+		cancel()
+		<-signals
+		close(halt)
+	}()
 	code := run(ctx, Host{
 		Args:     os.Args[1:],
 		Lookup:   os.LookupEnv,
@@ -56,8 +69,9 @@ func main() {
 		Rand:     rand.Reader,
 		Stdout:   os.Stdout,
 		Stderr:   os.Stderr,
+		Halt:     halt,
 	})
-	stop()
+	cancel()
 	os.Exit(code)
 }
 
