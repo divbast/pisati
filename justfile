@@ -146,6 +146,52 @@ _one-suppression:
 go-unit:
     go test -race -shuffle=on -vet=off -count=1 ./...
 
+# Each package's statements count as covered by its own tests alone, as
+# go test -cover counts them, and a package with no tests counts with
+# none covered. The floors compare whole numbers of statements, so no
+# rounding lets a package through.
+
+# Fail unless each internal/core package covers 95% and the module 80%
+[script("mise", "exec", "--", "bash", "-euo", "pipefail")]
+coverage:
+    profile=$(mktemp)
+    trap 'rm -f -- "${profile}"' EXIT
+    go test -vet=off -count=1 -coverprofile="${profile}" ./...
+    module=$(go list -m)
+    awk -v core="${module}/internal/core/" -v module="${module}" '
+        NR == 1 { next }
+        {
+            block = $1
+            package = substr(block, 1, index(block, ":") - 1)
+            sub(/\/[^\/]*$/, "", package)
+            statements[block] = $2
+            packages[block] = package
+            if ($3 > 0) covered[block] = 1
+        }
+        END {
+            for (block in statements) {
+                n = statements[block]
+                total += n
+                all[packages[block]] += n
+                if (block in covered) {
+                    hit += n
+                    hits[packages[block]] += n
+                }
+            }
+            status = 0
+            for (package in all) {
+                if (index(package, core) != 1) continue
+                printf "coverage: %s: %.1f%% of %d statements, at least 95%% wanted\n", package, 100 * hits[package] / all[package], all[package]
+                if (100 * hits[package] < 95 * all[package]) status = 1
+            }
+            printf "coverage: %s: %.1f%% of %d statements, at least 80%% wanted\n", module, total ? 100 * hit / total : 0, total
+            if (total == 0 || 100 * hit < 80 * total) status = 1
+            fflush()
+            if (status) print "coverage: a floor is not met: test what is not covered, rather than lower the floor" > "/dev/stderr"
+            exit status
+        }
+    ' "${profile}"
+
 # The acceptance module is all tests, so govulncheck sees its code only
 # with -test.
 
@@ -338,9 +384,120 @@ dev:
     SHELL=bash go tool -modfile=tools/go.mod templ generate --watch --proxy=http://localhost:8080 --open-browser=false \
         --cmd="${serve}" --watch-pattern='(.+\.go$)|(.+\.templ$)'
 
+# The slow suites, which the dispatch-only workflows browser.yml and
+# fuzz.yml run too, and slow, below, before every push.
+
+# The browser suite runs in Chromium, Firefox and WebKit, natively, each
+# against this platform's baselines under test/browser/baselines. Each
+# test starts its own Pisati, as test/browser/fixtures.ts says: pisati
+# serve, built here from the tree, serving the production build of the
+# front end that go:embed compiles in, so no Vite runs. Playwright fetches
+# the browsers its release drives the first time; on Linux their system
+# libraries come first, from playwright install-deps, as root. ARGS go to
+# playwright test: --update-snapshots writes this platform's baselines
+# afresh, and --project=webkit runs one browser. A failed run leaves its
+# screenshots, diffs and Pisati's logs where it says, in a directory of
+# its own unless BROWSER_RESULTS names one.
+
+# Run the browser suite: Chromium, Firefox and WebKit, with axe-core and screenshots
+[positional-arguments]
+[script("mise", "exec", "--", "bash", "-euo", "pipefail")]
+browser *ARGS:
+    {{ just_executable() }} fe-build
+    run=$(mktemp -d)
+    results="${BROWSER_RESULTS:-${run}/results}"
+    go build -o "${run}/pisati" ./cmd/pisati
+    pnpm exec playwright install chromium firefox webkit
+    status=0
+    BROWSER_PISATI="${run}/pisati" pnpm exec playwright test --config test/browser/playwright.config.ts \
+        --output "${results}" "$@" || status=$?
+    if [[ "${status}" -ne 0 ]]; then
+        rm -f -- "${run}/pisati"
+        echo "browser: the run's screenshots, diffs and logs are in ${results}" >&2
+        exit "${status}"
+    fi
+    rm -rf -- "${run}"
+
+# How long fuzz gives each fuzz target: just FUZZTIME=30s fuzz
+FUZZTIME := "10m"
+
+# Go fuzzes one target of one package at a time, so these go through each
+# in turn. They carry on past a failure, and name every target that failed
+# at the end. -fuzzminimizetime=1s keeps the minimiser, which goes over
+# each new input the fuzzer keeps, from taking the target's time as its
+# corpus grows. A failing input lands under its package's testdata/fuzz,
+# where plain go test runs it from then on: commit it with the fix.
+
+# Fuzz every target in every package, for FUZZTIME each
+fuzz:
+    {{ just_executable() }} _fuzz '{{ FUZZTIME }}' ./...
+
+# The packages that differ from main are those with a Go file, or a fuzz
+# corpus under testdata/fuzz, that differs from main's, committed on this
+# branch or not: added, changed or removed. The acceptance module, a module
+# of its own, and tools/ hold no fuzz target.
+
+# Fuzz the targets in every package that differs from main, for 30 s each
+[script("mise", "exec", "--", "bash", "-euo", "pipefail")]
+fuzz-changed:
+    if ! base=$(git merge-base main HEAD 2>/dev/null); then
+        echo "fuzz-changed: there is no branch main to compare with; fetch it first" >&2
+        exit 1
+    fi
+    changed=$({ git diff --name-only "${base}" --; git ls-files --others --exclude-standard; } |
+        awk '/(^|\/)testdata\/fuzz\// { sub(/(^|\/)testdata\/fuzz\/.*/, ""); print ($0 == "" ? "." : $0); next }
+            /\.go$/ { print (sub(/\/[^\/]*$/, "") ? $0 : ".") }' | sort -u)
+    root=$(go list -m -f '{{{{.Dir}}')
+    packages=()
+    while read -r path dir; do
+        relative="${dir#"${root}"}"
+        relative="${relative#/}"
+        if grep -qxF -- "${relative:-.}" <<<"${changed}"; then
+            packages+=("${path}")
+        fi
+    done < <(go list -f '{{{{.ImportPath}} {{{{.Dir}}' ./...)
+    if [[ "${#packages[@]}" -eq 0 ]]; then
+        echo "fuzz-changed: no package differs from main"
+        exit 0
+    fi
+    {{ just_executable() }} _fuzz 30s "${packages[@]}"
+
+# Fuzz each target in PACKAGES for TIME, one at a time
+[positional-arguments]
+[script("mise", "exec", "--", "bash", "-euo", "pipefail")]
+_fuzz TIME *PACKAGES:
+    time="$1"
+    shift
+    targets=$(go test -list '^Fuzz' "$@" |
+        awk '/^Fuzz/ { names[++n] = $1; next } /^ok / { for (i = 1; i <= n; i++) print $2, names[i]; n = 0 }')
+    if [[ -z "${targets}" ]]; then
+        echo "fuzz: no fuzz target in $*"
+        exit 0
+    fi
+    failed=()
+    while read -r package target; do
+        echo "fuzz: ${target} in ${package}, for ${time}"
+        if ! go test -run='^$' -fuzz="^${target}\$" -fuzztime="${time}" -fuzzminimizetime=1s "${package}" </dev/null; then
+            failed+=("${target} in ${package}")
+        fi
+    done <<<"${targets}"
+    if [[ "${#failed[@]}" -gt 0 ]]; then
+        printf 'fuzz: failed: %s\n' "${failed[@]}" >&2
+        exit 1
+    fi
+
+# What runs before every push: the browser suite, then every fuzz target
+# for TIME, 30 s unless given, as `just slow 10m` gives the 10 minutes of
+# just fuzz and fuzz.yml.
+
+# Before every push: the browser suite, then every fuzz target for TIME
+slow TIME="30s":
+    {{ just_executable() }} browser
+    {{ just_executable() }} FUZZTIME='{{ TIME }}' fuzz
+
 # Every lint gate. Needs a running Docker daemon, for docker build --check
 lint:
-    {{ just_executable() }} ci-fresh actions-check workflow-audit actionlint shell-lint generate-check go-gates go-unit vuln secrets fe-check reuse-lint app-lint
+    {{ just_executable() }} ci-fresh actions-check workflow-audit actionlint shell-lint generate-check go-gates go-unit coverage vuln secrets fe-check reuse-lint app-lint
 
 # Every gate. Run before committing
 ci:

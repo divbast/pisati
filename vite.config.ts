@@ -236,6 +236,7 @@ export default defineConfig({
               from: "lib",
               name: [
                 "AbortSignal",
+                "Animation",
                 "Document",
                 "FormData",
                 "HTMLButtonElement",
@@ -247,6 +248,7 @@ export default defineConfig({
                 "RequestInit",
                 "Response",
                 "SubmitEvent",
+                "SVGElement",
                 "URL",
               ],
             },
@@ -256,6 +258,27 @@ export default defineConfig({
               package: "@voidzero-dev/vite-plus-core",
               name: ["ConfigEnv", "UserConfig"],
             },
+            // The browser suite's: Playwright's, axe-core's and Node's
+            // types, as mutable by nature as the DOM's.
+            {
+              from: "package",
+              package: "playwright-core",
+              name: ["BrowserContext", "Cookie", "Locator", "Page", "Response"],
+            },
+            // Playwright's fixtures take the four as one argument.
+            {
+              from: "package",
+              package: "playwright",
+              name: [
+                "PlaywrightTestArgs",
+                "PlaywrightTestOptions",
+                "PlaywrightWorkerArgs",
+                "PlaywrightWorkerOptions",
+                "TestInfo",
+              ],
+            },
+            { from: "package", package: "axe-core", name: ["NodeResult", "Result"] },
+            { from: "package", package: "@types/node", name: ["ChildProcess", "Server"] },
           ],
         },
       ],

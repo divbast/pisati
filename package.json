@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.65.1",
     "browserslist": "4.29.6",
     "happy-dom": "21.0.4",
     "lightningcss": "1.33.0",

@@ -27,6 +27,7 @@
   },
   "include": [
     "web/ts",
+    "test/browser",
     "vite.config.ts",
     "vite.devserver.ts",
     "vite.config.test.ts",

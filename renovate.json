@@ -20,6 +20,12 @@
       "matchDepNames": ["pnpm"],
       "groupName": "pnpm",
       "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "Playwright brings the builds of Chromium, Firefox and WebKit the browser suite runs, and a new build can move pixels in the approved screenshot baselines. Only just browser and the dispatched browser.yml check them, never a pull request's checks, so an update waits for approval on the Dependency Dashboard: the baselines are then checked, and approved again if they change, with it.",
+      "matchManagers": ["npm"],
+      "matchDepNames": ["@playwright/test", "playwright", "playwright-core"],
+      "dependencyDashboardApproval": true
     }
   ]
 }
