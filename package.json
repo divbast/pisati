@@ -16,5 +16,5 @@
   "browserslist": [
     "last 2 years"
   ],
-  "packageManager": "pnpm@12.21.0"
+  "packageManager": "pnpm@12.22.0"
 }
