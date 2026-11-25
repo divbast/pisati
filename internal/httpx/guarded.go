@@ -182,9 +182,10 @@ func NewGuardedClient(o GuardedOptions) (*GuardedClient, error) {
 		Timeout: o.Timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > maxRedirects {
-				return explain.New(ErrTooManyRedirects, "the request was redirected more than %d times: each answer "+
-					"told Pisati to ask another URL instead, and Pisati follows no more than %d such answers",
-					maxRedirects, maxRedirects)
+				return explain.New(ErrTooManyRedirects, "the request was redirected more than %s: each answer "+
+					"told Pisati to ask another URL instead, and Pisati follows no more than %s",
+					explain.Count(int64(maxRedirects), "time", "times"),
+					explain.Count(int64(maxRedirects), "such answer", "such answers"))
 			}
 			return c.check.url(req.URL)
 		},
@@ -432,8 +433,8 @@ func (k addressCheck) allows(a netip.Addr) bool {
 func (k addressCheck) url(u *url.URL) error {
 	switch {
 	case u.Scheme == "":
-		return explain.New(ErrAddressRefused, "Pisati sends requests only to http and https URLs, and this URL has no "+
-			"scheme, such as https: at its start")
+		return explain.New(ErrAddressRefused, "Pisati sends requests only to http and https URLs, and this URL does "+
+			"not start with http:// or https://")
 	case u.Scheme != "http" && u.Scheme != "https":
 		return explain.New(ErrAddressRefused, "Pisati sends requests only to http and https URLs, and not to one that "+
 			"starts with %q", u.Scheme+":")

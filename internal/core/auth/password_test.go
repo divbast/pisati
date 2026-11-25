@@ -170,3 +170,20 @@ func TestPasswordErrorsGiveTheBounds(t *testing.T) {
 		}
 	}
 }
+
+// TestSizesInTheOneForm: the core writes a size as explain.Bytes does,
+// though it cannot import it, digits grouped and the unit after them.
+func TestSizesInTheOneForm(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("a", 12345)
+	_, err := auth.ParseHash(long)
+	if want := "is " + explain.Bytes(int64(len(long))) + " long"; err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("ParseHash of %d bytes: %v, want it to say %q", len(long), err, want)
+	}
+	_, err = auth.HashPassword(password(t, "correct horse battery staple"), auth.Salt{1}, auth.Params{Memory: 2 << 20, Time: 1, Threads: 1})
+	if want := "for 1 thread, but Pisati takes at least 8 KiB for each thread, and at most 1,048,576 KiB in all"; err == nil ||
+		!strings.Contains(err.Error(), want) {
+		t.Errorf("HashPassword with too much memory: %v, want it to say %q", err, want)
+	}
+}

@@ -54,7 +54,7 @@ func TestErrorSwitchIsExhaustive(t *testing.T) {
 		{err: &app.Forbidden{}, status: http.StatusForbidden, message: "the signed-in user may not do this"},
 		{
 			err: &app.Unauthenticated{}, status: http.StatusUnauthorized,
-			message: "this needs a signed-in user, and the request comes from none",
+			message: "this needs a user to be signed in, and none is",
 		},
 		{
 			err:     &app.Invalid{Field: "title", Reason: app.TooLong},
@@ -63,12 +63,12 @@ func TestErrorSwitchIsExhaustive(t *testing.T) {
 		},
 		{
 			err: &app.Conflict{}, status: http.StatusConflict,
-			message: "the change does not fit what is there already, such as a name that is taken already",
+			message: "the change does not agree with what is stored already: for example, it uses a name that is taken",
 		},
 		{
 			err:     &app.RateLimited{RetryAfter: 30 * time.Second},
 			status:  http.StatusTooManyRequests,
-			message: "the request came too soon after others from the same place: try again after 30s",
+			message: "the request came too often: try again after 30s",
 		},
 	} {
 		t.Run(fmt.Sprintf("%T", tc.err), func(t *testing.T) {

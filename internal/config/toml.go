@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -60,9 +61,9 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 			case knownSection(section):
 				// Fixing the case alone would give a table's name a value
 				// that is no table.
-				unknown = append(unknown, explain.New(ErrUnknown, "the configuration file %q has the key %q at its "+
-					"top level, but Pisati takes only tables there, with names in lower case. Write it as one table, "+
-					"[%s], with its settings in it", name, tableName, section))
+				unknown = append(unknown, explain.New(ErrUnknown, "the configuration file %q has %s at its top "+
+					"level, but Pisati takes only tables there, with names in lower case. Write it as one table, "+
+					"[%s], with its settings in it", name, notTable(strconv.Quote(tableName), doc[tableName]), section))
 			default:
 				unknown = append(unknown, unknownName(name, aKey, tableName, section))
 			}
@@ -78,9 +79,9 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 			continue
 		}
 		if !isTable {
-			wrongType = append(wrongType, explain.New(ErrInvalid, "the configuration file %q has the key %s at its "+
-				"top level, but %s is a table of settings. Write it as one table, [%s], with its settings in it. %s",
-				name, tableName, tableName, tableName, notUsed))
+			wrongType = append(wrongType, explain.New(ErrInvalid, "the configuration file %q has %s at its top "+
+				"level, but %s is one table of settings. Write it as one table, [%s], with its settings in it. %s",
+				name, notTable(tableName, doc[tableName]), tableName, tableName, notUsed))
 			continue
 		}
 		for _, key := range slices.Sorted(maps.Keys(table)) {
@@ -113,6 +114,16 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 		}
 	}
 	return l, unknown, wrongType, otherCase
+}
+
+// notTable names what the file holds at its top level under name, which
+// is no table: an array of tables, as [[name]] or name = [{…}] make it,
+// or a key with a value of another kind.
+func notTable(name string, v any) string {
+	if _, ok := v.([]any); ok && len(tablesOf(v)) > 0 {
+		return "an array of tables named " + name
+	}
+	return "the key " + name
 }
 
 // notUsed says what Pisati does with a file whose value is of the wrong

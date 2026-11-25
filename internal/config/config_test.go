@@ -639,7 +639,7 @@ func TestSettingsTable(t *testing.T) {
 // name, as written and quoted, in the file file.
 func namesUnknown(msg, file, name string) bool {
 	quoted := " " + strconv.Quote(name)
-	return strings.HasPrefix(msg, "the configuration file "+strconv.Quote(file)+" has the ") &&
+	return strings.HasPrefix(msg, "the configuration file "+strconv.Quote(file)+" has ") &&
 		(strings.Contains(msg, quoted+" ") || strings.Contains(msg, quoted+", "))
 }
 
@@ -1820,7 +1820,15 @@ func TestDevViteURLs(t *testing.T) {
 				}
 				return
 			}
+			// The refusal is dev.vite_url's own, and says that it shows no
+			// value, whichever of its sentences gives the reason.
 			refused(t, err, config.ErrInvalid, "dev.vite_url (PISATI_DEV_VITE_URL)")
+			if !slices.ContainsFunc(errorParts(err), func(e error) bool {
+				return errors.Is(e, config.ErrInvalid) && strings.HasPrefix(e.Error(), "dev.vite_url (PISATI_DEV_VITE_URL) ") &&
+					strings.Contains(e.Error(), "Pisati does not show the value")
+			}) {
+				t.Errorf("error %q has no problem of dev.vite_url's own that says it shows no value", err)
+			}
 			for _, part := range append(c.userInfo(), url) {
 				if part != "" && strings.Contains(err.Error(), part) {
 					t.Errorf("error %q repeats %q, of the value", err, part)
@@ -2503,10 +2511,17 @@ func TestAdviceBranches(t *testing.T) {
 			want:  config.ErrUnknown,
 			parts: []string{`has the key "SERVER" at its top level`, "takes only tables there", "[server]"},
 		},
+		"an array of tables under a table's name": {
+			// A key in another case has the file read as a map, the path
+			// that tells an array of tables from a table.
+			s:     setup{files: fstest.MapFS{"pisati.toml": tomlFile("[[server]]\nlisten = \":9000\"\n[LOG]\n")}, env: env{"PISATI_SERVER_BASE_URL": baseURL}},
+			want:  config.ErrInvalid,
+			parts: []string{"has an array of tables named server at its top level", "Write it as one table, [server]"},
+		},
 		"a table's name, with no table": {
 			s:     setup{files: fstest.MapFS{"pisati.toml": tomlFile("server = 1\nLOG = 2\n")}, env: env{"PISATI_SERVER_BASE_URL": baseURL}},
 			want:  config.ErrInvalid,
-			parts: []string{"has the key server at its top level", "is a table of settings", "Write it as one table, [server]"},
+			parts: []string{"has the key server at its top level", "is one table of settings", "Write it as one table, [server]"},
 		},
 		"a list of the wrong type, read as a map": {
 			s:     setup{files: fstest.MapFS{"pisati.toml": tomlFile("[server]\nBASE_URL = \"" + baseURL + "\"\ntrusted_proxies = \"10.0.0.1\"\n")}},

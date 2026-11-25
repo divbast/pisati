@@ -538,7 +538,8 @@ func (w *Worker) release(ctx context.Context, j storedb.ClaimJobRow) {
 	if w.settle(ctx, j, func(q *storedb.Queries) (int64, error) {
 		return q.ReleaseJob(ctx, storedb.ReleaseJobParams{ID: j.ID, LeaseToken: j.LeaseToken})
 	}) {
-		w.log.InfoContext(ctx, "job cut off at the stop and made ready to run again, with this try not counted", "kind", j.Kind,
+		w.log.InfoContext(ctx, "job stopped at the stop deadline and made ready to run again, with this try not counted",
+			"kind", j.Kind,
 			"job_id", j.ID, "attempt", j.Attempts)
 	}
 }

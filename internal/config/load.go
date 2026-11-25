@@ -325,8 +325,8 @@ func cannotRead(err error, what string) error {
 		return explain.New(err, "Pisati cannot read %s, because the user that runs Pisati does not have permission to. "+
 			"Give that user permission to read it", what)
 	}
-	return explain.New(err, "Pisati cannot read %s: %s. Check that the user that runs Pisati can read it, and that "+
-		"the disk that holds it works", what, pathless(err))
+	return explain.New(err, "Pisati cannot read %s: %s. Check that it is a regular file that the user that runs "+
+		"Pisati can read", what, pathless(err))
 }
 
 // pathless returns the error inside err when err is an *fs.PathError,

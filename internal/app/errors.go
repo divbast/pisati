@@ -90,7 +90,7 @@ func (r Reason) String() string {
 	case NotAllowed:
 		return "is not allowed"
 	case Malformed:
-		return "is not in the form it takes"
+		return "is written in a form that this input does not take"
 	}
 	return "is refused, for no reason given"
 }
@@ -125,11 +125,11 @@ func (e *RateLimited) RetryAfterSeconds() int64 {
 func (*NotFound) Error() string  { return "the page or the item asked for does not exist" }
 func (*Forbidden) Error() string { return "the signed-in user may not do this" }
 func (*Unauthenticated) Error() string {
-	return "this needs a signed-in user, and the request comes from none"
+	return "this needs a user to be signed in, and none is"
 }
 
 func (*Conflict) Error() string {
-	return "the change does not fit what is there already, such as a name that is taken already"
+	return "the change does not agree with what is stored already: for example, it uses a name that is taken"
 }
 
 func (e *Invalid) Error() string {
@@ -141,9 +141,9 @@ func (e *Invalid) Error() string {
 
 func (e *RateLimited) Error() string {
 	if e == nil {
-		return "the request came too soon after others from the same place"
+		return "the request came too often"
 	}
-	return fmt.Sprintf("the request came too soon after others from the same place: try again after %s", e.RetryAfter)
+	return fmt.Sprintf("the request came too often: try again after %s", e.RetryAfter)
 }
 
 // Each variant is an Error as a pointer, and only as one: the compiler

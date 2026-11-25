@@ -494,15 +494,17 @@ func listen(ctx context.Context, lc *net.ListenConfig, addr config.ListenAddr, s
 		return nil, explain.New(err, "Pisati cannot listen on %s, the address that %s sets, because another process already "+
 			"uses it. Stop that process, or set %s to another address", addr, setting, setting)
 	case errors.Is(err, syscall.EACCES):
-		return nil, explain.New(err, "Pisati cannot listen on %s, the address that %s sets, because the user that runs "+
-			"Pisati may not listen on port %d. Set %s to a port above 1023, which any user may listen on",
-			addr, setting, addr.Port(), setting)
+		return nil, explain.New(err, "Pisati cannot listen on %s, the address that %s sets, because the operating "+
+			"system does not let the user that runs Pisati listen there. Set %s to an address and port that this user "+
+			"may listen on. On most systems, only privileged users may listen on a port below 1024, and a security "+
+			"policy such as SELinux or AppArmor can refuse others", addr, setting, setting)
 	case errors.Is(err, syscall.EADDRNOTAVAIL):
 		return nil, explain.New(err, "Pisati cannot listen on %s, the address that %s sets, because this machine has "+
 			"no such address. Set %s to an address of this machine, or leave its host out, as in :%d, to listen on "+
 			"every address", addr, setting, setting, addr.Port())
 	case err != nil:
-		return nil, explain.New(err, "Pisati cannot listen on %s, the address that %s sets: %s", addr, setting, reason(err))
+		return nil, explain.New(err, "Pisati cannot listen on %s, the address that %s sets: %s. Check that the host in "+
+			"%s is a name or an address of this machine", addr, setting, reason(err), setting)
 	}
 	return ln, nil
 }

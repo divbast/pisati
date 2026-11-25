@@ -50,9 +50,10 @@ func (p Params) check() error {
 	case p.Threads < 1:
 		return refuse("the password hash's settings ask for no threads, but Pisati takes 1 to 255")
 	case p.Memory < minMemoryPerThread*uint32(p.Threads) || p.Memory > maxMemory:
-		return refuse("the password hash's settings give %d KiB of memory (a KiB is 1,024 bytes) for %d threads, but "+
-			"Pisati takes at least %d KiB for each thread, and at most %d KiB in all", p.Memory, p.Threads,
-			minMemoryPerThread, maxMemory)
+		return refuse("the password hash's settings give %s of memory (a KiB is 1,024 bytes) for %s, but Pisati "+
+			"takes at least %s for each thread, and at most %s in all", count(uint64(p.Memory), "KiB", "KiB"),
+			count(uint64(p.Threads), "thread", "threads"), count(minMemoryPerThread, "KiB", "KiB"),
+			count(maxMemory, "KiB", "KiB"))
 	}
 	return nil
 }
@@ -214,8 +215,8 @@ func (h Hash) MarshalText() ([]byte, error) {
 // longest such hash before reading it. Its errors never repeat s.
 func ParseHash(s string) (Hash, error) {
 	if len(s) > maxPHC {
-		return Hash{}, refuse("the stored password hash is %d bytes long, more than the %d bytes that a hash of "+
-			"Pisati's takes", len(s), maxPHC)
+		return Hash{}, refuse("the stored password hash is %s long, more than the %s that a hash of Pisati's takes",
+			count(uint64(len(s)), "byte", "bytes"), count(uint64(maxPHC), "byte", "bytes"))
 	}
 	rest, ok := strings.CutPrefix(s, phcPrefix)
 	if !ok {

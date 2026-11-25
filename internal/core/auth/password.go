@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"unicode/utf8"
 )
 
@@ -62,6 +63,22 @@ func (r *refusal) Unwrap() error { return ErrInvalid }
 // refuse returns the refusal format and args say.
 func refuse(format string, args ...any) error {
 	return &refusal{msg: fmt.Sprintf(format, args...)}
+}
+
+// count returns n, its digits in groups of three joined by commas, then
+// one when n is 1, and many otherwise: the form in which every message of
+// Pisati's writes a count or a size, as package explain's Count does.
+// The core imports nothing outside the standard library and itself, so it
+// writes the form here, and a test holds the two to one form.
+func count(n uint64, one, many string) string {
+	digits := strconv.FormatUint(n, 10)
+	for i := len(digits) - 3; i > 0; i -= 3 {
+		digits = digits[:i] + "," + digits[i:]
+	}
+	if n == 1 {
+		return "1 " + one
+	}
+	return digits + " " + many
 }
 
 // redacted stands in for a secret wherever one would show: all of a

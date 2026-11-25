@@ -112,8 +112,8 @@ type IdempotencyKey struct {
 // repeats s.
 func NewIdempotencyKey(s string) (IdempotencyKey, error) {
 	if len(s) == 0 || len(s) > maxKeyBytes {
-		return IdempotencyKey{}, explain.New(ErrInvalid, "jobs.NewIdempotencyKey was given %d bytes, but a key is 1 to %d "+
-			"bytes long. This is a bug in Pisati", len(s), maxKeyBytes)
+		return IdempotencyKey{}, explain.New(ErrInvalid, "jobs.NewIdempotencyKey was given %s, but a key is 1 to %d "+
+			"bytes long. This is a bug in Pisati", explain.Bytes(int64(len(s))), maxKeyBytes)
 	}
 	for i := range len(s) {
 		if s[i] < ' ' || s[i] > '~' {
