@@ -34,9 +34,12 @@ type header struct {
 //     same-origin;
 //   - Permissions-Policy, which allows no page the camera, microphone,
 //     geolocation, payment or USB;
-//   - when base is https, and only then: Strict-Transport-Security for
-//     two years, reaching as far as hsts says, and upgrade-insecure-requests
-//     in the policy.
+//   - when base is https: upgrade-insecure-requests in the policy, and,
+//     unless base is on localhost, 127.0.0.1 or [::1],
+//     Strict-Transport-Security for two years, reaching as far as hsts
+//     says. A browser keeps a host it got HSTS from to https on every
+//     port, so on a loopback host it would refuse every other site served
+//     there over http.
 //
 // The response is sent with the policy its CSP holds when the header is
 // written, whatever the handler sets as Content-Security-Policy itself.
@@ -70,7 +73,7 @@ func SecurityHeaders(base config.BaseURL, hsts config.HSTSScope, dev config.Dev)
 		{name: "Cross-Origin-Resource-Policy", value: "same-origin"},
 		{name: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=(), usb=()"},
 	}
-	if https {
+	if https && !base.IsLocal() {
 		fixed = append(fixed, header{name: "Strict-Transport-Security", value: sts})
 	}
 	return func(next http.Handler) http.Handler {

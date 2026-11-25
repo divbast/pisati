@@ -105,7 +105,8 @@ type Server struct {
 	// TrustedProxies are the addresses whose forwarded headers are
 	// believed: none by default. A bare address is a /32 or /128.
 	TrustedProxies []netip.Prefix
-	// HSTS is how far Strict-Transport-Security reaches over https.
+	// HSTS is how far Strict-Transport-Security reaches over https. A
+	// base URL on localhost, 127.0.0.1 or [::1] gets none.
 	HSTS HSTSScope
 }
 

@@ -67,6 +67,17 @@ func TestSecurityHeadersByScheme(t *testing.T) {
 			name: "https, preload", base: "https://blog.example:8443", hsts: config.HSTSPreload,
 			wantHSTS: "max-age=63072000; includeSubDomains; preload",
 		},
+		// A browser would keep to https for every port of a loopback
+		// host, for two years, other sites served there on http among
+		// them: a local https URL gets no HSTS.
+		{name: "https localhost, preload", base: "https://localhost:8443", hsts: config.HSTSPreload},
+		{name: "https 127.0.0.1", base: "https://127.0.0.1", hsts: config.HSTSHostOnly},
+		{name: "https [::1], subdomains", base: "https://[::1]:8443", hsts: config.HSTSIncludeSubdomains},
+		// A real host name that starts like a loopback one keeps it.
+		{
+			name: "https, a host under localhost's name", base: "https://localhost.example", hsts: config.HSTSHostOnly,
+			wantHSTS: "max-age=63072000",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -76,7 +87,7 @@ func TestSecurityHeadersByScheme(t *testing.T) {
 			got := get(t, httpx.Chain(nonceHandler(t, &nonce), httpx.SecurityHeaders(baseURL(t, tt.base), tt.hsts, config.Dev{})))
 
 			csp := strictCSP(nonce)
-			if tt.wantHSTS != "" {
+			if strings.HasPrefix(tt.base, "https://") {
 				csp += "; upgrade-insecure-requests"
 			}
 			if want := wantHeaders(tt.base, csp, tt.wantHSTS); !maps.EqualFunc(got, want, slices.Equal) {
@@ -145,9 +156,10 @@ func TestSecurityHeadersDevMode(t *testing.T) {
 			origin: "https://localhost:5173", live: "wss://localhost:5173",
 		},
 		{
+			// No HSTS on a loopback host, as in production.
 			name: "https on localhost", base: "https://localhost:8443", vite: "https://localhost:5173",
 			origin: "https://localhost:5173", live: "wss://localhost:5173",
-			hsts: "max-age=63072000", upgrade: "; upgrade-insecure-requests",
+			upgrade: "; upgrade-insecure-requests",
 		},
 	}
 	for _, tt := range tests {
