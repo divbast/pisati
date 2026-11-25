@@ -693,3 +693,24 @@ func TestServeWarnsWithoutTrustedProxies(t *testing.T) {
 		})
 	}
 }
+
+func TestInternalListenerLogsProbesAtDebug(t *testing.T) {
+	s := newSite(t)
+	v := s.serve(t)
+	internal := fmt.Sprintf("http://127.0.0.1:%d", s.internal)
+	for _, path := range []string{"/healthz", "/metrics", "/nothing"} {
+		get(t, http.MethodGet, internal+path)
+	}
+	if code := v.stop(); code != 0 {
+		t.Errorf("serve exited %d", code)
+	}
+	// The log is at info, as by default: the health probe's and the
+	// scraper's requests, at debug, are not in it, and the rest are.
+	var paths []string
+	for _, rec := range v.stdout.logged(t, "request answered") {
+		paths = append(paths, fmt.Sprint(rec["path"]))
+	}
+	if !slices.Equal(paths, []string{"/nothing"}) {
+		t.Errorf("serve logged requests for %q, want only /nothing: /healthz and /metrics at debug", paths)
+	}
+}

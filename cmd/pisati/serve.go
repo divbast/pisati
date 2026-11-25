@@ -374,6 +374,9 @@ func (g *group) Wait() error {
 type running struct {
 	log *slog.Logger
 	tel telemetry.Providers
+	// collector is where tel sends traces, telemetry.otlp_endpoint: none,
+	// when it is not set, and tel then holds metrics alone.
+	collector config.OptionalURL
 	// telStopping is taken by whichever stops tel first: the flush, or a
 	// halt.
 	telStopping          *atomic.Bool
@@ -456,6 +459,7 @@ func start(ctx context.Context, h Host, cfg config.Config, creds fs.FS, st *stat
 	return &running{
 		log:         log,
 		tel:         tel,
+		collector:   cfg.Telemetry.OTLPEndpoint,
 		telStopping: telStopping,
 		public:      httpx.NewServer(cfg.Server.Listen, public, httpx.DefaultTimeouts(), log),
 		internal:    httpx.NewServer(cfg.Server.InternalListen, internal, httpx.DefaultTimeouts(), log),
@@ -576,7 +580,10 @@ func internalHandler(db *store.Store, tel telemetry.Providers, pprof config.Swit
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	return httpx.Chain(mux, httpx.RequestID(), httpx.Recover(log), httpx.AccessLog(log, clock))
+	// The health probe asks every few seconds, and a scraper about as
+	// often: their records are at debug level, so that the log at info
+	// level shows the rest.
+	return httpx.Chain(mux, httpx.RequestID(), httpx.Recover(log), httpx.AccessLog(log, clock, "/healthz", "/metrics"))
 }
 
 // healthz answers 200 ok while Pisati reads its database from disk within
@@ -659,8 +666,14 @@ func (r *running) serve(ctx context.Context, h Host, l *life) error {
 	deadline, cancel := context.WithDeadline(context.WithoutCancel(ctx), stopAt())
 	defer cancel()
 	if ferr := r.tel.Shutdown(deadline); ferr != nil {
-		r.log.WarnContext(deadline, "telemetry's traces and metrics not both shut down, so traces still held may not have "+
-			"reached the collector that telemetry.otlp_endpoint names", "error", ferr)
+		// Only traces leave Pisati, and only for a collector: without one,
+		// nothing waited to be sent.
+		if _, ok := r.collector.Get(); ok {
+			r.log.WarnContext(deadline, "telemetry's traces and metrics not both shut down, so traces still held may not "+
+				"have reached the collector that telemetry.otlp_endpoint names", "error", ferr)
+		} else {
+			r.log.WarnContext(deadline, "telemetry's metrics did not shut down", "error", ferr)
+		}
 	}
 	return err
 }

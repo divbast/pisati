@@ -4,6 +4,7 @@
 package httpx_test
 
 import (
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -92,5 +93,24 @@ func TestAccessLogOmitsQueryAndIP(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAccessLogRoutineAtDebug(t *testing.T) {
+	t.Parallel()
+
+	log, buf := newLog()
+	h := httpx.Chain(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		httpx.AccessLog(log, time.Now, "/healthz", "/metrics"))
+	for _, path := range []string{"/healthz", "/metrics", "/healthz/", "/metrics?x=1", "/other", "/"} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, http.NoBody))
+	}
+	var got []string
+	for _, rec := range buf.records(t) {
+		got = append(got, fmt.Sprint(rec["path"], " ", rec["level"]))
+	}
+	want := []string{"/healthz DEBUG", "/metrics DEBUG", "/healthz/ INFO", "/metrics DEBUG", "/other INFO", "/ INFO"}
+	if !slices.Equal(got, want) {
+		t.Errorf("logged %q, want %q", got, want)
 	}
 }
