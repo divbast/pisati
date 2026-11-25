@@ -5,6 +5,7 @@ package store_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -504,5 +506,129 @@ func TestLockIsExclusive(t *testing.T) {
 
 	if _, err := store.AcquireLock(ctx, config.StateDir{}); err == nil || !strings.Contains(err.Error(), "which is a bug in Pisati") {
 		t.Errorf("AcquireLock of the zero StateDir: %v; want it refused as a bug", err)
+	}
+}
+
+// endsAfter is a context that ends, as its Err reports it, from the
+// (n+1)th time it is asked on: a stop that comes just after a call's nth
+// check of its context. Its Done never closes, so only those checks see it
+// end, each at its own place in the call.
+type endsAfter struct {
+	context.Context //nolint:containedctx // it is a context: it wraps its parent, as the context package's own do
+	left            atomic.Int64
+}
+
+func newEndsAfter(parent context.Context, n int64) *endsAfter {
+	c := &endsAfter{Context: parent}
+	c.left.Store(n)
+	return c
+}
+
+func (c *endsAfter) Err() error {
+	if c.left.Add(-1) < 0 {
+		return context.Canceled
+	}
+	return c.Context.Err()
+}
+
+// targetWithLog returns a state directory whose database holds the
+// session "live" in its write-ahead log alone, as a Pisati that stopped
+// without closing it leaves it: the database is whole only with its log.
+func targetWithLog(t *testing.T) target {
+	t.Helper()
+	origin := t.TempDir()
+	path := store.DatabasePath(stateDir(t, origin))
+	s := migratedStore(t, path)
+	insertSession(t, s, "live", 1)
+	tg := target{state: t.TempDir()}
+	tg.path = store.DatabasePath(stateDir(t, tg.state))
+	// Copied while s still has them open, so the log is not yet folded
+	// into the file.
+	for _, name := range []string{"pisati.db", "pisati.db-wal"} {
+		if err := os.WriteFile(filepath.Join(tg.state, name), readFile(t, filepath.Join(origin, name)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return tg
+}
+
+// holds reports whether s holds the session name: false too when it holds
+// no table of sessions at all, as a database whose log is lost may not.
+func holds(t *testing.T, s *store.Store, name string) bool {
+	t.Helper()
+	_, err := s.Queries().GetSession(t.Context(), sessionID(name))
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, sql.ErrNoRows), strings.Contains(err.Error(), "no such table: sessions"):
+		return false
+	}
+	t.Fatalf("GetSession(%s): %v", name, err)
+	return false
+}
+
+func TestRestoreLeavesOneWholeDatabase(t *testing.T) {
+	// A stop after each check Restore makes of its context in turn, until
+	// one comes after the last: each time the state directory holds the
+	// old database, its log and all, or the whole of the new one, and
+	// Restore says which.
+	src := sourceWith(t, "restored")
+	for n := int64(0); ; n++ {
+		if n > 100 {
+			t.Fatal("Restore still stopped after 100 checks of its context")
+		}
+		tg := targetWithLog(t)
+		lock, err := store.AcquireLock(t.Context(), stateDir(t, tg.state))
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = store.Restore(newEndsAfter(t.Context(), n), src, lock)
+		if rerr := lock.Release(); rerr != nil {
+			t.Fatal(rerr)
+		}
+		for _, name := range tg.files(t) {
+			if strings.HasPrefix(name, "pisati.db.restore") {
+				t.Errorf("stopped after %d checks: Restore left %s in the state directory", n, name)
+			}
+		}
+		s := openStore(t, tg.path)
+		live, restored := holds(t, s, "live"), holds(t, s, "restored")
+		switch {
+		case err == nil && (!restored || live):
+			t.Errorf("stopped after %d checks: Restore succeeded, but the database holds the old session (%v) and "+
+				"the new one (%v); want the new one alone", n, live, restored)
+		case err != nil && (!errors.Is(err, context.Canceled) || !live || restored):
+			t.Errorf("stopped after %d checks: Restore = %v, and the database holds the old session (%v) and the new "+
+				"one (%v); want the stop, and the old database whole", n, err, live, restored)
+		}
+		if err == nil {
+			return
+		}
+	}
+}
+
+func TestBackupStoppedLeavesNothing(t *testing.T) {
+	// A stop after each check BackupTracked makes of its context in turn,
+	// until one comes after the last: a stopped backup leaves nothing, and
+	// one that returns nil leaves its whole copy.
+	s := migratedStore(t, dbPath(t))
+	insertSession(t, s, "kept", 1)
+	for n := int64(0); ; n++ {
+		if n > 100 {
+			t.Fatal("the backup still stopped after 100 checks of its context")
+		}
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "backup.db")
+		err := s.Backup(newEndsAfter(t.Context(), n), dest)
+		got := listDir(t, dir)
+		switch {
+		case err != nil && (!errors.Is(err, context.Canceled) || len(got) != 0):
+			t.Errorf("stopped after %d checks: Backup = %v, and left %v; want the stop, and nothing", n, err, got)
+		case err == nil && !hasSession(t, openStore(t, dest), "kept"):
+			t.Errorf("stopped after %d checks: Backup succeeded, but its copy lacks the session", n)
+		}
+		if err == nil {
+			return
+		}
 	}
 }

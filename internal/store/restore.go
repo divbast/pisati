@@ -51,7 +51,10 @@ const restoreSuffix = ".restore"
 // write-ahead log, its index and any rollback journal are removed first,
 // and their removal flushed to stable storage before the rename: SQLite
 // would read them as the new database's own, after a power cut too. The restored file has
-// mode 0600. src must be absolute; Restore stops, failing, when ctx ends.
+// mode 0600. src must be absolute. Restore stops, failing, when ctx ends
+// before it has removed the old database's log, and leaves the old
+// database as it was; from then on it runs to its end whatever ctx says,
+// so that it leaves the whole of the new one, and returns nil once it has.
 func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	defer func() {
 		if err != nil {
@@ -127,19 +130,23 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	if err := syncFile(ctx, root, tmp); err != nil {
 		return explain.New(err, "Pisati cannot make sure that the copy %s is written to disk: %s", tmpPath, pathless(err))
 	}
+	// The point of no return: once the old database's log is gone, the old
+	// database is no longer whole, so a stop from here on would leave
+	// neither database. What follows runs to its end whatever ctx says.
 	if err := removeFiles(ctx, root, sidecars(name)...); err != nil {
 		return err
 	}
+	committed := context.WithoutCancel(ctx)
 	// The rename could otherwise reach the disk first: after a power cut,
 	// the new database would find the old one's log beside it.
-	if err := syncDir(ctx, root); err != nil {
+	if err := syncDir(committed, root); err != nil {
 		return explain.New(err, "Pisati cannot make sure that the directory %s is written to disk: %s", dir, pathless(err))
 	}
 	if err := root.Rename(tmp, name); err != nil {
 		return explain.New(err, "Pisati cannot rename the copy %s to %s: %s", tmpPath, filepath.Join(dir.String(), name),
 			pathless(err))
 	}
-	if err := syncDir(ctx, root); err != nil {
+	if err := syncDir(committed, root); err != nil {
 		return explain.New(err, "Pisati cannot make sure that the directory %s is written to disk: %s", dir, pathless(err))
 	}
 	return nil
