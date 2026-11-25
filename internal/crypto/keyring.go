@@ -210,9 +210,9 @@ func unwrapAll(m MainKey, rows []storedb.ListDataKeysRow) (map[keyID]dataKey, ke
 		}
 	}
 	if unwrapped < len(rows) {
-		return nil, 0, explain.New(ErrMainKeyMismatch, "the main key decrypts %d of the database's %d data keys, so it is "+
-			"not the main key that encrypts them. Give Pisati the main key that encrypts this database's data keys",
-			unwrapped, len(rows))
+		return nil, 0, explain.New(ErrMainKeyMismatch, "the main key decrypts %d of the database's %s, so it is not "+
+			"the main key that encrypts them. Give Pisati the main key that encrypts this database's data keys",
+			unwrapped, explain.Count(int64(len(rows)), "data key", "data keys"))
 	}
 	if len(current) != 1 {
 		return nil, 0, fmt.Errorf("the database has %d current data keys, but it must have exactly 1, so it is damaged",

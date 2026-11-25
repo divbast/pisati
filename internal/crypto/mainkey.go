@@ -339,7 +339,8 @@ func checkNamed(fi fs.FileInfo, where string) error {
 // size: 44 bytes, or 45 with a newline.
 func checkSize(n int64, where string) error {
 	if n != keyChars && n != keyChars+1 {
-		return explain.New(ErrKeyFile, "Pisati cannot use %s, because it holds %d bytes, not 44 or 45. %s", where, n, keyFormat)
+		return explain.New(ErrKeyFile, "Pisati cannot use %s, because it holds %s, not 44 or 45 bytes. %s", where,
+			explain.Bytes(n), keyFormat)
 	}
 	return nil
 }
@@ -413,13 +414,16 @@ const (
 // cause from the operating system's reason, and what to check. Its cause
 // is the error inside err's *fs.PathError, whose path where names.
 //
-// A lack of permission may be the file's own mode or a directory above
-// it, which the operating system does not tell apart, and the mode of a
-// credential is not the operator's to set: so it says what the user that
-// runs Pisati needs, and gives no mode.
+// A lack of permission may come from the file's own mode or from any
+// directory above it, which the operating system does not tell apart, and
+// a credential's mode is set by what gives the credentials: so this error
+// says what the user that runs Pisati needs, and gives no mode. Where the
+// mode itself is at fault, checkNamed's refusal and the warning that
+// others can read the key name the modes Pisati takes, for a credential
+// as for a file.
 func cannotRead(err error, where string, named namedKind) error {
 	reason := pathless(err)
-	above, it := "a directory above it", "the file"
+	above, it := "every directory above it", "the file"
 	if named == aCredential {
 		above, it = "the directory that CREDENTIALS_DIRECTORY names", "the credential"
 	}
@@ -433,9 +437,12 @@ func cannotRead(err error, where string, named namedKind) error {
 	case errors.Is(err, fs.ErrNotExist):
 		return explain.New(reason, "Pisati cannot read %s, because there is no file at that path. Check that the "+
 			"path names the file that holds the main key", where)
+	case errors.Is(err, syscall.ENOTDIR):
+		return explain.New(reason, "Pisati cannot read %s, because a part of its path that should be a directory is "+
+			"a file. Check the path", where)
 	}
-	return explain.New(reason, "Pisati cannot read %s: %s. Check that %s is a regular file that the user that runs "+
-		"Pisati can read", where, reason, it)
+	return explain.New(reason, "Pisati cannot read %s: %s. Check that the path names %s, and that the user that "+
+		"runs Pisati can read it", where, reason, it)
 }
 
 // loadGenerated loads the key Pisati keeps at <state>/keys/main.key,
@@ -463,7 +470,8 @@ func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (MainK
 		}
 		return generate(ctx, state, name, keyPath, log)
 	case err != nil:
-		return MainKey{}, explain.New(pathless(err), "Pisati cannot check %s: %s", where, pathless(err))
+		return MainKey{}, explain.New(pathless(err), "Pisati cannot check %s: %s. Check that the user that runs Pisati "+
+			"can enter the directory %s", where, pathless(err), dirPath)
 	}
 	if err := checkGenerated(fi, keyPath); err != nil {
 		return MainKey{}, err
@@ -473,7 +481,8 @@ func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (MainK
 	}
 	f, err := state.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return MainKey{}, explain.New(pathless(err), "Pisati cannot read %s: %s", where, pathless(err))
+		return MainKey{}, explain.New(pathless(err), "Pisati cannot read %s: %s. Check that the user that runs Pisati "+
+			"owns the file and may read it", where, pathless(err))
 	}
 	key, err := readGenerated(f, fi, where)
 	defer clear(key[:])
@@ -491,14 +500,16 @@ func keysDirectory(state *os.Root, dirPath string) error {
 	fi, err := state.Lstat(keysDir)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := state.Mkdir(keysDir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-			return explain.New(pathless(err), "Pisati cannot make the directory %s, for the main key it generates: %s",
-				dirPath, pathless(err))
+			return explain.New(pathless(err), "Pisati cannot make the directory %s, for the main key it generates: %s. "+
+				"Check that the user that runs Pisati can write to the state directory %s", dirPath, pathless(err),
+				state.Name())
 		}
 		fi, err = state.Lstat(keysDir)
 	}
 	if err != nil {
-		return explain.New(pathless(err), "Pisati cannot check the directory %s, which holds the main key it generates: %s",
-			dirPath, pathless(err))
+		return explain.New(pathless(err), "Pisati cannot check the directory %s, which holds the main key it generates: "+
+			"%s. Check that the user that runs Pisati can enter the state directory %s", dirPath, pathless(err),
+			state.Name())
 	}
 	switch mode := fi.Mode(); {
 	case mode&fs.ModeSymlink != 0:
@@ -541,7 +552,9 @@ func checkGenerated(fi fs.FileInfo, keyPath string) error {
 func readGenerated(f *os.File, checked fs.FileInfo, where string) ([keySize]byte, error) {
 	opened, err := f.Stat()
 	if err != nil {
-		return [keySize]byte{}, explain.New(pathless(err), "Pisati cannot read %s: %s", where, pathless(err))
+		return [keySize]byte{}, explain.New(pathless(err), "Pisati cannot read %s: %s. The operating system could "+
+			"not report on the file it had open, which points to a fault of the disk or file system that holds it: "+
+			"the system log may say more", where, pathless(err))
 	}
 	// os.Root follows a link inside the root, so a link put in the
 	// file's place since it was checked would be opened: the file opened

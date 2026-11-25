@@ -97,7 +97,7 @@ func WithMigrations(fsys fs.FS) Option {
 // path must be absolute. The error names path when the database cannot be
 // opened.
 func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
-	if err := absolute(path); err != nil {
+	if err := absolute(path, "store.Open"); err != nil {
 		return nil, explain.Wrap(err, "Pisati cannot open the database %s", path)
 	}
 	ours, err := pisatiMigrations()
@@ -251,18 +251,21 @@ func (s *Store) open() error {
 	return nil
 }
 
-// absolute returns an error unless path is absolute.
-func absolute(path string) error {
+// absolute returns an error unless path, which the function fn was
+// given, is absolute: only a bug in Pisati gives the store another.
+func absolute(path, fn string) error {
 	if !filepath.IsAbs(path) {
-		return errors.New("its path is not a full path, which is a bug in Pisati: the store is only ever given full paths")
+		return fmt.Errorf("%s was given the path %q, which is not a full path, which is a bug in Pisati: Pisati "+
+			"gives the store full paths only", fn, path)
 	}
 	return nil
 }
 
 // splitPath returns the directory and the name of the file at path, which
-// must be absolute and name a file below the root.
-func splitPath(path string) (dir, name string, err error) {
-	if err := absolute(path); err != nil {
+// the function fn was given, and which must be absolute and name a file
+// below the root.
+func splitPath(path, fn string) (dir, name string, err error) {
+	if err := absolute(path, fn); err != nil {
 		return "", "", err
 	}
 	dir, name = filepath.Split(filepath.Clean(path))
@@ -296,11 +299,12 @@ func cannotOpen(err error, path string) error {
 		return explain.New(err, "Pisati cannot open the database %s: %s. Check that the user that runs Pisati "+
 			"can read and write the file, and the directory that holds it", path, err)
 	case errors.Is(err, sqlite3.BUSY):
-		return explain.New(err, "Pisati cannot open the database %s: %s. Another connection kept it locked for "+
-			"more than %d seconds: run the command again once that connection is done", path, err,
-			busyTimeoutMillis/1000)
+		return explain.New(err, "Pisati cannot open the database %s: %s. Another program that has the database "+
+			"open, such as pisati serve or the sqlite3 tool, kept it locked for more than %d seconds: run the command "+
+			"again once that program is done with it", path, err, busyTimeoutMillis/1000)
 	}
-	return explain.Wrap(err, "Pisati cannot open the database %s", path)
+	return explain.New(err, "Pisati cannot open the database %s: %s. Check that the user that runs Pisati can read "+
+		"and write the file and the directory that holds it, and that the file is a database that Pisati made", path, err)
 }
 
 // cannotChange is the error, worded as format and args say, for a change

@@ -83,8 +83,9 @@ func Rewrap(ctx context.Context, s *store.Store, from, to MainKey) error {
 			rewrapped = append(rewrapped, storedb.RewrapDataKeyParams{Wrapped: wrapped, ID: row.ID})
 		}
 		if len(rewrapped) < len(rows) {
-			return explain.New(ErrMainKeyMismatch, "the main key in use decrypts %d of the database's %d data keys, so "+
-				"Pisati encrypts none of them with the new main key", len(rewrapped), len(rows))
+			return explain.New(ErrMainKeyMismatch, "the main key in use decrypts %d of the database's %s, so Pisati "+
+				"encrypts none of them with the new main key", len(rewrapped),
+				explain.Count(int64(len(rows)), "data key", "data keys"))
 		}
 		for _, p := range rewrapped {
 			n, err := q.RewrapDataKey(ctx, p)
@@ -366,8 +367,8 @@ func (r *Reencrypter) reencrypt(ctx context.Context, f registered) error {
 			continue
 		}
 		if unopened > 0 {
-			return explain.New(nil, "The job could not decrypt %d values in %s.%s, and left them as they were",
-				unopened, f.Table, f.Column)
+			return explain.New(nil, "The job could not decrypt %s in %s.%s, and left them as they were",
+				explain.Count(int64(unopened), "value", "values"), f.Table, f.Column)
 		}
 		return nil
 	}

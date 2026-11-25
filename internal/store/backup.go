@@ -50,7 +50,7 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 			err = explain.Wrap(err, "Pisati cannot back up the database %s to %s", s.path, dest)
 		}
 	}()
-	dir, name, err := splitPath(dest)
+	dir, name, err := splitPath(dest, "store.Store.Backup")
 	if err != nil {
 		return err
 	}
@@ -66,7 +66,8 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 		return explain.New(err, "the user that runs Pisati may not open the directory %s. Back up to a file in a "+
 			"directory that this user can write to", filepath.Clean(dir))
 	case err != nil:
-		return explain.New(err, "Pisati cannot open the directory %s: %s", filepath.Clean(dir), pathless(err))
+		return explain.New(err, "Pisati cannot open the directory %s: %s. Check that it is a directory that the user "+
+			"that runs Pisati can enter", filepath.Clean(dir), pathless(err))
 	}
 	defer func() {
 		err = errors.Join(err, root.Close())
@@ -91,7 +92,8 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 		return explain.New(err, "the user that runs Pisati may not create the file %s. Back up to a file in a "+
 			"directory that this user can write to", dest)
 	} else if err != nil {
-		return explain.New(err, "Pisati cannot create the file %s: %s", dest, pathless(err))
+		return explain.New(err, "Pisati cannot create the file %s: %s. Check that the user that runs Pisati can write "+
+			"to the directory %s", dest, pathless(err), filepath.Clean(dir))
 	}
 	if made != nil {
 		made(func() error { return removePaths(dir, append(sidecars(name), name)...) })

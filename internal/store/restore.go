@@ -57,7 +57,7 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 			err = explain.Wrap(err, "Pisati cannot restore the database from %s", src)
 		}
 	}()
-	if err := absolute(src); err != nil {
+	if err := absolute(src, "store.Restore"); err != nil {
 		return err
 	}
 	dir, unhold, err := lock.hold(ctx)
@@ -201,7 +201,8 @@ func check(ctx context.Context, path string) (err error) {
 	case err != nil:
 		return explain.Wrap(err, "Pisati cannot read the schema version of the copy")
 	case version < 1:
-		return errors.New("it holds no schema of Pisati's, no layout of Pisati's tables, so Pisati did not make it")
+		return errors.New("it holds none of Pisati's tables, so it is not a copy of a database that Pisati made. " +
+			"Restore from a copy that pisati backup made")
 	case version > newest:
 		return explain.New(ErrSchemaNewer, "it has schema version %d, the version of the layout of its tables, but "+
 			"this Pisati knows versions up to %d only: a newer Pisati made it. Restore it with a version of Pisati "+

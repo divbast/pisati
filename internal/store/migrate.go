@@ -36,8 +36,8 @@ var migrations embed.FS
 func pisatiMigrations() (fs.FS, error) {
 	sub, err := fs.Sub(migrations, "migrations")
 	if err != nil {
-		return nil, fmt.Errorf("the schema updates (the changes to the database's layout) built into Pisati cannot "+
-			"be read, which is a bug in Pisati: %w", err)
+		return nil, fmt.Errorf("store.Open cannot read the schema updates (the changes to the database's layout) "+
+			"built into Pisati, which is a bug in Pisati: %w", err)
 	}
 	return sub, nil
 }

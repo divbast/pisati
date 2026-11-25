@@ -725,3 +725,22 @@ func TestMainKeyRedacts(t *testing.T) {
 		t.Error("main keys compare with ==, which would compare them in variable time")
 	}
 }
+
+// TestKeyFileErrorsKeepTheirChain: an error about a key file names the
+// file in its own words, and its chain holds the operating system's
+// error as the error inside the *fs.PathError, with no *fs.PathError
+// around it, as LoadMainKey's errors have always had it.
+func TestKeyFileErrorsKeepTheirChain(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.key")
+	log, _ := newLogger()
+	_, err := crypto.LoadMainKey(t.Context(), config.FromFile{Path: missing}, nil, nil, log)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("LoadMainKey(a missing file): %v, want fs.ErrNotExist", err)
+	}
+	if pe, ok := errors.AsType[*fs.PathError](err); ok {
+		t.Errorf("LoadMainKey(a missing file): %q holds the *fs.PathError %v, which its chain never had", err, pe)
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("LoadMainKey(a missing file): %q does not name %s", err, missing)
+	}
+}

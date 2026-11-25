@@ -71,7 +71,7 @@ func AcquireLock(ctx context.Context, stateDir string) (_ Lock, err error) {
 			err = explain.Wrap(err, "Pisati cannot lock the state directory %s", stateDir)
 		}
 	}()
-	if err := absolute(stateDir); err != nil {
+	if err := absolute(stateDir, "store.AcquireLock"); err != nil {
 		return Lock{}, err
 	}
 	if err := ctx.Err(); err != nil {

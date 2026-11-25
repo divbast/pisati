@@ -49,8 +49,8 @@ func (k *Keyring) Seal(plain, assoc []byte) ([]byte, error) {
 		return nil, err
 	}
 	if len(plain) > maxPlain || len(assoc) > maxAssoc {
-		return nil, explain.New(ErrInvalid, "Pisati cannot encrypt a value of %d bytes, with %d bytes of associated data: "+
-			"that is more than XChaCha20-Poly1305 takes", len(plain), len(assoc))
+		return nil, explain.New(ErrInvalid, "Pisati cannot encrypt a value of %s, with %s of associated data: that is "+
+			"more than XChaCha20-Poly1305 takes", explain.Bytes(int64(len(plain))), explain.Bytes(int64(len(assoc))))
 	}
 	id, dk := k.currentKey()
 	var nonce [nonceSize]byte
@@ -81,8 +81,8 @@ func (k *Keyring) Open(sealed, assoc []byte) ([]byte, error) {
 	}
 	const cannot = "Pisati cannot decrypt a value"
 	if len(sealed) < sealedOverhead {
-		return nil, explain.New(ErrTooShort, "%s: it is %d bytes long, but an encrypted value is at least %d", cannot,
-			len(sealed), sealedOverhead)
+		return nil, explain.New(ErrTooShort, "%s: it is %s long, but an encrypted value is at least %s", cannot,
+			explain.Bytes(int64(len(sealed))), explain.Bytes(sealedOverhead))
 	}
 	if sealed[0] != version {
 		return nil, explain.New(ErrUnknownVersion, "%s: it is in format %d, but Pisati knows format %d only", cannot,
@@ -94,7 +94,8 @@ func (k *Keyring) Open(sealed, assoc []byte) ([]byte, error) {
 		return nil, explain.New(ErrUnknownKey, "%s: it is encrypted with the data key %d, which Pisati has not loaded", cannot, id)
 	}
 	// Seal makes no value longer; XChaCha20-Poly1305 would panic on one.
-	const notAuthentic = "it does not pass the check that proves Pisati encrypted it for this place, unchanged"
+	const notAuthentic = "its check fails: Pisati did not encrypt it for this field and row, or it was changed after " +
+		"Pisati encrypted it"
 	if len(sealed)-sealedOverhead > maxPlain || len(assoc) > maxAssoc {
 		return nil, explain.New(ErrNotAuthentic, "%s: it is longer than any value Pisati encrypts", cannot)
 	}
