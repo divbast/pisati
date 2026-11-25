@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -108,7 +109,7 @@ func run(ctx context.Context, h Host) int {
 	case exited:
 		return code
 	case err != nil:
-		usage(h.Stderr, parser, err)
+		usage(h.Stderr, parser, err, h.Args)
 		return exitUsage
 	}
 	err = cmd.Run()
@@ -218,10 +219,26 @@ func stopped(ctx context.Context, err error) bool {
 	return true
 }
 
+// keyArgument is the line usage writes in place of kong's error when the
+// command line holds a value that reads as a key.
+const keyArgument = "the command line holds a value that reads as a key, where Pisati does not take one, so Pisati " +
+	"does not show the command line's error. Give the path of a key file, never the key itself, as in: pisati keys " +
+	"rewrap --new-main-key-file /path/to/new.key"
+
 // usage writes kong's error for the command line, err, and the short usage
-// of the command it was for.
-func usage(w io.Writer, parser *kong.Kong, err error) {
-	say(w, "pisati: %s\n", err)
+// of the command it was for. kong's error may quote an argument, so when
+// any of args, the command line, or a flag's value written after "=" in
+// one, reads as a key (crypto.LooksLikeKey), usage writes keyArgument in
+// its place.
+func usage(w io.Writer, parser *kong.Kong, err error, args []string) {
+	if slices.ContainsFunc(args, func(arg string) bool {
+		_, value, _ := strings.Cut(arg, "=")
+		return crypto.LooksLikeKey(arg) || crypto.LooksLikeKey(value)
+	}) {
+		say(w, "pisati: %s.\n", keyArgument)
+	} else {
+		say(w, "pisati: %s\n", err)
+	}
 	pe, ok := errors.AsType[*kong.ParseError](err)
 	if !ok {
 		return

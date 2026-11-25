@@ -156,3 +156,30 @@ func TestKeysRewrapNeverShowsAKeyGivenAsItsFile(t *testing.T) {
 		t.Errorf("the state directory holds %v (%v), want nothing: the command refuses before anything else", entries, err)
 	}
 }
+
+func TestKeyGivenAsAnArgumentNeverShown(t *testing.T) {
+	// A key pasted with no flag before it, in place of
+	// --new-main-key-file's value, which kong refuses as an argument
+	// it did not expect; and a key among the arguments of a command that
+	// takes none, after a flag's value.
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatal(err)
+	}
+	key := base64.StdEncoding.EncodeToString(raw)
+	for _, args := range [][]string{
+		{"keys", "rewrap", key},
+		{"keys", "rewrap", "--new-main-key-file", "/run/secrets/new.key", key},
+		{"keys", "rotate", key + "\n"},
+	} {
+		s := newSite(t)
+		r := s.run(t, args...)
+		const want = "pisati: the command line holds a value that reads as a key, where Pisati does not take one, so " +
+			"Pisati does not show the command line's error. Give the path of a key file, never the key itself, as in: " +
+			"pisati keys rewrap --new-main-key-file /path/to/new.key."
+		if lines := strings.Split(r.stderr, "\n"); r.code != 2 || lines[0] != want || strings.Contains(r.stdout+r.stderr, strings.TrimSpace(key)) {
+			t.Errorf("pisati %d arguments with a key among them = %d, %q, %q; want 2, %q first, and the key nowhere",
+				len(args), r.code, r.stdout, r.stderr, want)
+		}
+	}
+}
