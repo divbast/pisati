@@ -225,7 +225,7 @@ func TestRestoreRefusesWhileLocked(t *testing.T) {
 // delete it before it had copied it.
 func TestRestoreRefusesItsOwnFiles(t *testing.T) {
 	backupData := readFile(t, sourceWith(t, "restored"))
-	const reason = "which Restore removes or replaces"
+	const reason = "which a restore removes or replaces"
 	for _, name := range []string{
 		"pisati.db", "pisati.db-wal", "pisati.db-shm", "pisati.db-journal",
 		"pisati.db.restore", "pisati.db.restore-wal", "pisati.db.restore-shm", "pisati.db.restore-journal",

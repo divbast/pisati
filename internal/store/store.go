@@ -96,7 +96,7 @@ func WithMigrations(fsys fs.FS) Option {
 // opened.
 func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 	if err := absolute(path); err != nil {
-		return nil, fmt.Errorf("store: open %s: %w", path, err)
+		return nil, wrap(err, "Pisati cannot open the database %s", path)
 	}
 	ours, err := pisatiMigrations()
 	if err != nil {
@@ -111,14 +111,14 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 
 	db, err := driver.Open(dataSourceName(path))
 	if err != nil {
-		return nil, fmt.Errorf("store: open %s: %w", path, err)
+		return nil, wrap(err, "Pisati cannot open the database %s", path)
 	}
 	// Idle connections stay at database/sql's default of two: each one
 	// kept keeps an instance of SQLite, with its cache.
 	db.SetMaxOpenConns(maxConns)
 	// sql.Open connects to nothing; a connection opens the file.
 	if err := db.PingContext(ctx); err != nil {
-		return nil, errors.Join(fmt.Errorf("store: open %s: %w", path, err), db.Close())
+		return nil, errors.Join(wrap(err, "Pisati cannot open the database %s", path), db.Close())
 	}
 	return &Store{
 		db:         db,
@@ -173,7 +173,7 @@ func (s *Store) Close() error {
 		return nil
 	}
 	if err := s.db.Close(); err != nil {
-		return fmt.Errorf("store: close %s: %w", s.path, err)
+		return wrap(err, "Pisati cannot close the database %s", s.path)
 	}
 	return nil
 }
@@ -211,7 +211,7 @@ func (s *Store) InTx(ctx context.Context, fn func(*storedb.Queries) error) (err 
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("store: begin a transaction on %s: %w", s.path, err)
+		return wrap(err, "Pisati cannot start a change to the database %s", s.path)
 	}
 	// Rolled back on every way out but the commit, a panic in fn included:
 	// otherwise the connection would never return to the pool, and would
@@ -227,7 +227,7 @@ func (s *Store) InTx(ctx context.Context, fn func(*storedb.Queries) error) (err 
 	}
 	committing = true
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: commit to %s: %w", s.path, err)
+		return wrap(err, "Pisati cannot save a change to the database %s", s.path)
 	}
 	return nil
 }
@@ -236,7 +236,7 @@ func (s *Store) InTx(ctx context.Context, fn func(*storedb.Queries) error) (err 
 // database/sql has rolled back already, so that is no error.
 func (s *Store) rollback(tx *sql.Tx) error {
 	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-		return fmt.Errorf("store: roll back on %s: %w", s.path, err)
+		return wrap(err, "Pisati cannot undo a change to the database %s that did not finish", s.path)
 	}
 	return nil
 }
@@ -244,7 +244,7 @@ func (s *Store) rollback(tx *sql.Tx) error {
 // open returns an error for a Store that Open did not return.
 func (s *Store) open() error {
 	if s == nil || s.db == nil {
-		return errors.New("store: the Store was not opened with Open")
+		return errors.New("a store.Store was used that store.Open did not return, which is a bug in Pisati")
 	}
 	return nil
 }
@@ -252,7 +252,7 @@ func (s *Store) open() error {
 // absolute returns an error unless path is absolute.
 func absolute(path string) error {
 	if !filepath.IsAbs(path) {
-		return errors.New("not an absolute path")
+		return errors.New("its path is not a full path, which is a bug in Pisati: the store takes full paths alone")
 	}
 	return nil
 }
@@ -265,20 +265,52 @@ func splitPath(path string) (dir, name string, err error) {
 	}
 	dir, name = filepath.Split(filepath.Clean(path))
 	if name == "" {
-		return "", "", errors.New("it names no file")
+		return "", "", fmt.Errorf("%s names no file: give the path of a file", path)
 	}
 	return dir, name, nil
 }
 
-// removeFiles removes each file names, in root, that exists.
+// removeFiles removes each file names, in root, that exists. Each error
+// names the file, by its path, and says why it is still there.
 func removeFiles(root *os.Root, names ...string) error {
 	var errs []error
 	for _, name := range names {
 		if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, err)
+			errs = append(errs, explain(err, "Pisati cannot remove the file %s: %s", filepath.Join(root.Name(), name),
+				pathless(err)))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// plainError is an error whose message is Pisati's own, worded for the
+// operator, around err, which errors.Is and errors.AsType still find.
+type plainError struct {
+	msg string
+	err error
+}
+
+func (e *plainError) Error() string { return e.msg }
+func (e *plainError) Unwrap() error { return e.err }
+
+// explain returns err behind the message format and args give.
+func explain(err error, format string, args ...any) error {
+	return &plainError{msg: fmt.Sprintf(format, args...), err: err}
+}
+
+// wrap returns err behind the words format and args give, then ": " and
+// err's own message, as fmt.Errorf's %w would.
+func wrap(err error, format string, args ...any) error {
+	return explain(err, "%s: %s", fmt.Sprintf(format, args...), err)
+}
+
+// pathless returns the error inside err when err is an *fs.PathError,
+// whose path the message around it names already, or err.
+func pathless(err error) error {
+	if pe, ok := errors.AsType[*fs.PathError](err); ok {
+		return pe.Err
+	}
+	return err
 }
 
 // sidecars returns the files SQLite may keep beside the database name: its

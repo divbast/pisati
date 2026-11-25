@@ -6,7 +6,6 @@ package store
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,11 +16,11 @@ import (
 var (
 	// ErrLocked is a state directory whose lock another process holds, or
 	// another Lock in this one.
-	ErrLocked = errors.New("store: the state directory is locked")
+	ErrLocked = errors.New("another Pisati process holds its lock")
 	// ErrLockNotHeld is a Lock that does not hold the lock it must: the
 	// zero Lock, one released or being released, or, for Migrate, one on
 	// a state directory other than the Store's.
-	ErrLockNotHeld = errors.New("store: the state directory's lock is not held")
+	ErrLockNotHeld = errors.New("the lock on the state directory is not held")
 )
 
 // lockFile is the file in the state directory that the lock is taken on.
@@ -67,7 +66,7 @@ type heldLock struct {
 func AcquireLock(ctx context.Context, stateDir string) (_ Lock, err error) {
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("store: lock %s: %w", stateDir, err)
+			err = wrap(err, "Pisati cannot lock the state directory %s", stateDir)
 		}
 	}()
 	if err := absolute(stateDir); err != nil {
@@ -78,10 +77,13 @@ func AcquireLock(ctx context.Context, stateDir string) (_ Lock, err error) {
 	}
 	root, err := os.OpenRoot(stateDir)
 	if err != nil {
-		return Lock{}, err
+		return Lock{}, pathless(err)
 	}
 	// A file opened through the root stays open once the root is closed.
 	f, err := root.OpenFile(lockFile, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		err = explain(err, "Pisati cannot open the file %s: %s", filepath.Join(stateDir, lockFile), pathless(err))
+	}
 	if err := errors.Join(err, root.Close()); err != nil {
 		if f != nil {
 			err = errors.Join(err, f.Close())
@@ -146,7 +148,7 @@ func (h *heldLock) release() error {
 	h.slot <- struct{}{}
 	// Closing the only descriptor of the open file releases the flock.
 	if err := h.file.Close(); err != nil {
-		return fmt.Errorf("store: release the lock on %s: %w", h.dir, err)
+		return wrap(err, "Pisati cannot release the lock on the state directory %s", h.dir)
 	}
 	return nil
 }

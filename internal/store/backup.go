@@ -45,7 +45,7 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	}
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("store: back up %s to %s: %w", s.path, dest, err)
+			err = wrap(err, "Pisati cannot back up the database %s to %s", s.path, dest)
 		}
 	}()
 	dir, name, err := splitPath(dest)
@@ -57,21 +57,29 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return err
+		return explain(err, "Pisati cannot open the directory %s: %s", filepath.Clean(dir), pathless(err))
 	}
 	defer func() {
 		err = errors.Join(err, root.Close())
 	}()
 
 	for _, sidecar := range sidecars(name) {
-		if _, err := root.Lstat(sidecar); !errors.Is(err, fs.ErrNotExist) {
-			return errors.Join(fmt.Errorf("%s: %w", sidecar, fs.ErrExist), err)
+		switch _, err := root.Lstat(sidecar); {
+		case err == nil:
+			return explain(fs.ErrExist, "the file %s is there already, and SQLite would read it as part of the copy. "+
+				"Remove it, or back up to another path", filepath.Join(dir, sidecar))
+		case !errors.Is(err, fs.ErrNotExist):
+			return explain(errors.Join(fs.ErrExist, err), "Pisati cannot tell whether the file %s is there, which SQLite "+
+				"would read as part of the copy: %s", filepath.Join(dir, sidecar), pathless(err))
 		}
 	}
 	// Created here, refusing one that exists: SQLite would open an
 	// existing file and write over it.
-	if err := createFile(root, name); err != nil {
-		return err
+	if err := createFile(root, name); errors.Is(err, fs.ErrExist) {
+		return explain(err, "the file %s is there already, and a backup is written only to a new file. Back up to "+
+			"a path where there is no file yet", dest)
+	} else if err != nil {
+		return explain(err, "Pisati cannot create the file %s: %s", dest, pathless(err))
 	}
 	if made != nil {
 		made(func() error { return removePaths(dir, append(sidecars(name), name)...) })
@@ -85,12 +93,16 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	}()
 	path := filepath.Join(dir, name)
 	if err := s.copyTo(ctx, path); err != nil {
-		return err
+		return wrap(err, "Pisati cannot copy the database into %s", path)
 	}
 	if err := useRollbackJournal(ctx, path); err != nil {
-		return err
+		return wrap(err, "Pisati cannot finish the copy %s", path)
 	}
-	return syncDir(root)
+	if err := syncDir(root); err != nil {
+		return explain(err, "Pisati cannot make sure that the directory %s is written to disk: %s", filepath.Clean(dir),
+			pathless(err))
+	}
+	return nil
 }
 
 // copyTo copies the database into the empty database file at dest
@@ -109,7 +121,7 @@ func (s *Store) copyTo(ctx context.Context, dest string) (err error) {
 	return conn.Raw(func(c any) error {
 		sc, ok := c.(driver.Conn)
 		if !ok {
-			return fmt.Errorf("the connection is a %T, not the SQLite driver's", c)
+			return fmt.Errorf("its connection is a %T, not the SQLite driver's, which is a bug in Pisati", c)
 		}
 		raw := sc.Raw()
 		// The driver stops a call that is running through SQLite's
@@ -144,12 +156,12 @@ func useRollbackJournal(ctx context.Context, path string) (err error) {
 		err = errors.Join(err, stmt.Close())
 	}()
 	if !stmt.Step() {
-		return errors.Join(errors.New("PRAGMA journal_mode returned no mode"), stmt.Err())
+		return errors.Join(errors.New("SQLite did not answer which journal mode the copy has"), stmt.Err())
 	}
 	// SQLite answers with the mode in force, which stays WAL when it
 	// cannot switch.
 	if mode := stmt.ColumnText(0); mode != "delete" {
-		return fmt.Errorf("the copy's journal mode stayed %s", mode)
+		return fmt.Errorf("SQLite left the copy in the journal mode %s, not delete", mode)
 	}
 	return nil
 }

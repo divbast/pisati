@@ -22,7 +22,7 @@ type SchemaVersion int64
 
 // ErrSchemaNewer is a database whose schema a newer Pisati migrated. This
 // Pisati cannot know what that schema means, so it changes nothing in it.
-var ErrSchemaNewer = errors.New("store: database schema is newer than this Pisati")
+var ErrSchemaNewer = errors.New("a newer version of Pisati has updated its schema")
 
 // migrations are the goose migrations Pisati is built with.
 //
@@ -34,7 +34,7 @@ var migrations embed.FS
 func pisatiMigrations() (fs.FS, error) {
 	sub, err := fs.Sub(migrations, "migrations")
 	if err != nil {
-		return nil, fmt.Errorf("store: the migrations built in: %w", err)
+		return nil, fmt.Errorf("the schema updates built into Pisati cannot be read, which is a bug in Pisati: %w", err)
 	}
 	return sub, nil
 }
@@ -62,26 +62,29 @@ func (s *Store) Migrate(ctx context.Context, lock Lock) (from, to SchemaVersion,
 	}
 	dir, unhold, err := lock.hold(ctx)
 	if err != nil {
-		return 0, 0, fmt.Errorf("store: migrate %s: %w", s.path, err)
+		return 0, 0, wrap(err, "Pisati cannot update the schema of the database %s", s.path)
 	}
 	defer unhold()
 	if db := DatabasePath(dir); filepath.Clean(s.path) != db {
-		return 0, 0, fmt.Errorf("store: migrate %s: %w: the lock is on %s, whose database is %s", s.path, ErrLockNotHeld, dir, db)
+		return 0, 0, explain(ErrLockNotHeld, "Pisati cannot update the schema of the database %s, because the lock "+
+			"it was given is on the state directory %s, whose database is %s. This is a bug in Pisati", s.path, dir, db)
 	}
 	p, err := newProvider(s.db, s.migrations)
 	if err != nil {
-		return 0, 0, fmt.Errorf("store: migrate %s: %w", s.path, err)
+		return 0, 0, wrap(err, "Pisati cannot update the schema of the database %s", s.path)
 	}
 	// goose creates its table of versions if there is none, as in a
 	// database never migrated. A newer database has the table, so reading
 	// its version writes nothing to it.
 	current, latest, err := p.GetVersions(ctx)
 	if err != nil {
-		return 0, 0, fmt.Errorf("store: migrate %s: %w", s.path, err)
+		return 0, 0, wrap(err, "Pisati cannot read the schema version of the database %s", s.path)
 	}
 	from, newest := SchemaVersion(current), SchemaVersion(latest)
 	if from > newest {
-		return from, from, fmt.Errorf("%w: %s is at version %d, and the newest this Pisati knows is %d", ErrSchemaNewer, s.path, from, newest)
+		return from, from, explain(ErrSchemaNewer, "the database %s has schema version %d, but this version of "+
+			"Pisati knows schema versions up to %d only, so a newer version of Pisati has updated it. Pisati "+
+			"changes nothing in it. Run a version of Pisati that knows schema version %d", s.path, from, newest, from)
 	}
 
 	// goose applies the steps in order, and stops at the first that fails,
@@ -95,7 +98,7 @@ func (s *Store) Migrate(ctx context.Context, lock Lock) (from, to SchemaVersion,
 		to = SchemaVersion(applied[len(applied)-1].Source.Version)
 	}
 	if err != nil {
-		return from, to, fmt.Errorf("store: migrate %s: stopped at version %d: %w", s.path, to, err)
+		return from, to, wrap(err, "Pisati cannot update the schema of the database %s past version %d", s.path, to)
 	}
 	return from, to, nil
 }

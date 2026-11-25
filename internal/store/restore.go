@@ -18,7 +18,7 @@ import (
 )
 
 // ErrCorrupt is a database that PRAGMA integrity_check finds fault with.
-var ErrCorrupt = errors.New("store: database failed its integrity check")
+var ErrCorrupt = errors.New("SQLite's integrity check finds it damaged")
 
 // restoreSuffix names the copy Restore builds beside the database it is
 // to replace.
@@ -52,7 +52,7 @@ const restoreSuffix = ".restore"
 func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("store: restore from %s: %w", src, err)
+			err = wrap(err, "Pisati cannot restore the database from %s", src)
 		}
 	}()
 	if err := absolute(src); err != nil {
@@ -68,7 +68,7 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return err
+		return explain(err, "Pisati cannot open the state directory %s: %s", dir, pathless(err))
 	}
 	defer func() {
 		err = errors.Join(err, root.Close())
@@ -88,7 +88,7 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 		return err
 	}
 	if err := createFile(root, tmp); err != nil {
-		return err
+		return explain(err, "Pisati cannot create the file %s: %s", filepath.Join(dir, tmp), pathless(err))
 	}
 	defer func() {
 		if err != nil {
@@ -97,7 +97,7 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	}()
 	tmpPath := filepath.Join(dir, tmp)
 	if err := copyFrom(ctx, tmpPath, src); err != nil {
-		return err
+		return wrap(err, "SQLite cannot copy it into %s", tmpPath)
 	}
 	if err := check(ctx, tmpPath); err != nil {
 		return err
@@ -106,18 +106,22 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	// removed the log. Were one left, the rename would leave it behind,
 	// and what it holds with it.
 	if _, err := root.Stat(tmp + "-wal"); !errors.Is(err, fs.ErrNotExist) {
-		return errors.Join(errors.New("the copy kept a write-ahead log"), err)
+		return errors.Join(fmt.Errorf("SQLite left a write-ahead log, %s-wal, beside the copy, which it should "+
+			"have folded into the copy", tmpPath), err)
 	}
 	if err := syncFile(root, tmp); err != nil {
-		return err
+		return explain(err, "Pisati cannot make sure that the copy %s is written to disk: %s", tmpPath, pathless(err))
 	}
 	if err := removeFiles(root, sidecars(name)...); err != nil {
 		return err
 	}
 	if err := root.Rename(tmp, name); err != nil {
-		return err
+		return explain(err, "Pisati cannot rename the copy %s to %s: %s", tmpPath, filepath.Join(dir, name), pathless(err))
 	}
-	return syncDir(root)
+	if err := syncDir(root); err != nil {
+		return explain(err, "Pisati cannot make sure that the directory %s is written to disk: %s", dir, pathless(err))
+	}
+	return nil
 }
 
 // refuseOwnFile returns an error when src is one of the files names in
@@ -131,11 +135,13 @@ func refuseOwnFile(root *os.Root, dir, src string, names []string) error {
 	for _, name := range names {
 		own := filepath.Join(dir, name)
 		if clean == own {
-			return fmt.Errorf("it is %s, which Restore removes or replaces; restore from a copy kept elsewhere", own)
+			return fmt.Errorf("it is the file %s, which a restore removes or replaces. Restore from a copy kept in "+
+				"another place", own)
 		}
 		// Lstat, as removing a link to src would leave src itself alone.
 		if info, err := root.Lstat(name); statErr == nil && err == nil && os.SameFile(srcInfo, info) {
-			return fmt.Errorf("it is the same file as %s, which Restore removes or replaces; restore from a copy kept elsewhere", own)
+			return fmt.Errorf("it is the same file as %s, which a restore removes or replaces. Restore from a copy "+
+				"kept in another place", own)
 		}
 	}
 	return nil
@@ -184,11 +190,13 @@ func check(ctx context.Context, path string) (err error) {
 	version, newest, err := p.GetVersions(ctx)
 	switch {
 	case err != nil:
-		return err
+		return wrap(err, "Pisati cannot read the schema version of the copy")
 	case version < 1:
-		return errors.New("it holds no Pisati schema")
+		return errors.New("it holds no schema of Pisati's, so Pisati did not make it")
 	case version > newest:
-		return fmt.Errorf("%w: it is at version %d, and the newest this Pisati knows is %d", ErrSchemaNewer, version, newest)
+		return explain(ErrSchemaNewer, "it has schema version %d, but this version of Pisati knows schema versions up "+
+			"to %d only, so a newer version of Pisati made it. Restore it with a version of Pisati that knows schema "+
+			"version %d", version, newest, version)
 	}
 	return nil
 }
@@ -218,5 +226,5 @@ func (s *Store) checkIntegrity(ctx context.Context) (err error) {
 	if len(problems) == 1 && problems[0] == "ok" {
 		return nil
 	}
-	return fmt.Errorf("%w: %s", ErrCorrupt, strings.Join(problems, "; "))
+	return fmt.Errorf("%w: %s. Restore another copy", ErrCorrupt, strings.Join(problems, "; "))
 }
