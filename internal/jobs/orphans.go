@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/divbast/pisati/internal/explain"
 	"github.com/divbast/pisati/internal/store/storedb"
 )
 
@@ -44,7 +45,7 @@ func (w *Worker) ReleaseOrphans(ctx context.Context) (int, error) {
 		released, err = q.ReleaseOrphanedJobs(ctx, lastError(orphanedError))
 		return err
 	}); err != nil {
-		return 0, explain(err, "Pisati cannot make the jobs that a stopped Pisati process was running ready to run again: %s", err)
+		return 0, explain.Wrap(err, "Pisati cannot make the jobs that a stopped Pisati process was running ready to run again")
 	}
 	for _, j := range released {
 		w.log.InfoContext(ctx, "job made ready again: the Pisati process that was running it stopped",

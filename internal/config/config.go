@@ -17,7 +17,6 @@ package config
 import (
 	"cmp"
 	"errors"
-	"fmt"
 	"log/slog"
 	"math"
 	"net"
@@ -40,23 +39,6 @@ var (
 	// ErrMissing is a setting that has no default and was not given.
 	ErrMissing = errors.New("missing")
 )
-
-// problem is one problem Load reports: a message of Pisati's own, worded
-// for the operator, around err, the sentinel it is, or the error of a
-// source that could not be read, which errors.Is and errors.AsType still
-// find.
-type problem struct {
-	msg string
-	err error
-}
-
-func (p *problem) Error() string { return p.msg }
-func (p *problem) Unwrap() error { return p.err }
-
-// refuse returns the problem err is, in the words format and args give.
-func refuse(err error, format string, args ...any) error {
-	return &problem{msg: fmt.Sprintf(format, args...), err: err}
-}
 
 // badValue is a value that its setting's rule refuses: why, as what
 // follows "which" or "that", and fix, a sentence on what to give instead.

@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 
 	"github.com/pressly/goose/v3"
+
+	"github.com/divbast/pisati/internal/explain"
 )
 
 // SchemaVersion is the version of a database's schema: the number that
@@ -62,27 +64,27 @@ func (s *Store) Migrate(ctx context.Context, lock Lock) (from, to SchemaVersion,
 	}
 	dir, unhold, err := lock.hold(ctx)
 	if err != nil {
-		return 0, 0, wrap(err, "Pisati cannot update the schema of the database %s", s.path)
+		return 0, 0, explain.Wrap(err, "Pisati cannot update the schema of the database %s", s.path)
 	}
 	defer unhold()
 	if db := DatabasePath(dir); filepath.Clean(s.path) != db {
-		return 0, 0, explain(ErrLockNotHeld, "Pisati cannot update the schema of the database %s, because the lock "+
+		return 0, 0, explain.New(ErrLockNotHeld, "Pisati cannot update the schema of the database %s, because the lock "+
 			"it was given is on the state directory %s, whose database is %s. This is a bug in Pisati", s.path, dir, db)
 	}
 	p, err := newProvider(s.db, s.migrations)
 	if err != nil {
-		return 0, 0, wrap(err, "Pisati cannot update the schema of the database %s", s.path)
+		return 0, 0, explain.Wrap(err, "Pisati cannot update the schema of the database %s", s.path)
 	}
 	// goose creates its table of versions if there is none, as in a
 	// database never migrated. A newer database has the table, so reading
 	// its version writes nothing to it.
 	current, latest, err := p.GetVersions(ctx)
 	if err != nil {
-		return 0, 0, wrap(err, "Pisati cannot read the schema version of the database %s", s.path)
+		return 0, 0, explain.Wrap(err, "Pisati cannot read the schema version of the database %s", s.path)
 	}
 	from, newest := SchemaVersion(current), SchemaVersion(latest)
 	if from > newest {
-		return from, from, explain(ErrSchemaNewer, "the database %s has schema version %d, but this version of "+
+		return from, from, explain.New(ErrSchemaNewer, "the database %s has schema version %d, but this version of "+
 			"Pisati knows schema versions up to %d only, so a newer version of Pisati has updated it. Pisati "+
 			"changes nothing in it. Run a version of Pisati that knows schema version %d", s.path, from, newest, from)
 	}
@@ -98,7 +100,7 @@ func (s *Store) Migrate(ctx context.Context, lock Lock) (from, to SchemaVersion,
 		to = SchemaVersion(applied[len(applied)-1].Source.Version)
 	}
 	if err != nil {
-		return from, to, wrap(err, "Pisati cannot update the schema of the database %s past version %d", s.path, to)
+		return from, to, explain.Wrap(err, "Pisati cannot update the schema of the database %s past version %d", s.path, to)
 	}
 	return from, to, nil
 }

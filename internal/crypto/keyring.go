@@ -30,6 +30,7 @@ import (
 
 	"golang.org/x/crypto/chacha20poly1305"
 
+	"github.com/divbast/pisati/internal/explain"
 	"github.com/divbast/pisati/internal/store"
 	"github.com/divbast/pisati/internal/store/storedb"
 )
@@ -132,16 +133,16 @@ type Keyring struct {
 func OpenKeyring(ctx context.Context, s *store.Store, m MainKey, clock func() time.Time, rnd io.Reader) (*Keyring, error) {
 	var errs []error
 	if s.DB() == nil {
-		errs = append(errs, explain(ErrInvalid, "crypto.OpenKeyring was given a store that is not open, %s", bug))
+		errs = append(errs, explain.New(ErrInvalid, "crypto.OpenKeyring was given a store that is not open, %s", bug))
 	}
 	if m.key == nil {
-		errs = append(errs, explain(ErrInvalid, "crypto.OpenKeyring was given a MainKey that holds no key, %s", bug))
+		errs = append(errs, explain.New(ErrInvalid, "crypto.OpenKeyring was given a MainKey that holds no key, %s", bug))
 	}
 	if clock == nil {
-		errs = append(errs, explain(ErrInvalid, "crypto.OpenKeyring was given no clock, %s", bug))
+		errs = append(errs, explain.New(ErrInvalid, "crypto.OpenKeyring was given no clock, %s", bug))
 	}
 	if rnd == nil {
-		errs = append(errs, explain(ErrInvalid, "crypto.OpenKeyring was given no random source, %s", bug))
+		errs = append(errs, explain.New(ErrInvalid, "crypto.OpenKeyring was given no random source, %s", bug))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
@@ -167,7 +168,7 @@ func OpenKeyring(ctx context.Context, s *store.Store, m MainKey, clock func() ti
 		return nil
 	})
 	if err != nil {
-		return nil, wrap(err, "Pisati cannot load the data keys from the database")
+		return nil, explain.Wrap(err, "Pisati cannot load the data keys from the database")
 	}
 	k.keys, k.current = keys, current
 	return k, nil
@@ -209,7 +210,7 @@ func unwrapAll(m MainKey, rows []storedb.ListDataKeysRow) (map[keyID]dataKey, ke
 		}
 	}
 	if unwrapped < len(rows) {
-		return nil, 0, explain(ErrMainKeyMismatch, "the main key decrypts %d of the database's %d data keys, so it is "+
+		return nil, 0, explain.New(ErrMainKeyMismatch, "the main key decrypts %d of the database's %d data keys, so it is "+
 			"not the main key that encrypts them. Give Pisati the main key that encrypts this database's data keys",
 			unwrapped, len(rows))
 	}
@@ -229,7 +230,7 @@ func (k *Keyring) addKey(ctx context.Context, q *storedb.Queries) (keyID, dataKe
 	defer clear(key[:])
 	var nonce [nonceSize]byte
 	if err := k.read(key[:], nonce[:]); err != nil {
-		return 0, dataKey{}, wrap(err, "Pisati cannot get random bytes for a new data key")
+		return 0, dataKey{}, explain.Wrap(err, "Pisati cannot get random bytes for a new data key")
 	}
 	next, err := q.NextDataKeyID(ctx)
 	if err != nil {
@@ -271,7 +272,7 @@ func (k *Keyring) read(bufs ...[]byte) error {
 // OpenKeyring did not return.
 func (k *Keyring) opened() error {
 	if k == nil || k.keys == nil {
-		return explain(ErrInvalid, "a crypto.Keyring that crypto.OpenKeyring did not return was used, %s", bug)
+		return explain.New(ErrInvalid, "a crypto.Keyring that crypto.OpenKeyring did not return was used, %s", bug)
 	}
 	return nil
 }

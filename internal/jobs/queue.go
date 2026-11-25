@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/divbast/pisati/internal/explain"
 	"github.com/divbast/pisati/internal/store/storedb"
 )
 
@@ -59,7 +60,7 @@ type Kind struct {
 // hold underscores.
 func NewKind(s string) (Kind, error) {
 	if !validKind(s) {
-		return Kind{}, explain(ErrInvalid, "jobs.NewKind was given %q, which is not a job kind, at most %d bytes of "+
+		return Kind{}, explain.New(ErrInvalid, "jobs.NewKind was given %q, which is not a job kind, at most %d bytes of "+
 			"lower-case words joined by dots, such as crypto.reencrypt. This is a bug in Pisati", s, maxKindBytes)
 	}
 	return Kind{name: s}, nil
@@ -111,12 +112,12 @@ type IdempotencyKey struct {
 // repeats s.
 func NewIdempotencyKey(s string) (IdempotencyKey, error) {
 	if len(s) == 0 || len(s) > maxKeyBytes {
-		return IdempotencyKey{}, explain(ErrInvalid, "jobs.NewIdempotencyKey was given %d bytes, but a key is 1 to %d "+
+		return IdempotencyKey{}, explain.New(ErrInvalid, "jobs.NewIdempotencyKey was given %d bytes, but a key is 1 to %d "+
 			"bytes long. This is a bug in Pisati", len(s), maxKeyBytes)
 	}
 	for i := range len(s) {
 		if s[i] < ' ' || s[i] > '~' {
-			return IdempotencyKey{}, explain(ErrInvalid, "jobs.NewIdempotencyKey was given a key whose byte %d is not "+
+			return IdempotencyKey{}, explain.New(ErrInvalid, "jobs.NewIdempotencyKey was given a key whose byte %d is not "+
 				"a printable ASCII character. This is a bug in Pisati", i)
 		}
 	}
@@ -152,13 +153,13 @@ type Job struct {
 // Either way, Enqueue writes nothing.
 func Enqueue(ctx context.Context, q *storedb.Queries, j Job) (bool, error) {
 	if j.Kind == (Kind{}) {
-		return false, explain(ErrInvalid, "jobs.Enqueue was given a job with no kind, which is a bug in Pisati")
+		return false, explain.New(ErrInvalid, "jobs.Enqueue was given a job with no kind, which is a bug in Pisati")
 	}
 	if q == nil {
-		return false, explain(ErrInvalid, "jobs.Enqueue was given no queries for a %s job, which is a bug in Pisati", j.Kind)
+		return false, explain.New(ErrInvalid, "jobs.Enqueue was given no queries for a %s job, which is a bug in Pisati", j.Kind)
 	}
 	if len(j.Payload) > MaxPayload {
-		return false, explain(errors.Join(ErrInvalid, ErrPayloadTooLarge), "the payload of a %s job is %d bytes, more "+
+		return false, explain.New(errors.Join(ErrInvalid, ErrPayloadTooLarge), "the payload of a %s job is %d bytes, more "+
 			"than the %d bytes (1 MiB) a job can hold, so Pisati does not queue it", j.Kind, len(j.Payload), MaxPayload)
 	}
 	payload := j.Payload
@@ -177,7 +178,7 @@ func Enqueue(ctx context.Context, q *storedb.Queries, j Job) (bool, error) {
 		RunAt:          runAt,
 	})
 	if err != nil {
-		return false, explain(err, "Pisati cannot queue a %s job: %s", j.Kind, err)
+		return false, explain.Wrap(err, "Pisati cannot queue a %s job", j.Kind)
 	}
 	return added == 1, nil
 }

@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+
+	"github.com/divbast/pisati/internal/explain"
 )
 
 // SecretSource says where a secret comes from: FromFile, FromCredential
@@ -56,7 +58,7 @@ type Secret struct {
 // ErrInvalid when b is empty.
 func NewSecret(b []byte) (Secret, error) {
 	if len(b) == 0 {
-		return Secret{}, refuse(ErrInvalid, "config.NewSecret was given no bytes, but a secret is never empty. This "+
+		return Secret{}, explain.New(ErrInvalid, "config.NewSecret was given no bytes, but a secret is never empty. This "+
 			"is a bug in Pisati")
 	}
 	held := slices.Clone(b)

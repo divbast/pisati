@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/divbast/pisati/internal/explain"
 	"github.com/divbast/pisati/internal/store"
 	"github.com/divbast/pisati/internal/store/storedb"
 )
@@ -214,23 +215,8 @@ func (o Options) problems() []error {
 // badOptions is the error for Options whose field breaks its rule, as
 // format and args say: a bug in Pisati, which gives its Options in code.
 func badOptions(format string, args ...any) error {
-	return explain(ErrInvalid, "jobs.NewWorker was given Options whose %s, which is a bug in Pisati",
+	return explain.New(ErrInvalid, "jobs.NewWorker was given Options whose %s, which is a bug in Pisati",
 		fmt.Sprintf(format, args...))
-}
-
-// plainError is an error whose message is Pisati's own, worded for the
-// operator, around err, which errors.Is and errors.AsType still find.
-type plainError struct {
-	msg string
-	err error
-}
-
-func (e *plainError) Error() string { return e.msg }
-func (e *plainError) Unwrap() error { return e.err }
-
-// explain returns err behind the message format and args give.
-func explain(err error, format string, args ...any) error {
-	return &plainError{msg: fmt.Sprintf(format, args...), err: err}
 }
 
 // Worker runs the jobs queued in a Store with the Handler for each job's
@@ -283,24 +269,24 @@ func NewWorker(s *store.Store, h map[Kind]Handler, clock func() time.Time, rnd i
 	var errs []error
 	const bug = "which is a bug in Pisati"
 	if s.DB() == nil {
-		errs = append(errs, explain(ErrInvalid, "jobs.NewWorker was given a store that is not open, %s", bug))
+		errs = append(errs, explain.New(ErrInvalid, "jobs.NewWorker was given a store that is not open, %s", bug))
 	}
 	for k, handler := range h {
 		if k == (Kind{}) {
-			errs = append(errs, explain(ErrInvalid, "jobs.NewWorker was given a handler for the zero Kind, %s", bug))
+			errs = append(errs, explain.New(ErrInvalid, "jobs.NewWorker was given a handler for the zero Kind, %s", bug))
 		}
 		if handler == nil {
-			errs = append(errs, explain(ErrInvalid, "jobs.NewWorker was given a nil handler for the kind %q, %s", k, bug))
+			errs = append(errs, explain.New(ErrInvalid, "jobs.NewWorker was given a nil handler for the kind %q, %s", k, bug))
 		}
 	}
 	if clock == nil {
-		errs = append(errs, explain(ErrInvalid, "jobs.NewWorker was given no clock, %s", bug))
+		errs = append(errs, explain.New(ErrInvalid, "jobs.NewWorker was given no clock, %s", bug))
 	}
 	if rnd == nil {
-		errs = append(errs, explain(ErrInvalid, "jobs.NewWorker was given no random source, %s", bug))
+		errs = append(errs, explain.New(ErrInvalid, "jobs.NewWorker was given no random source, %s", bug))
 	}
 	if log == nil {
-		errs = append(errs, explain(ErrInvalid, "jobs.NewWorker was given no logger, %s", bug))
+		errs = append(errs, explain.New(ErrInvalid, "jobs.NewWorker was given no logger, %s", bug))
 	}
 	errs = append(errs, opts.problems()...)
 	if err := errors.Join(errs...); err != nil {

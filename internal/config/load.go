@@ -17,6 +17,8 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/divbast/pisati/internal/explain"
 )
 
 const (
@@ -144,7 +146,7 @@ func missingCertificate(given devLayer, dev Dev, otherCase map[string]bool) []er
 			continue
 		}
 		if v == nil && !otherCase[s.key] {
-			errs = append(errs, refuse(ErrMissing, "%s is not set, but %s is set to an https URL, so the Vite dev server "+
+			errs = append(errs, explain.New(ErrMissing, "%s is not set, but %s is set to an https URL, so the Vite dev server "+
 				"needs a certificate and its private key. Set %s to %s", s.label(), label("dev.vite_url"), s.key, s.value))
 		}
 	}
@@ -165,11 +167,11 @@ func stopped(ctx context.Context) error {
 func unknownVariable(name string) error {
 	for _, s := range settings() {
 		if s.env() == strings.ToUpper(name) {
-			return refuse(ErrUnknown, "the environment variable %s is set, but Pisati's variables are written in "+
+			return explain.New(ErrUnknown, "the environment variable %s is set, but Pisati's variables are written in "+
 				"capital letters. Write it as %s", name, s.env())
 		}
 	}
-	return refuse(ErrUnknown, "the environment variable %s is set, but Pisati has no setting of that name. Check its "+
+	return explain.New(ErrUnknown, "the environment variable %s is set, but Pisati has no setting of that name. Check its "+
 		"spelling, or remove it", name)
 }
 
@@ -300,7 +302,7 @@ func readBounded(fsys fs.FS, name string) (data []byte, err error) {
 		return nil, cannotRead(err, what)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, refuse(ErrInvalid, "%s is not a regular file, so Pisati cannot read its settings. Replace it "+
+		return nil, explain.New(ErrInvalid, "%s is not a regular file, so Pisati cannot read its settings. Replace it "+
 			"with a regular file, or remove it", what)
 	}
 	data, err = io.ReadAll(io.LimitReader(f, maxFileSize+1))
@@ -308,7 +310,7 @@ func readBounded(fsys fs.FS, name string) (data []byte, err error) {
 		return nil, cannotRead(err, what)
 	}
 	if len(data) > maxFileSize {
-		return nil, refuse(ErrInvalid, "%s is larger than 1 MiB (1,048,576 bytes), which is more than Pisati reads "+
+		return nil, explain.New(ErrInvalid, "%s is larger than 1 MiB (1,048,576 bytes), which is more than Pisati reads "+
 			"from a configuration file. Check that it is the right file", what)
 	}
 	return data, nil
@@ -319,10 +321,10 @@ func readBounded(fsys fs.FS, name string) (data []byte, err error) {
 // is a lack of permission, what to do.
 func cannotRead(err error, what string) error {
 	if errors.Is(err, fs.ErrPermission) {
-		return refuse(err, "Pisati cannot read %s, because the user that runs Pisati does not have permission to. "+
+		return explain.New(err, "Pisati cannot read %s, because the user that runs Pisati does not have permission to. "+
 			"Give that user permission to read it", what)
 	}
-	return refuse(err, "Pisati cannot read %s: %s", what, pathless(err))
+	return explain.New(err, "Pisati cannot read %s: %s", what, pathless(err))
 }
 
 // pathless returns the error inside err when err is an *fs.PathError,
@@ -360,7 +362,7 @@ func decodeError(name string, row, col int, key []string) error {
 	default:
 		where += " in the setting " + strings.Join(key, ".")
 	}
-	return refuse(ErrInvalid, "%s: %s", where, notDecoded)
+	return explain.New(ErrInvalid, "%s: %s", where, notDecoded)
 }
 
 // decodeErrors turns what decoding data, the file name, returned into one
@@ -380,7 +382,7 @@ func decodeErrors(name string, data []byte, err error) []error {
 		for i := range strict.Errors {
 			row, col := strict.Errors[i].Position()
 			key := unknownKey(data, offset(data, row, col), strict.Errors[i].Key())
-			errs = append(errs, refuse(ErrUnknown, "the configuration file %s has the key %s, at line %d, column %d, "+
+			errs = append(errs, explain.New(ErrUnknown, "the configuration file %s has the key %s, at line %d, column %d, "+
 				"but Pisati has no setting of that name. Check its spelling, or remove it", name, strings.Join(key, "."), row, col))
 		}
 		return errs
@@ -422,7 +424,7 @@ func refusals(name string, l *layer) []error {
 // refusal is the error for the refused setting k, given, as given says.
 // It never repeats the value, which is the secret itself.
 func refusal(given string, k refused) error {
-	return refuse(ErrInvalid, "%s, but Pisati does not take this secret as a setting's value. Put it in a file of its "+
+	return explain.New(ErrInvalid, "%s, but Pisati does not take this secret as a setting's value. Put it in a file of its "+
 		"own, and set %s to that file's full path. Pisati does not show the value, because it is a secret", given,
 		label(k.instead))
 }
@@ -489,7 +491,7 @@ func build(l layer, otherCase map[string]bool) (c Config, refusedValues, missing
 
 // notGiven is the problem of s, which has no default, given by no source.
 func notGiven(s setting) error {
-	return refuse(ErrMissing, "%s is not set, or is empty, and it has no default. Set it to %s", s.label(), s.value)
+	return explain.New(ErrMissing, "%s is not set, or is empty, and it has no default. Set it to %s", s.label(), s.value)
 }
 
 // labelled returns err, which s's rule returned for its value, as the
@@ -497,7 +499,7 @@ func notGiven(s setting) error {
 // names s itself.
 func labelled(s setting, err error) error {
 	if b, ok := errors.AsType[*badValue](err); ok {
-		return refuse(err, "%s", b.of(s.label()))
+		return explain.New(err, "%s", b.of(s.label()))
 	}
 	return err
 }
@@ -514,13 +516,13 @@ func deref(p *string) (string, bool) {
 // directory: one absolute, clean path.
 func stateDirectory(s string) (string, error) {
 	if strings.Contains(s, ":") {
-		return "", refuse(ErrInvalid, "STATE_DIRECTORY is set to %q, which has \":\" in it. \":\" separates two "+
+		return "", explain.New(ErrInvalid, "STATE_DIRECTORY is set to %q, which has \":\" in it. \":\" separates two "+
 			"directories there, as systemd writes it for a service with more than one StateDirectory=, and Pisati "+
 			"uses one. Set it to one directory, or set %s to the directory Pisati should use", s, label("storage.state_dir"))
 	}
 	dir, err := parsePath(s)
 	if b, ok := errors.AsType[*badValue](err); ok {
-		return "", refuse(err, "%s", b.of("STATE_DIRECTORY"))
+		return "", explain.New(err, "%s", b.of("STATE_DIRECTORY"))
 	}
 	return dir, err
 }
@@ -538,11 +540,11 @@ func credentialSource(creds fs.FS) (SecretSource, error) {
 	case errors.Is(err, fs.ErrNotExist):
 		return Generated{}, nil
 	case errors.Is(err, fs.ErrPermission):
-		return nil, refuse(err, "Pisati cannot look for the credential %s in the directory that CREDENTIALS_DIRECTORY "+
+		return nil, explain.New(err, "Pisati cannot look for the credential %s in the directory that CREDENTIALS_DIRECTORY "+
 			"names, because the user that runs Pisati does not have permission to. Give that user permission to read "+
 			"that directory", mainKeyCredential)
 	default:
-		return nil, refuse(err, "Pisati cannot look for the credential %s in the directory that CREDENTIALS_DIRECTORY "+
+		return nil, explain.New(err, "Pisati cannot look for the credential %s in the directory that CREDENTIALS_DIRECTORY "+
 			"names: %s", mainKeyCredential, pathless(err))
 	}
 }

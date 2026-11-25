@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/divbast/pisati/internal/explain"
 )
 
 // ErrAddressRefused is a request the GuardedClient will not send: its
@@ -180,7 +182,7 @@ func NewGuardedClient(o GuardedOptions) (*GuardedClient, error) {
 		Timeout: o.Timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > maxRedirects {
-				return explain(ErrTooManyRedirects, "the server sent the request to another address more than %d "+
+				return explain.New(ErrTooManyRedirects, "the server sent the request to another address more than %d "+
 					"times, and Pisati follows no more", maxRedirects)
 			}
 			return c.check.url(req.URL)
@@ -213,7 +215,7 @@ func (c *GuardedClient) Do(ctx context.Context, req *http.Request) (*http.Respon
 		// Under any key the transport would send: a caller may write to
 		// the map without canonicalising.
 		if strings.EqualFold(key, "Accept-Encoding") {
-			return nil, explain(ErrInvalid, "httpx.GuardedClient.Do was given a request that sets Accept-Encoding, "+
+			return nil, explain.New(ErrInvalid, "httpx.GuardedClient.Do was given a request that sets Accept-Encoding, "+
 				"%s: only a body that the transport decodes itself is held to MaxBody as it is read", bug)
 		}
 	}
@@ -223,13 +225,13 @@ func (c *GuardedClient) Do(ctx context.Context, req *http.Request) (*http.Respon
 	resp, err := c.client.Do(req.WithContext(ctx)) //nolint:gosec // G704: this is the address-checked client; the check above, CheckRedirect and dial check every URL and address
 	if err != nil {
 		if headerTooLarge(err) {
-			return nil, explain(errors.Join(ErrTooLarge, err), "the server's answer has a header of more than %d "+
+			return nil, explain.New(errors.Join(ErrTooLarge, err), "the server's answer has a header of more than %d "+
 				"bytes (64 KiB), which is more than Pisati reads", maxResponseHeader)
 		}
 		return nil, err
 	}
 	if !resp.Uncompressed && mayHaveBody(resp) && encoded(resp.Header) {
-		return nil, errors.Join(explain(ErrInvalid, "the server sent its answer encoded as %s, which Pisati did not "+
+		return nil, errors.Join(explain.New(ErrInvalid, "the server sent its answer encoded as %s, which Pisati did not "+
 			"ask for, so Pisati does not read it", strings.Join(resp.Header.Values("Content-Encoding"), ", ")),
 			resp.Body.Close())
 	}
@@ -292,11 +294,11 @@ func (c *GuardedClient) dial(ctx context.Context, network, address string) (net.
 	defer cancel()
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
-		return nil, explain(err, "Pisati cannot connect to %q, which is not written as host:port: %s", address, err)
+		return nil, explain.Wrap(err, "Pisati cannot connect to %q, which is not written as host:port", address)
 	}
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil {
-		return nil, explain(nil, "Pisati cannot connect to %q, whose port is not a number from 0 to 65535", address)
+		return nil, explain.New(nil, "Pisati cannot connect to %q, whose port is not a number from 0 to 65535", address)
 	}
 	addrs, err := c.addresses(ctx, host)
 	if err != nil {
@@ -309,7 +311,7 @@ func (c *GuardedClient) dial(ctx context.Context, network, address string) (net.
 		}
 	}
 	if len(allowed) == 0 {
-		return nil, explain(ErrAddressRefused, "Pisati does not connect to %s, because each of its addresses, %v, is "+
+		return nil, explain.New(ErrAddressRefused, "Pisati does not connect to %s, because each of its addresses, %v, is "+
 			"private or reserved", host, addrs)
 	}
 	errs := make([]error, 0, len(allowed))
@@ -320,7 +322,7 @@ func (c *GuardedClient) dial(ctx context.Context, network, address string) (net.
 		if err == nil {
 			return conn, nil
 		}
-		errs = append(errs, explain(err, "Pisati cannot connect to %v, an address of %s: %s", to, host, err))
+		errs = append(errs, explain.Wrap(err, "Pisati cannot connect to %v, an address of %s", to, host))
 	}
 	return nil, errors.Join(errs...)
 }
@@ -333,10 +335,10 @@ func (c *GuardedClient) addresses(ctx context.Context, host string) ([]netip.Add
 	}
 	addrs, err := c.lookup(ctx, host)
 	if err != nil {
-		return nil, explain(err, "Pisati cannot look up the addresses of %s: %s", host, err)
+		return nil, explain.Wrap(err, "Pisati cannot look up the addresses of %s", host)
 	}
 	if len(addrs) == 0 {
-		return nil, explain(nil, "Pisati looked up %s, and found no address for it", host)
+		return nil, explain.New(nil, "Pisati looked up %s, and found no address for it", host)
 	}
 	return addrs, nil
 }
@@ -428,11 +430,11 @@ func (k addressCheck) allows(a netip.Addr) bool {
 // to.
 func (k addressCheck) url(u *url.URL) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return explain(ErrAddressRefused, "Pisati sends requests only to http and https URLs, and not to one that "+
+		return explain.New(ErrAddressRefused, "Pisati sends requests only to http and https URLs, and not to one that "+
 			"starts with %q", u.Scheme+":")
 	}
 	if a, err := netip.ParseAddr(u.Hostname()); err == nil && !k.allows(a) {
-		return explain(ErrAddressRefused, "Pisati does not send requests to %v, because it is a private or reserved "+
+		return explain.New(ErrAddressRefused, "Pisati does not send requests to %v, because it is a private or reserved "+
 			"address", plain(a))
 	}
 	return nil
@@ -447,10 +449,10 @@ func (k addressCheck) url(u *url.URL) error {
 func (k addressCheck) control(_, address string, _ syscall.RawConn) error {
 	ap, err := netip.ParseAddrPort(address)
 	if err != nil {
-		return explain(ErrAddressRefused, "Pisati does not connect to %q, which is not an address and a port", address)
+		return explain.New(ErrAddressRefused, "Pisati does not connect to %q, which is not an address and a port", address)
 	}
 	if !k.allows(ap.Addr()) {
-		return explain(ErrAddressRefused, "Pisati does not connect to %v, because it is a private or reserved address",
+		return explain.New(ErrAddressRefused, "Pisati does not connect to %v, because it is a private or reserved address",
 			plain(ap.Addr()))
 	}
 	return nil
@@ -486,7 +488,7 @@ func (b *cappedBody) Read(p []byte) (int, error) {
 	}
 	n = int(b.left)
 	b.left = 0
-	b.err = explain(ErrTooLarge, "the server's answer has a body of more than %d bytes, which is more than Pisati "+
+	b.err = explain.New(ErrTooLarge, "the server's answer has a body of more than %d bytes, which is more than Pisati "+
 		"reads", b.limit)
 	return n, b.err
 }

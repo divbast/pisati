@@ -24,6 +24,7 @@ import (
 
 	"github.com/ncruces/go-sqlite3/driver"
 
+	"github.com/divbast/pisati/internal/explain"
 	"github.com/divbast/pisati/internal/store/storedb"
 )
 
@@ -96,7 +97,7 @@ func WithMigrations(fsys fs.FS) Option {
 // opened.
 func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 	if err := absolute(path); err != nil {
-		return nil, wrap(err, "Pisati cannot open the database %s", path)
+		return nil, explain.Wrap(err, "Pisati cannot open the database %s", path)
 	}
 	ours, err := pisatiMigrations()
 	if err != nil {
@@ -111,14 +112,14 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 
 	db, err := driver.Open(dataSourceName(path))
 	if err != nil {
-		return nil, wrap(err, "Pisati cannot open the database %s", path)
+		return nil, explain.Wrap(err, "Pisati cannot open the database %s", path)
 	}
 	// Idle connections stay at database/sql's default of two: each one
 	// kept keeps an instance of SQLite, with its cache.
 	db.SetMaxOpenConns(maxConns)
 	// sql.Open connects to nothing; a connection opens the file.
 	if err := db.PingContext(ctx); err != nil {
-		return nil, errors.Join(wrap(err, "Pisati cannot open the database %s", path), db.Close())
+		return nil, errors.Join(explain.Wrap(err, "Pisati cannot open the database %s", path), db.Close())
 	}
 	return &Store{
 		db:         db,
@@ -173,7 +174,7 @@ func (s *Store) Close() error {
 		return nil
 	}
 	if err := s.db.Close(); err != nil {
-		return wrap(err, "Pisati cannot close the database %s", s.path)
+		return explain.Wrap(err, "Pisati cannot close the database %s", s.path)
 	}
 	return nil
 }
@@ -211,7 +212,7 @@ func (s *Store) InTx(ctx context.Context, fn func(*storedb.Queries) error) (err 
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return wrap(err, "Pisati cannot start a change to the database %s", s.path)
+		return explain.Wrap(err, "Pisati cannot start a change to the database %s", s.path)
 	}
 	// Rolled back on every way out but the commit, a panic in fn included:
 	// otherwise the connection would never return to the pool, and would
@@ -227,7 +228,7 @@ func (s *Store) InTx(ctx context.Context, fn func(*storedb.Queries) error) (err 
 	}
 	committing = true
 	if err := tx.Commit(); err != nil {
-		return wrap(err, "Pisati cannot save a change to the database %s", s.path)
+		return explain.Wrap(err, "Pisati cannot save a change to the database %s", s.path)
 	}
 	return nil
 }
@@ -236,7 +237,7 @@ func (s *Store) InTx(ctx context.Context, fn func(*storedb.Queries) error) (err 
 // database/sql has rolled back already, so that is no error.
 func (s *Store) rollback(tx *sql.Tx) error {
 	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-		return wrap(err, "Pisati cannot undo a change to the database %s that did not finish", s.path)
+		return explain.Wrap(err, "Pisati cannot undo a change to the database %s that did not finish", s.path)
 	}
 	return nil
 }
@@ -276,32 +277,11 @@ func removeFiles(root *os.Root, names ...string) error {
 	var errs []error
 	for _, name := range names {
 		if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, explain(err, "Pisati cannot remove the file %s: %s", filepath.Join(root.Name(), name),
+			errs = append(errs, explain.New(err, "Pisati cannot remove the file %s: %s", filepath.Join(root.Name(), name),
 				pathless(err)))
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// plainError is an error whose message is Pisati's own, worded for the
-// operator, around err, which errors.Is and errors.AsType still find.
-type plainError struct {
-	msg string
-	err error
-}
-
-func (e *plainError) Error() string { return e.msg }
-func (e *plainError) Unwrap() error { return e.err }
-
-// explain returns err behind the message format and args give.
-func explain(err error, format string, args ...any) error {
-	return &plainError{msg: fmt.Sprintf(format, args...), err: err}
-}
-
-// wrap returns err behind the words format and args give, then ": " and
-// err's own message, as fmt.Errorf's %w would.
-func wrap(err error, format string, args ...any) error {
-	return explain(err, "%s: %s", fmt.Sprintf(format, args...), err)
 }
 
 // pathless returns the error inside err when err is an *fs.PathError,

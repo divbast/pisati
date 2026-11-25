@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/ncruces/go-sqlite3"
+
+	"github.com/divbast/pisati/internal/explain"
 )
 
 // ErrCorrupt is a database that PRAGMA integrity_check finds fault with.
@@ -52,7 +54,7 @@ const restoreSuffix = ".restore"
 func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	defer func() {
 		if err != nil {
-			err = wrap(err, "Pisati cannot restore the database from %s", src)
+			err = explain.Wrap(err, "Pisati cannot restore the database from %s", src)
 		}
 	}()
 	if err := absolute(src); err != nil {
@@ -68,7 +70,7 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return explain(err, "Pisati cannot open the state directory %s: %s", dir, pathless(err))
+		return explain.New(err, "Pisati cannot open the state directory %s: %s", dir, pathless(err))
 	}
 	defer func() {
 		err = errors.Join(err, root.Close())
@@ -88,7 +90,7 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 		return err
 	}
 	if err := createFile(root, tmp); err != nil {
-		return explain(err, "Pisati cannot create the file %s: %s", filepath.Join(dir, tmp), pathless(err))
+		return explain.New(err, "Pisati cannot create the file %s: %s", filepath.Join(dir, tmp), pathless(err))
 	}
 	defer func() {
 		if err != nil {
@@ -97,7 +99,7 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 	}()
 	tmpPath := filepath.Join(dir, tmp)
 	if err := copyFrom(ctx, tmpPath, src); err != nil {
-		return wrap(err, "SQLite cannot copy it into %s", tmpPath)
+		return explain.Wrap(err, "SQLite cannot copy it into %s", tmpPath)
 	}
 	if err := check(ctx, tmpPath); err != nil {
 		return err
@@ -110,16 +112,16 @@ func Restore(ctx context.Context, src string, lock Lock) (err error) {
 			"have folded into the copy", tmpPath), err)
 	}
 	if err := syncFile(root, tmp); err != nil {
-		return explain(err, "Pisati cannot make sure that the copy %s is written to disk: %s", tmpPath, pathless(err))
+		return explain.New(err, "Pisati cannot make sure that the copy %s is written to disk: %s", tmpPath, pathless(err))
 	}
 	if err := removeFiles(root, sidecars(name)...); err != nil {
 		return err
 	}
 	if err := root.Rename(tmp, name); err != nil {
-		return explain(err, "Pisati cannot rename the copy %s to %s: %s", tmpPath, filepath.Join(dir, name), pathless(err))
+		return explain.New(err, "Pisati cannot rename the copy %s to %s: %s", tmpPath, filepath.Join(dir, name), pathless(err))
 	}
 	if err := syncDir(root); err != nil {
-		return explain(err, "Pisati cannot make sure that the directory %s is written to disk: %s", dir, pathless(err))
+		return explain.New(err, "Pisati cannot make sure that the directory %s is written to disk: %s", dir, pathless(err))
 	}
 	return nil
 }
@@ -190,11 +192,11 @@ func check(ctx context.Context, path string) (err error) {
 	version, newest, err := p.GetVersions(ctx)
 	switch {
 	case err != nil:
-		return wrap(err, "Pisati cannot read the schema version of the copy")
+		return explain.Wrap(err, "Pisati cannot read the schema version of the copy")
 	case version < 1:
 		return errors.New("it holds no schema of Pisati's, so Pisati did not make it")
 	case version > newest:
-		return explain(ErrSchemaNewer, "it has schema version %d, but this version of Pisati knows schema versions up "+
+		return explain.New(ErrSchemaNewer, "it has schema version %d, but this version of Pisati knows schema versions up "+
 			"to %d only, so a newer version of Pisati made it. Restore it with a version of Pisati that knows schema "+
 			"version %d", version, newest, version)
 	}

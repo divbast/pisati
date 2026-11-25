@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 
 	"github.com/divbast/pisati/internal/config"
+	"github.com/divbast/pisati/internal/explain"
 )
 
 const (
@@ -110,7 +111,7 @@ func (MainKey) LogValue() slog.Value {
 // ErrInvalid for the zero MainKey.
 func (m MainKey) aead() (cipher.AEAD, error) {
 	if m.key == nil {
-		return nil, explain(ErrInvalid, "a crypto.MainKey that holds no key was used, %s", bug)
+		return nil, explain.New(ErrInvalid, "a crypto.MainKey that holds no key was used, %s", bug)
 	}
 	key := m.key()
 	defer clear(key[:])
@@ -209,7 +210,7 @@ func (m MainKey) unwrap(id keyID, wrapped []byte) ([keySize]byte, error) {
 // src, gets ErrInvalid.
 func LoadMainKey(ctx context.Context, src config.SecretSource, creds fs.FS, state *os.Root, log *slog.Logger) (MainKey, error) {
 	if log == nil {
-		return MainKey{}, explain(ErrInvalid, "crypto.LoadMainKey was given no logger, %s", bug)
+		return MainKey{}, explain.New(ErrInvalid, "crypto.LoadMainKey was given no logger, %s", bug)
 	}
 	switch s := src.(type) {
 	case config.FromFile:
@@ -221,7 +222,7 @@ func LoadMainKey(ctx context.Context, src config.SecretSource, creds fs.FS, stat
 	default:
 		// nil, or a type outside config that embeds a source: a bug,
 		// which must load no key.
-		return MainKey{}, explain(ErrInvalid, "crypto.LoadMainKey was given a source of the main key of the type %T, "+
+		return MainKey{}, explain.New(ErrInvalid, "crypto.LoadMainKey was given a source of the main key of the type %T, "+
 			"which it does not know, %s", src, bug)
 	}
 }
@@ -229,13 +230,13 @@ func LoadMainKey(ctx context.Context, src config.SecretSource, creds fs.FS, stat
 // loadFile loads the key from the file at path, which the operator named.
 func loadFile(ctx context.Context, path string, log *slog.Logger) (MainKey, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path || looksLikeKey(path) {
-		return MainKey{}, explain(ErrInvalid, "Pisati cannot load the main key, because the path of its file is not "+
+		return MainKey{}, explain.New(ErrInvalid, "Pisati cannot load the main key, because the path of its file is not "+
 			"a full path, written with no \".\" or \"..\" in it, or is a key itself. Give the full path of the file "+
 			"that holds the key. Pisati does not show the path, because it may be the key itself")
 	}
 	where := "the main key file " + path
 	if err := ctx.Err(); err != nil {
-		return MainKey{}, wrap(err, "Pisati stopped before it read %s", where)
+		return MainKey{}, explain.Wrap(err, "Pisati stopped before it read %s", where)
 	}
 	// Non-blocking, so that a named pipe in the key file's place is
 	// refused, as no regular file, rather than waited on for a writer.
@@ -257,16 +258,16 @@ func loadFile(ctx context.Context, path string, log *slog.Logger) (MainKey, erro
 // loadCredential loads the key from the credential name in creds.
 func loadCredential(ctx context.Context, creds fs.FS, name string, log *slog.Logger) (MainKey, error) {
 	if creds == nil {
-		return MainKey{}, explain(ErrInvalid, "crypto.LoadMainKey was asked for the credential %s, but given no "+
+		return MainKey{}, explain.New(ErrInvalid, "crypto.LoadMainKey was asked for the credential %s, but given no "+
 			"credentials directory, %s", name, bug)
 	}
 	if !fs.ValidPath(name) || name == "." || strings.Contains(name, "/") {
-		return MainKey{}, explain(ErrInvalid, "crypto.LoadMainKey was asked for the credential %q, which is not the "+
+		return MainKey{}, explain.New(ErrInvalid, "crypto.LoadMainKey was asked for the credential %q, which is not the "+
 			"name of a file, %s", name, bug)
 	}
 	where := "the credential " + name
 	if err := ctx.Err(); err != nil {
-		return MainKey{}, wrap(err, "Pisati stopped before it read %s", where)
+		return MainKey{}, explain.Wrap(err, "Pisati stopped before it read %s", where)
 	}
 	// Checked before it is opened, as fs.FS opens nothing non-blocking:
 	// a named pipe there is refused rather than waited on. The file it
@@ -279,7 +280,7 @@ func loadCredential(ctx context.Context, creds fs.FS, name string, log *slog.Log
 		return MainKey{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return MainKey{}, wrap(err, "Pisati stopped before it read %s", where)
+		return MainKey{}, explain.Wrap(err, "Pisati stopped before it read %s", where)
 	}
 	f, err := creds.Open(name)
 	if err != nil {
@@ -315,10 +316,10 @@ func readNamed(f fs.File, where string) ([keySize]byte, bool, error) {
 func checkNamed(fi fs.FileInfo, where string) error {
 	switch mode := fi.Mode(); {
 	case !mode.IsRegular():
-		return explain(ErrKeyFile, "Pisati cannot use %s, because it is not a regular file. Give the path of the "+
+		return explain.New(ErrKeyFile, "Pisati cannot use %s, because it is not a regular file. Give the path of the "+
 			"regular file that holds the key", where)
 	case mode.Perm()&0o022 != 0:
-		return explain(ErrKeyFile, "Pisati cannot use %s, because its mode, %04o, lets users other than its owner "+
+		return explain.New(ErrKeyFile, "Pisati cannot use %s, because its mode, %04o, lets users other than its owner "+
 			"change it. %s", where, mode.Perm(), namedFix)
 	}
 	return checkSize(fi.Size(), where)
@@ -328,7 +329,7 @@ func checkNamed(fi fs.FileInfo, where string) error {
 // size: 44 bytes, or 45 with a newline.
 func checkSize(n int64, where string) error {
 	if n != keyChars && n != keyChars+1 {
-		return explain(ErrKeyFile, "Pisati cannot use %s, because it holds %d bytes, not 44 or 45. %s", where, n, keyFormat)
+		return explain.New(ErrKeyFile, "Pisati cannot use %s, because it holds %d bytes, not 44 or 45. %s", where, n, keyFormat)
 	}
 	return nil
 }
@@ -347,7 +348,7 @@ func readKey(r io.Reader, where string) ([keySize]byte, error) {
 	}
 	key, ok := parseKey(text)
 	if !ok {
-		return [keySize]byte{}, explain(ErrKeyFile, "Pisati cannot use %s, because it does not hold a key. %s. "+
+		return [keySize]byte{}, explain.New(ErrKeyFile, "Pisati cannot use %s, because it does not hold a key. %s. "+
 			"Pisati does not show what the file holds", where, keyFormat)
 	}
 	return key, nil
@@ -393,38 +394,17 @@ func pathless(err error) error {
 // for a lack of permission, what to do.
 func cannotRead(err error, where string) error {
 	if errors.Is(err, fs.ErrPermission) {
-		return explain(err, "Pisati cannot read %s, because the user that runs Pisati does not have permission to. "+
+		return explain.New(err, "Pisati cannot read %s, because the user that runs Pisati does not have permission to. "+
 			"%s", where, namedFix)
 	}
-	return explain(err, "Pisati cannot read %s: %s", where, pathless(err))
-}
-
-// plainError is an error whose message is Pisati's own, worded for the
-// operator, around err, which errors.Is and errors.AsType still find.
-type plainError struct {
-	msg string
-	err error
-}
-
-func (e *plainError) Error() string { return e.msg }
-func (e *plainError) Unwrap() error { return e.err }
-
-// explain returns err behind the message format and args give.
-func explain(err error, format string, args ...any) error {
-	return &plainError{msg: fmt.Sprintf(format, args...), err: err}
-}
-
-// wrap returns err behind the words format and args give, then ": " and
-// err's own message, as fmt.Errorf's %w would.
-func wrap(err error, format string, args ...any) error {
-	return explain(err, "%s: %s", fmt.Sprintf(format, args...), err)
+	return explain.New(err, "Pisati cannot read %s: %s", where, pathless(err))
 }
 
 // loadGenerated loads the key Pisati keeps at <state>/keys/main.key,
 // generating it first if there is none.
 func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (MainKey, error) {
 	if state == nil {
-		return MainKey{}, explain(ErrInvalid, "crypto.LoadMainKey was given no state directory to keep a generated "+
+		return MainKey{}, explain.New(ErrInvalid, "crypto.LoadMainKey was given no state directory to keep a generated "+
 			"main key in, %s", bug)
 	}
 	dirPath := filepath.Join(state.Name(), keysDir)
@@ -432,7 +412,7 @@ func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (MainK
 	name := filepath.Join(keysDir, keyName)
 	where := "the main key file " + keyPath
 	if err := ctx.Err(); err != nil {
-		return MainKey{}, wrap(err, "Pisati stopped before it read %s", where)
+		return MainKey{}, explain.Wrap(err, "Pisati stopped before it read %s", where)
 	}
 	if err := keysDirectory(state, dirPath); err != nil {
 		return MainKey{}, err
@@ -441,21 +421,21 @@ func loadGenerated(ctx context.Context, state *os.Root, log *slog.Logger) (MainK
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if err := ctx.Err(); err != nil {
-			return MainKey{}, wrap(err, "Pisati stopped before it made %s", where)
+			return MainKey{}, explain.Wrap(err, "Pisati stopped before it made %s", where)
 		}
 		return generate(ctx, state, name, keyPath, log)
 	case err != nil:
-		return MainKey{}, explain(err, "Pisati cannot check %s: %s", where, pathless(err))
+		return MainKey{}, explain.New(err, "Pisati cannot check %s: %s", where, pathless(err))
 	}
 	if err := checkGenerated(fi, keyPath); err != nil {
 		return MainKey{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return MainKey{}, wrap(err, "Pisati stopped before it read %s", where)
+		return MainKey{}, explain.Wrap(err, "Pisati stopped before it read %s", where)
 	}
 	f, err := state.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return MainKey{}, explain(err, "Pisati cannot read %s: %s", where, pathless(err))
+		return MainKey{}, explain.New(err, "Pisati cannot read %s: %s", where, pathless(err))
 	}
 	key, err := readGenerated(f, fi, where)
 	defer clear(key[:])
@@ -473,25 +453,25 @@ func keysDirectory(state *os.Root, dirPath string) error {
 	fi, err := state.Lstat(keysDir)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := state.Mkdir(keysDir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-			return explain(err, "Pisati cannot make the directory %s, for the main key it generates: %s", dirPath,
+			return explain.New(err, "Pisati cannot make the directory %s, for the main key it generates: %s", dirPath,
 				pathless(err))
 		}
 		fi, err = state.Lstat(keysDir)
 	}
 	if err != nil {
-		return explain(err, "Pisati cannot check the directory %s, which holds the main key it generates: %s",
+		return explain.New(err, "Pisati cannot check the directory %s, which holds the main key it generates: %s",
 			dirPath, pathless(err))
 	}
 	switch mode := fi.Mode(); {
 	case mode&fs.ModeSymlink != 0:
-		return explain(ErrKeyFile, "Pisati cannot use %s, because it is a symbolic link. Pisati makes this "+
+		return explain.New(ErrKeyFile, "Pisati cannot use %s, because it is a symbolic link. Pisati makes this "+
 			"directory itself, with mode 0700, for the main key it generates: put a directory in the link's place",
 			dirPath)
 	case !mode.IsDir():
-		return explain(ErrKeyFile, "Pisati cannot use %s, because it is not a directory. Pisati keeps the main key "+
+		return explain.New(ErrKeyFile, "Pisati cannot use %s, because it is not a directory. Pisati keeps the main key "+
 			"it generates in a directory of this name, with mode 0700: move what is there to another place", dirPath)
 	case mode.Perm()&0o007 != 0:
-		return explain(ErrKeyFile, "Pisati cannot use the directory %s, because its mode, %04o, lets users other "+
+		return explain.New(ErrKeyFile, "Pisati cannot use the directory %s, because its mode, %04o, lets users other "+
 			"than its owner and its group use it. Run: chmod 0700 %s", dirPath, mode.Perm(), dirPath)
 	}
 	return nil
@@ -505,14 +485,14 @@ func checkGenerated(fi fs.FileInfo, keyPath string) error {
 	where := "the main key file " + keyPath
 	switch mode := fi.Mode(); {
 	case mode&fs.ModeSymlink != 0:
-		return explain(ErrKeyFile, "Pisati cannot use %s, because it is a symbolic link. Pisati generated this key, "+
+		return explain.New(ErrKeyFile, "Pisati cannot use %s, because it is a symbolic link. Pisati generated this key, "+
 			"and never makes a link to it: put the key file itself in the link's place, with mode 0600, or set "+
 			"keys.main_key_file (PISATI_KEYS_MAIN_KEY_FILE) to the file's path", where)
 	case !mode.IsRegular():
-		return explain(ErrKeyFile, "Pisati cannot use %s, because it is not a regular file. Restore the key file "+
+		return explain.New(ErrKeyFile, "Pisati cannot use %s, because it is not a regular file. Restore the key file "+
 			"that was backed up with the database", where)
 	case mode.Perm()&0o007 != 0:
-		return explain(ErrKeyFile, "Pisati cannot use %s, because its mode, %04o, lets users other than its owner "+
+		return explain.New(ErrKeyFile, "Pisati cannot use %s, because its mode, %04o, lets users other than its owner "+
 			"and its group use it. Run: chmod 0600 %s", where, mode.Perm(), keyPath)
 	}
 	return checkSize(fi.Size(), where)
@@ -523,13 +503,13 @@ func checkGenerated(fi fs.FileInfo, keyPath string) error {
 func readGenerated(f *os.File, checked fs.FileInfo, where string) ([keySize]byte, error) {
 	opened, err := f.Stat()
 	if err != nil {
-		return [keySize]byte{}, explain(err, "Pisati cannot read %s: %s", where, pathless(err))
+		return [keySize]byte{}, explain.New(err, "Pisati cannot read %s: %s", where, pathless(err))
 	}
 	// os.Root follows a link inside the root, so a link put in the
 	// file's place since it was checked would be opened: the file opened
 	// must be the one checked.
 	if !os.SameFile(checked, opened) {
-		return [keySize]byte{}, explain(ErrKeyFile, "Pisati cannot use %s, because it was replaced while Pisati read "+
+		return [keySize]byte{}, explain.New(ErrKeyFile, "Pisati cannot use %s, because it was replaced while Pisati read "+
 			"it. Only Pisati should write this file", where)
 	}
 	return readKey(f, where)
@@ -541,12 +521,12 @@ func generate(ctx context.Context, state *os.Root, name, keyPath string, log *sl
 	var key [keySize]byte
 	defer clear(key[:])
 	if _, err := rand.Read(key[:]); err != nil {
-		return MainKey{}, wrap(err, "Pisati cannot get random bytes for a new main key")
+		return MainKey{}, explain.Wrap(err, "Pisati cannot get random bytes for a new main key")
 	}
 	text := append(base64.StdEncoding.AppendEncode(nil, key[:]), '\n')
 	defer clear(text)
 	if err := writeKey(state, name, text); err != nil {
-		return MainKey{}, wrap(err, "Pisati cannot write the main key it generated to %s", keyPath)
+		return MainKey{}, explain.Wrap(err, "Pisati cannot write the main key it generated to %s", keyPath)
 	}
 	log.WarnContext(ctx, "main key generated on the data volume", "path", keyPath, "action", generatedAction)
 	return newMainKey(key), nil

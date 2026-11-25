@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/divbast/pisati/internal/explain"
 )
 
 // ErrInvalid is a value its rule refuses: options given to NewLimiter or
@@ -20,22 +22,6 @@ import (
 // Every error the package returns for one wraps it and says which rule.
 var ErrInvalid = errors.New("invalid")
 
-// plainError is an error whose message is Pisati's own, worded for the
-// operator, around err, which errors.Is and errors.AsType still find.
-type plainError struct {
-	msg string
-	err error
-}
-
-func (e *plainError) Error() string { return e.msg }
-func (e *plainError) Unwrap() error { return e.err }
-
-// explain returns err behind the message format and args give. A nil err
-// gives an error that wraps nothing.
-func explain(err error, format string, args ...any) error {
-	return &plainError{msg: fmt.Sprintf(format, args...), err: err}
-}
-
 // bug ends the message of what only a mistake in Pisati's code does.
 const bug = "which is a bug in Pisati"
 
@@ -43,7 +29,7 @@ const bug = "which is a bug in Pisati"
 // gives, whose field breaks its rule, as format and args say: Pisati
 // gives its options in code, so it is a bug.
 func badOptions(made, format string, args ...any) error {
-	return explain(ErrInvalid, "%s was given options whose %s, %s", made, fmt.Sprintf(format, args...), bug)
+	return explain.New(ErrInvalid, "%s was given options whose %s, %s", made, fmt.Sprintf(format, args...), bug)
 }
 
 // Rate is how many events happen in a second.
@@ -218,7 +204,7 @@ type claim struct {
 func NewLimiter(o LimiterOptions, clock func() time.Time) (*Limiter, error) {
 	errs := o.problems()
 	if clock == nil {
-		errs = append(errs, explain(ErrInvalid, "httpx.NewLimiter was given no clock, %s", bug))
+		errs = append(errs, explain.New(ErrInvalid, "httpx.NewLimiter was given no clock, %s", bug))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err

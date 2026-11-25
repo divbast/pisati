@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 
+	"github.com/divbast/pisati/internal/explain"
 	"github.com/divbast/pisati/internal/jobs"
 	"github.com/divbast/pisati/internal/store"
 	"github.com/divbast/pisati/internal/store/storedb"
@@ -39,13 +40,13 @@ const (
 func Rewrap(ctx context.Context, s *store.Store, from, to MainKey) error {
 	var errs []error
 	if s.DB() == nil {
-		errs = append(errs, explain(ErrInvalid, "crypto.Rewrap was given a store that is not open, %s", bug))
+		errs = append(errs, explain.New(ErrInvalid, "crypto.Rewrap was given a store that is not open, %s", bug))
 	}
 	if from.key == nil {
-		errs = append(errs, explain(ErrInvalid, "crypto.Rewrap was given an old MainKey that holds no key, %s", bug))
+		errs = append(errs, explain.New(ErrInvalid, "crypto.Rewrap was given an old MainKey that holds no key, %s", bug))
 	}
 	if to.key == nil {
-		errs = append(errs, explain(ErrInvalid, "crypto.Rewrap was given a new MainKey that holds no key, %s", bug))
+		errs = append(errs, explain.New(ErrInvalid, "crypto.Rewrap was given a new MainKey that holds no key, %s", bug))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return err
@@ -82,7 +83,7 @@ func Rewrap(ctx context.Context, s *store.Store, from, to MainKey) error {
 			rewrapped = append(rewrapped, storedb.RewrapDataKeyParams{Wrapped: wrapped, ID: row.ID})
 		}
 		if len(rewrapped) < len(rows) {
-			return explain(ErrMainKeyMismatch, "the main key in use decrypts %d of the database's %d data keys, so "+
+			return explain.New(ErrMainKeyMismatch, "the main key in use decrypts %d of the database's %d data keys, so "+
 				"Pisati encrypts none of them with the new main key", len(rewrapped), len(rows))
 		}
 		for _, p := range rewrapped {
@@ -98,7 +99,7 @@ func Rewrap(ctx context.Context, s *store.Store, from, to MainKey) error {
 		return nil
 	})
 	if err != nil {
-		return wrap(err, "Pisati cannot encrypt the data keys with the new main key")
+		return explain.Wrap(err, "Pisati cannot encrypt the data keys with the new main key")
 	}
 	return nil
 }
@@ -123,7 +124,7 @@ func Rotate(ctx context.Context, s *store.Store, k *Keyring) error {
 		return err
 	}
 	if s != k.store {
-		return explain(ErrInvalid, "crypto.Rotate was given a store other than the one its keyring was opened on, %s", bug)
+		return explain.New(ErrInvalid, "crypto.Rotate was given a store other than the one its keyring was opened on, %s", bug)
 	}
 	kind, err := jobs.NewKind(reencryptKind)
 	if err != nil {
@@ -176,7 +177,7 @@ func Rotate(ctx context.Context, s *store.Store, k *Keyring) error {
 		return err
 	})
 	if err != nil {
-		return wrap(err, "Pisati cannot make a new data key")
+		return explain.Wrap(err, "Pisati cannot make a new data key")
 	}
 	// Installed only now: a value sealed under a key whose transaction
 	// then failed would have no key left to open it.
@@ -223,7 +224,7 @@ func (f Field) check() error {
 		{"table", f.Table}, {"ID column", f.IDColumn}, {"column", f.Column},
 	} {
 		if !identifier.MatchString(n.name) {
-			return explain(ErrInvalid, "crypto.NewReencrypter was given a Field whose %s name, %q, is not a lower-case "+
+			return explain.New(ErrInvalid, "crypto.NewReencrypter was given a Field whose %s name, %q, is not a lower-case "+
 				"letter or underscore followed by lower-case letters, digits and underscores, %s", n.what, n.name, bug)
 		}
 	}
@@ -271,7 +272,7 @@ func NewReencrypter(k *Keyring, fields ...Field) (*Reencrypter, error) {
 		}
 		where := [2]string{f.Table, f.Column}
 		if seen[where] {
-			errs = append(errs, explain(ErrInvalid, "crypto.NewReencrypter was given the Field %s.%s twice, %s", f.Table,
+			errs = append(errs, explain.New(ErrInvalid, "crypto.NewReencrypter was given the Field %s.%s twice, %s", f.Table,
 				f.Column, bug))
 			continue
 		}
@@ -359,7 +360,7 @@ func (r *Reencrypter) reencrypt(ctx context.Context, f registered) error {
 	for {
 		resealed, unopened, err := r.pass(ctx, f)
 		if err != nil {
-			return wrap(err, "Pisati cannot re-encrypt the values in %s.%s", f.Table, f.Column)
+			return explain.Wrap(err, "Pisati cannot re-encrypt the values in %s.%s", f.Table, f.Column)
 		}
 		if resealed > 0 {
 			continue

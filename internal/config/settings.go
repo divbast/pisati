@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"path/filepath"
 	"strings"
+
+	"github.com/divbast/pisati/internal/explain"
 )
 
 // layer is what one source gives, still as text: each file decodes
@@ -336,7 +338,7 @@ func applyViteURL(c *Config, s string) error {
 	viteLabel, baseLabel := label("dev.vite_url"), label("server.base_url")
 	switch viteLocal, baseLocal := loopback(u.Hostname()), c.Server.BaseURL.local; {
 	case !viteLocal && !baseLocal:
-		return refuse(ErrInvalid, "%s and %s are both set to URLs that are not on %s. %s: set both to URLs on %s, or "+
+		return explain.New(ErrInvalid, "%s and %s are both set to URLs that are not on %s. %s: set both to URLs on %s, or "+
 			"set dev.vite_url to nothing. %s", viteLabel, baseLabel, local, devOnly, local, passwords)
 	case !viteLocal:
 		return &badValue{
@@ -344,7 +346,7 @@ func applyViteURL(c *Config, s string) error {
 			fix: devOnly + ": set it to a URL on " + local + ", or to nothing",
 		}
 	case !baseLocal:
-		return refuse(ErrInvalid, "%s is set, but %s is set to a URL that is not on %s. %s: set dev.vite_url to "+
+		return explain.New(ErrInvalid, "%s is set, but %s is set to a URL that is not on %s. %s: set dev.vite_url to "+
 			"nothing, or set server.base_url to a URL on %s. %s", viteLabel, baseLabel, local, devOnly, local, passwords)
 	}
 	c.Dev.ViteURL = vite

@@ -13,6 +13,8 @@ import (
 
 	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/driver"
+
+	"github.com/divbast/pisati/internal/explain"
 )
 
 // Backup writes a consistent copy of the database to dest, a new file it
@@ -45,7 +47,7 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	}
 	defer func() {
 		if err != nil {
-			err = wrap(err, "Pisati cannot back up the database %s to %s", s.path, dest)
+			err = explain.Wrap(err, "Pisati cannot back up the database %s to %s", s.path, dest)
 		}
 	}()
 	dir, name, err := splitPath(dest)
@@ -57,7 +59,7 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return explain(err, "Pisati cannot open the directory %s: %s", filepath.Clean(dir), pathless(err))
+		return explain.New(err, "Pisati cannot open the directory %s: %s", filepath.Clean(dir), pathless(err))
 	}
 	defer func() {
 		err = errors.Join(err, root.Close())
@@ -66,20 +68,20 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	for _, sidecar := range sidecars(name) {
 		switch _, err := root.Lstat(sidecar); {
 		case err == nil:
-			return explain(fs.ErrExist, "the file %s is there already, and SQLite would read it as part of the copy. "+
+			return explain.New(fs.ErrExist, "the file %s is there already, and SQLite would read it as part of the copy. "+
 				"Remove it, or back up to another path", filepath.Join(dir, sidecar))
 		case !errors.Is(err, fs.ErrNotExist):
-			return explain(errors.Join(fs.ErrExist, err), "Pisati cannot tell whether the file %s is there, which SQLite "+
+			return explain.New(errors.Join(fs.ErrExist, err), "Pisati cannot tell whether the file %s is there, which SQLite "+
 				"would read as part of the copy: %s", filepath.Join(dir, sidecar), pathless(err))
 		}
 	}
 	// Created here, refusing one that exists: SQLite would open an
 	// existing file and write over it.
 	if err := createFile(root, name); errors.Is(err, fs.ErrExist) {
-		return explain(err, "the file %s is there already, and a backup is written only to a new file. Back up to "+
+		return explain.New(err, "the file %s is there already, and a backup is written only to a new file. Back up to "+
 			"a path where there is no file yet", dest)
 	} else if err != nil {
-		return explain(err, "Pisati cannot create the file %s: %s", dest, pathless(err))
+		return explain.New(err, "Pisati cannot create the file %s: %s", dest, pathless(err))
 	}
 	if made != nil {
 		made(func() error { return removePaths(dir, append(sidecars(name), name)...) })
@@ -93,13 +95,13 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	}()
 	path := filepath.Join(dir, name)
 	if err := s.copyTo(ctx, path); err != nil {
-		return wrap(err, "Pisati cannot copy the database into %s", path)
+		return explain.Wrap(err, "Pisati cannot copy the database into %s", path)
 	}
 	if err := useRollbackJournal(ctx, path); err != nil {
-		return wrap(err, "Pisati cannot finish the copy %s", path)
+		return explain.Wrap(err, "Pisati cannot finish the copy %s", path)
 	}
 	if err := syncDir(root); err != nil {
-		return explain(err, "Pisati cannot make sure that the directory %s is written to disk: %s", filepath.Clean(dir),
+		return explain.New(err, "Pisati cannot make sure that the directory %s is written to disk: %s", filepath.Clean(dir),
 			pathless(err))
 	}
 	return nil

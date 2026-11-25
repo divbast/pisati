@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/divbast/pisati/internal/explain"
 )
 
 // inOtherCase reports whether doc, a file decoded into a map, which keeps
@@ -110,14 +112,14 @@ const (
 // or a setting of Pisati's, the problem is the case alone.
 func unknownName(name, what, written, lower string) error {
 	if knownSection(lower) || knownSetting(lower) {
-		return refuse(ErrUnknown, "the configuration file %s has the %s %s, but Pisati's tables and keys are written "+
+		return explain.New(ErrUnknown, "the configuration file %s has the %s %s, but Pisati's tables and keys are written "+
 			"in lower case. Write it as %s", name, what, written, lower)
 	}
 	setting := "setting"
 	if what == aTable {
 		setting = "table"
 	}
-	return refuse(ErrUnknown, "the configuration file %s has the %s %s, but Pisati has no %s of that name. Check its "+
+	return explain.New(ErrUnknown, "the configuration file %s has the %s %s, but Pisati has no %s of that name. Check its "+
 		"spelling, or remove it", name, what, written, setting)
 }
 

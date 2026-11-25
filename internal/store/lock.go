@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"github.com/divbast/pisati/internal/explain"
 )
 
 // The conditions of the lock on a state directory.
@@ -66,7 +68,7 @@ type heldLock struct {
 func AcquireLock(ctx context.Context, stateDir string) (_ Lock, err error) {
 	defer func() {
 		if err != nil {
-			err = wrap(err, "Pisati cannot lock the state directory %s", stateDir)
+			err = explain.Wrap(err, "Pisati cannot lock the state directory %s", stateDir)
 		}
 	}()
 	if err := absolute(stateDir); err != nil {
@@ -82,7 +84,7 @@ func AcquireLock(ctx context.Context, stateDir string) (_ Lock, err error) {
 	// A file opened through the root stays open once the root is closed.
 	f, err := root.OpenFile(lockFile, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
-		err = explain(err, "Pisati cannot open the file %s: %s", filepath.Join(stateDir, lockFile), pathless(err))
+		err = explain.New(err, "Pisati cannot open the file %s: %s", filepath.Join(stateDir, lockFile), pathless(err))
 	}
 	if err := errors.Join(err, root.Close()); err != nil {
 		if f != nil {
@@ -148,7 +150,7 @@ func (h *heldLock) release() error {
 	h.slot <- struct{}{}
 	// Closing the only descriptor of the open file releases the flock.
 	if err := h.file.Close(); err != nil {
-		return wrap(err, "Pisati cannot release the lock on the state directory %s", h.dir)
+		return explain.Wrap(err, "Pisati cannot release the lock on the state directory %s", h.dir)
 	}
 	return nil
 }
