@@ -112,9 +112,13 @@ _goleak-in-step:
 # //nolint is the one way to suppress a finding, and nolintlint holds it to
 # a named linter and a reason. This refuses, in any tracked file, every
 # other suppression comment the linters and betterleaks would honour, and
-# a betterleaks ignore file tracked anywhere or present at the root, where
-# betterleaks reads one. Each pattern brackets one character, so that this
-# recipe never matches itself.
+# each file betterleaks or gitleaks reads that could pass over a finding,
+# tracked anywhere or present at the root, where they read one: an ignore
+# file (.betterleaksignore, .gitleaksignore), or a configuration file of
+# rules and allowlists (.betterleaks.toml, .gitleaks.toml). Each pattern
+# brackets one character, so that this recipe never matches itself. Only
+# grep's "no match" may end a search without failing the recipe: the file
+# list is read on its own, so that a git that fails fails the gate.
 
 # Fail on any suppression but //nolint
 [script("mise", "exec", "--", "bash", "-euo", "pipefail")]
@@ -122,7 +126,9 @@ _one-suppression:
     rule="suppress only with //nolint, with a specific linter and a reason"
     hits=$(git grep -n -o -i -I -E -e 'exhaustive[:]ignore' -e 'revive[:](disable|enable)' \
         -e '#[n]osec' -e 'gitleaks[:]allow' -e 'betterleaks[:]allow' || [[ $? -eq 1 ]])
-    ignores=$({ git ls-files; ls -A; } | grep -E '(^|/)[.](git|better)leaksignore$' | sort -u || true)
+    files=$(git ls-files)
+    files+=$'\n'$(ls -A)
+    ignores=$(grep -E '(^|/)[.](git|better)leaks([.]toml|ignore)$' <<<"${files}" | sort -u || [[ $? -eq 1 ]])
     status=0
     if [[ -n "${hits}" ]]; then
         while IFS=: read -r file line what; do
@@ -132,7 +138,7 @@ _one-suppression:
     fi
     if [[ -n "${ignores}" ]]; then
         while read -r file; do
-            echo "${file}: a betterleaks ignore file: ${rule}" >&2
+            echo "${file}: a file betterleaks or gitleaks reads, which could pass over a finding: ${rule}" >&2
         done <<<"${ignores}"
         status=1
     fi
@@ -219,9 +225,11 @@ secrets:
 # ignore files would keep a template from generate-check, tracked anywhere
 # or present at the root, where they read one. Each pattern brackets one
 # character, so that this recipe never matches itself, and names match in
-# any case, as macOS's file system does. The repository needs .gitignore,
-# so this cannot refuse it, though Oxlint and Oxfmt skip what it lists
-# too: review covers its entries, as it does the configs' own ignore lists.
+# any case, as macOS's file system does. As in _one-suppression, only
+# grep's "no match" may end a search without failing the recipe. The
+# repository needs .gitignore, so this cannot refuse it, though Oxlint and
+# Oxfmt skip what it lists too: review covers its entries, as it does the
+# configs' own ignore lists.
 
 # Fail on any suppression comment or ignore file
 [script("mise", "exec", "--", "bash", "-euo", "pipefail")]
@@ -229,8 +237,10 @@ _fe-no-suppression:
     rule="the front end takes no suppression comment or ignore file: fix the finding, or switch its rule off by name in the config, with the reason"
     hits=$(git grep --untracked -n -o -i -I -E -e '(oxlint|eslint|stylelint)[-]disable[a-z-]*' \
         -e '@ts[-](ignore|expect-error|nocheck)' -e '(prettier|oxfmt)[-]ignore[a-z-]*' || [[ $? -eq 1 ]])
-    ignores=$({ git ls-files; ls -A; } |
-        grep -i -E '(^|/)[.]((stylelint|prettier|oxlint|eslint|oxfmt)ignore|templignore_(generate|fmt))$' | sort -u || true)
+    files=$(git ls-files)
+    files+=$'\n'$(ls -A)
+    ignores=$(grep -i -E '(^|/)[.]((stylelint|prettier|oxlint|eslint|oxfmt)ignore|templignore_(generate|fmt))$' <<<"${files}" |
+        sort -u || [[ $? -eq 1 ]])
     status=0
     if [[ -n "${hits}" ]]; then
         while IFS=: read -r file line what; do
