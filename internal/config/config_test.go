@@ -456,6 +456,29 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 		}
 	}
 
+	// go-toml names a key inside an inline table relative to it, but the
+	// error names it whole.
+	t.Run("in an inline table", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := setup{
+			files: fstest.MapFS{"pisati.toml": tomlFile(
+				"keys = { mian_key = \"x\" }\nlog = { level = \"warn\", fmt.x = 1 }\n" +
+					"[server]\nbase_url = \"https://blog.example.org\"\n")},
+		}.load(t.Context())
+		var unknown []string
+		for _, part := range errorParts(err) {
+			unknown = append(unknown, part.Error())
+		}
+		want := []string{
+			"pisati.toml:1:10: keys.mian_key: unknown setting",
+			"pisati.toml:2:25: log.fmt.x: unknown setting",
+		}
+		if !slices.Equal(unknown, want) {
+			t.Errorf("errors %q, want %q", unknown, want)
+		}
+	})
+
 	t.Run("values after an unknown key", func(t *testing.T) {
 		t.Parallel()
 

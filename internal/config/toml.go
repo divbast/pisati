@@ -199,6 +199,18 @@ func failedKey(data []byte, at int) []string {
 	return append(table, keyParts(rest)...)
 }
 
+// unknownKey returns the whole key of an unknown key go-toml names as key
+// at offset at of data. go-toml names a key whole, from the start of its
+// expression, but one inside an inline table relative to that table:
+// there, inside the expression, it is put after the expression's own key.
+func unknownKey(data []byte, at int, key []string) []string {
+	start, _ := expressionAt(data, at)
+	if start >= len(data) || at <= start || data[start] == '[' {
+		return key
+	}
+	return append(failedKey(data, at), key...)
+}
+
 // expressionAt returns where the expression of data that holds offset at
 // starts, a comment counting as one, and where the last table header
 // before it starts, or -1 when there is none. An expression holds the

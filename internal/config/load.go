@@ -312,7 +312,8 @@ func decodeErrors(name string, data []byte, err error) []error {
 		errs := make([]error, 0, len(strict.Errors))
 		for i := range strict.Errors {
 			row, col := strict.Errors[i].Position()
-			errs = append(errs, fmt.Errorf("%s:%d:%d: %s: %w", name, row, col, strings.Join(strict.Errors[i].Key(), "."), ErrUnknown))
+			key := unknownKey(data, offset(data, row, col), strict.Errors[i].Key())
+			errs = append(errs, fmt.Errorf("%s:%d:%d: %s: %w", name, row, col, strings.Join(key, "."), ErrUnknown))
 		}
 		return errs
 	}
