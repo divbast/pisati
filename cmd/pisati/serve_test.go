@@ -638,19 +638,12 @@ func TestHealthzReadsTheDatabase(t *testing.T) {
 	v := s.serve(t)
 	healthz := fmt.Sprintf("http://127.0.0.1:%d/healthz", s.internal)
 
-	// Every byte of the database and of its write-ahead log overwritten in
-	// place, as a fault of the disk would leave them: the files are still
-	// there, and still open, but hold no database.
-	for _, name := range []string{"pisati.db", "pisati.db-wal"} {
-		path := filepath.Join(s.state, name)
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(strings.Repeat("x", int(info.Size()))), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Every byte of the database's pages, past its header, and of its
+	// write-ahead log overwritten in place, as a fault of the disk would
+	// leave them: the files are still there, and still open, but hold no
+	// database past their first 100 bytes.
+	overwrite(t, filepath.Join(s.state, "pisati.db"), 100, 'x')
+	overwrite(t, filepath.Join(s.state, "pisati.db-wal"), 0, 'x')
 	if status, body := get(t, http.MethodGet, healthz); status != http.StatusServiceUnavailable || body != "unavailable" {
 		t.Errorf("GET /healthz on a database overwritten = %d %q, want 503 %q", status, body, "unavailable")
 	}
@@ -732,6 +725,27 @@ func TestHealthzSeesTheDatabaseGone(t *testing.T) {
 	const failed = "health check: the database did not answer"
 	if found := v.stdout.logged(t, failed); len(found) != 1 || found[0]["level"] != "ERROR" ||
 		!strings.Contains(fmt.Sprint(found[0]["error"]), "Pisati cannot find its database file "+db) {
+		t.Errorf("serve logged %v, want one error record of the check, naming the database file", found)
+	}
+}
+
+func TestHealthzSeesTheDatabaseZeroed(t *testing.T) {
+	s := newSite(t)
+	v := s.serve(t)
+	healthz := fmt.Sprintf("http://127.0.0.1:%d/healthz", s.internal)
+
+	// A write puts the database's first page in its write-ahead log,
+	// where SQLite reads it from: zeroed then, the file itself still reads
+	// through SQLite as if nothing had happened.
+	liveSession(t, s.state)
+	db := filepath.Join(s.state, "pisati.db")
+	overwrite(t, db, 0, 0)
+	if status, body := get(t, http.MethodGet, healthz); status != http.StatusServiceUnavailable || body != "unavailable" {
+		t.Errorf("GET /healthz with the database zeroed = %d %q, want 503 %q", status, body, "unavailable")
+	}
+	const failed = "health check: the database did not answer"
+	if found := v.stdout.logged(t, failed); len(found) != 1 || found[0]["level"] != "ERROR" ||
+		!strings.Contains(fmt.Sprint(found[0]["error"]), "the database file "+db+" does not start as a SQLite database does") {
 		t.Errorf("serve logged %v, want one error record of the check, naming the database file", found)
 	}
 }

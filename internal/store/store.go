@@ -17,10 +17,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
 
 	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/driver"
@@ -64,11 +68,12 @@ type Store struct {
 	queries    *storedb.Queries
 	migrations fs.FS
 	path       string
-	// dir is the directory that holds the database, open, and name the
-	// database's file in it: Check looks there for the file at its path,
-	// which the connections, holding it open, cannot.
-	dir  *os.Root
-	name string
+	// dir is the directory that holds the database, open, dirPath its
+	// path, and name the database's file in it: Check looks there for the
+	// file at its path, which the connections, holding it open, cannot.
+	dir     *os.Root
+	dirPath string
+	name    string
 }
 
 // Option changes how a Store that Open returns behaves.
@@ -140,6 +145,7 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 		migrations: o.migrations,
 		path:       path,
 		dir:        dir,
+		dirPath:    filepath.Clean(dirPath),
 		name:       name,
 	}, nil
 }
@@ -204,42 +210,62 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-// Check reads the database from its files, as a health check needs. First
-// it checks that the database's file is still at its path, as a regular
-// file: the connections hold the file open, and still read one that has
-// been removed or moved, which the next start would not find. Then it
-// counts the tables and indexes in the schema, sqlite_schema, which SQLite
-// keeps on the database's first pages. A connection keeps the pages it has
-// read, and reads them again only when another connection has changed
-// them, so a file overwritten or cut short from outside SQLite would go
-// unseen: Check empties its connection's cache of pages first. It returns
-// nil once both pass, and otherwise an error that names the database and
-// says what is wrong, or ctx's error when ctx ends first. The zero Store
-// gets an error.
-func (s *Store) Check(ctx context.Context) (err error) {
+// Check checks, within the time within gives it, that the database is
+// there and reads, as a health check needs. The connections hold the
+// database's file open, and read it as it is in their cache, or in the
+// write-ahead log: a file moved, removed, replaced or overwritten from
+// outside SQLite would go unseen through them. So Check, in turn:
+//   - checks that the directory the Store opened, which holds the
+//     database, is still the one at that directory's path;
+//   - checks that the database's file is there in it, as a regular file,
+//     not a symbolic link;
+//   - reads the file's first 100 bytes, its header, from the file itself,
+//     and checks that they start as every SQLite database's do;
+//   - empties its connection's cache of pages, and counts the tables and
+//     indexes in the schema, sqlite_schema, which SQLite reads from the
+//     database's first pages, in the file or in its write-ahead log.
+//
+// It returns nil once all pass, and otherwise an error that names the
+// directory or the database and says what is wrong and what to do; once
+// ctx has ended, or within has passed, an error wrapping ctx's. A within
+// that is not positive is a bug, and gets an error, as does the zero
+// Store.
+func (s *Store) Check(ctx context.Context, within time.Duration) (err error) {
 	if err := s.open(); err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return cannotRead(ctx, err, s.path)
+	if within <= 0 {
+		return fmt.Errorf("store.Store.Check was given %s to check the database %s in, which is a bug in Pisati: it "+
+			"needs a time above zero", within, s.path)
 	}
-	if err := s.atItsPath(); err != nil {
+	ctx, cancel := context.WithTimeout(ctx, within)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return cannotRead(ctx, err, s.path, within)
+	}
+	if err := s.sameDirectory(ctx); err != nil {
+		return err
+	}
+	if err := s.atItsPath(ctx); err != nil {
+		return err
+	}
+	if err := s.header(ctx); err != nil {
 		return err
 	}
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return cannotRead(ctx, err, s.path)
+		return cannotRead(ctx, err, s.path, within)
 	}
 	defer func() {
 		err = errors.Join(err, conn.Close())
 	}()
 	// sqlc cannot parse a PRAGMA, so both statements are written here.
 	if _, err := conn.ExecContext(ctx, "PRAGMA shrink_memory"); err != nil {
-		return cannotRead(ctx, err, s.path)
+		return cannotRead(ctx, err, s.path, within)
 	}
 	var entries int64
 	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_schema").Scan(&entries); err != nil {
-		return cannotRead(ctx, err, s.path)
+		return cannotRead(ctx, err, s.path, within)
 	}
 	return nil
 }
@@ -390,25 +416,115 @@ func cannotOpen(ctx context.Context, err error, path string) error {
 		"and write the file and the directory that holds it, and that the file is a database that Pisati made", path, err)
 }
 
+// stopAndRestore is what an error that finds the database lost says to
+// do.
+const stopAndRestore = "stop Pisati, then restore your last backup with pisati restore"
+
+// sameDirectory returns an error unless the directory the Store opened,
+// which holds the database, is still the one at that directory's path.
+// Once ctx has ended, it checks nothing, and returns ctx's error.
+func (s *Store) sameDirectory(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	opened, err := s.dir.Stat(".")
+	if err != nil {
+		return explain.New(err, "Pisati cannot check the directory %s, which holds the database, through the handle it "+
+			"has open on it: %s. That points to a fault of the disk or of the file system that holds it: the system "+
+			"log may say more", s.dirPath, pathless(err))
+	}
+	now, err := os.Stat(s.dirPath)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return explain.New(err, "the directory %s, which holds the database, is gone: it was moved or removed while "+
+			"Pisati ran. Pisati still reads and writes the database in the directory it has open, but would not find "+
+			"it when it next starts. If the directory was moved, stop Pisati and move it back to %s. If it was "+
+			"removed, the database is lost once Pisati stops: %s", s.dirPath, s.dirPath, stopAndRestore)
+	case errors.Is(err, fs.ErrPermission):
+		return explain.New(err, "Pisati cannot check the directory %s, which holds the database, because the user "+
+			"that runs Pisati no longer has permission to reach it. Give that user back permission to enter %s and "+
+			"every directory above it", s.dirPath, s.dirPath)
+	case err != nil:
+		return explain.New(err, "Pisati cannot check the directory %s, which holds the database: %s", s.dirPath,
+			pathless(err))
+	case !os.SameFile(opened, now):
+		return fmt.Errorf("the directory %s is not the directory that held the database when Pisati opened it: the "+
+			"directory Pisati has open was moved, and another put at its path, while Pisati ran. Stop Pisati, then "+
+			"move the directory that holds the database back to %s", s.dirPath, s.dirPath)
+	}
+	return nil
+}
+
 // atItsPath returns an error unless the database's file is at its path, in
 // the directory the Store opened, as a regular file: what Check finds
-// otherwise, and what to do about it.
-func (s *Store) atItsPath() error {
+// otherwise, and what to do about it. Once ctx has ended, it checks
+// nothing, and returns ctx's error.
+func (s *Store) atItsPath(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	info, err := s.dir.Lstat(s.name)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return explain.New(err, "Pisati cannot find its database file %s: it was removed or moved while Pisati ran. "+
-			"Pisati still has the file open, but would not find it when it next starts. Stop Pisati, then put the "+
-			"database back at that path, or restore a backup of it with pisati restore", s.path)
+		return explain.New(err, "Pisati cannot find its database file %s: it was moved or removed while Pisati ran. "+
+			"Pisati still reads and writes the file it has open, but would not find it when it next starts. If the "+
+			"file was moved, stop Pisati and move it back to %s. If it was removed, it is lost once Pisati stops: %s",
+			s.path, s.path, stopAndRestore)
+	case errors.Is(err, fs.ErrPermission):
+		return explain.New(err, "Pisati cannot check its database file %s, because the user that runs Pisati no longer "+
+			"has permission to look in the directory that holds it. Give that user back permission to read and enter "+
+			"%s", s.path, s.dirPath)
+	case errors.Is(err, syscall.EIO):
+		return explain.New(err, "Pisati cannot check its database file %s, because the disk or the file system that "+
+			"holds it reported a fault: the system log may say more", s.path)
 	case err != nil:
-		return explain.New(err, "Pisati cannot check its database file %s: %s. Check that the user that runs Pisati "+
-			"can enter the directory that holds it", s.path, pathless(err))
+		return explain.New(err, "Pisati cannot check its database file %s: %s", s.path, pathless(err))
 	case !info.Mode().IsRegular():
-		return fmt.Errorf("the database file %s is not a regular file any more: %s is there in its place. Stop "+
-			"Pisati, then put the database back at that path, or restore a backup of it with pisati restore", s.path,
-			kindOf(info.Mode()))
+		return fmt.Errorf("the database file %s is not a regular file any more: %s is there in its place, put there "+
+			"while Pisati ran. Stop Pisati, move what is there away, and move the database file back to %s, or "+
+			"restore your last backup with pisati restore", s.path, kindOf(info.Mode()), s.path)
 	}
 	return nil
+}
+
+// sqliteMagic starts every SQLite database file: the first 16 of the 100
+// bytes of its header.
+const sqliteMagic = "SQLite format 3\x00"
+
+// header returns an error unless the database's file, read through the
+// directory the Store opened, starts with a whole header, 100 bytes, that
+// starts as every SQLite database's does. The driver locks the file with
+// locks of its own open file, which a descriptor opened and closed here
+// leaves alone. Once ctx has ended, it reads nothing, and returns ctx's
+// error.
+func (s *Store) header(ctx context.Context) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f, err := s.dir.Open(s.name)
+	if err != nil {
+		return explain.New(err, "Pisati cannot open its database file %s to check it: %s", s.path, pathless(err))
+	}
+	defer func() {
+		err = errors.Join(err, f.Close())
+	}()
+	var head [100]byte
+	switch _, err := io.ReadFull(f, head[:]); {
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return fmt.Errorf("the database file %s is shorter than the 100 bytes that start every SQLite database: it "+
+			"was cut short while Pisati ran. %s", s.path, upper(stopAndRestore))
+	case err != nil:
+		return explain.New(err, "Pisati cannot read its database file %s to check it: %s", s.path, pathless(err))
+	case string(head[:len(sqliteMagic)]) != sqliteMagic:
+		return fmt.Errorf("the database file %s does not start as a SQLite database does: something wrote over it "+
+			"while Pisati ran. %s", s.path, upper(stopAndRestore))
+	}
+	return nil
+}
+
+// upper returns s with its first letter in capitals, to start a sentence.
+func upper(s string) string {
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // kindOf names what a file of mode m is, other than a regular file.
@@ -424,15 +540,18 @@ func kindOf(m fs.FileMode) string {
 
 // cannotRead is the error for the database at path, which err says Check
 // cannot read: SQLite's reason, and what to do when the reason says. Once
-// ctx has ended, it is ctx's error: the read was stopped, or ran out of
-// time.
-func cannotRead(ctx context.Context, err error, path string) error {
+// ctx has ended, it is ctx's error: the read ran out of the time within
+// gave it, or was stopped.
+func cannotRead(ctx context.Context, err error, path string, within time.Duration) error {
 	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return explain.New(ctx.Err(), "Pisati did not finish reading the database %s within %s, the time the check "+
+			"allows", path, within)
 	case ctx.Err() != nil:
-		return explain.New(ctx.Err(), "Pisati did not finish reading the database %s in the time it had", path)
+		return explain.New(ctx.Err(), "Pisati stopped reading the database %s before it had finished", path)
 	case errors.Is(err, sqlite3.NOTADB), errors.Is(err, sqlite3.CORRUPT):
 		return explain.New(err, "Pisati cannot read the database %s: %s. It is not a SQLite database any more, or it is "+
-			"damaged: restore a backup of it with pisati restore", path, err)
+			"damaged: %s", path, err, stopAndRestore)
 	case errors.Is(err, sqlite3.IOERR):
 		return explain.New(err, "Pisati cannot read the database %s: %s. The disk or the file system that holds it "+
 			"reported a fault: the system log may say more", path, err)

@@ -434,6 +434,30 @@ func withStore(t *testing.T, state string, f func(db *store.Store)) {
 	f(db)
 }
 
+// overwrite writes b over every byte of the file at path from the offset
+// from on, in place: the file keeps its size, and stays the file a
+// running Pisati has open.
+func overwrite(t *testing.T, path string, from int, b byte) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Through its directory, as gosec prefers a file opened by a path.
+	dir, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := dir.OpenFile(filepath.Base(path), os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(errors.Join(err, dir.Close()))
+	}
+	_, err = f.WriteAt(bytes.Repeat([]byte{b}, int(info.Size())-from), int64(from))
+	if err := errors.Join(err, f.Close(), dir.Close()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // count returns the one integer query returns from db.
 func count(t *testing.T, db *store.Store, query string, args ...any) int {
 	t.Helper()

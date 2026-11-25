@@ -591,11 +591,10 @@ func internalHandler(db *store.Store, tel telemetry.Providers, pprof config.Swit
 // the reason goes to the log alone, never into the answer.
 func healthz(db *store.Store, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), checkWithin)
-		defer cancel()
+		ctx := r.Context()
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		status, body := http.StatusOK, "ok"
-		if err := db.Check(ctx); err != nil {
+		if err := db.Check(ctx, checkWithin); err != nil {
 			if r.Context().Err() == nil {
 				log.ErrorContext(ctx, "health check: the database did not answer", "error", err)
 			}

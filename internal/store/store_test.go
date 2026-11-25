@@ -201,64 +201,134 @@ func TestOpenSetsPragmas(t *testing.T) {
 	}
 }
 
+// within is the time the tests give Check, as /healthz does.
+const within = 2 * time.Second
+
+// overwrite writes b over every byte of the file at path from the offset
+// from on, in place: the file keeps its size, and stays the file the
+// store has open.
+func overwrite(t *testing.T, path string, from int, b byte) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Through its directory, as gosec prefers a file opened by a path.
+	dir, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := dir.OpenFile(filepath.Base(path), os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(errors.Join(err, dir.Close()))
+	}
+	_, err = f.WriteAt(bytes.Repeat([]byte{b}, int(info.Size())-from), int64(from))
+	if err := errors.Join(err, f.Close(), dir.Close()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCheckReadsTheFiles(t *testing.T) {
-	path := dbPath(t)
-	s := migratedStore(t, path)
-	if err := s.Check(t.Context()); err != nil {
-		t.Fatalf("Check of a database just migrated: %v", err)
-	}
-
-	// The connections have read every page already. Overwritten from
-	// outside SQLite, the database and its write-ahead log hold no
-	// database, which only a read from the files shows.
-	for _, name := range []string{path, path + "-wal"} {
-		info, err := os.Stat(name)
-		if err != nil {
-			t.Fatal(err)
+	t.Run("a database just migrated", func(t *testing.T) {
+		if err := migratedStore(t, dbPath(t)).Check(t.Context(), within); err != nil {
+			t.Errorf("Check: %v", err)
 		}
-		if err := os.WriteFile(name, bytes.Repeat([]byte("x"), int(info.Size())), 0o600); err != nil {
-			t.Fatal(err)
+	})
+	t.Run("a context ended, or no time left", func(t *testing.T) {
+		s := migratedStore(t, dbPath(t))
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if err := s.Check(ctx, within); !errors.Is(err, context.Canceled) {
+			t.Errorf("Check with its context ended = %v, want context.Canceled", err)
 		}
-	}
-	err := s.Check(t.Context())
-	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "file is not a database") {
-		t.Errorf("Check of a database overwritten = %v, want an error naming %s and SQLite's reason", err, path)
-	}
+		err := s.Check(t.Context(), time.Nanosecond)
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "within 1ns") {
+			t.Errorf("Check given 1 ns = %v, want context.DeadlineExceeded, naming the 1ns", err)
+		}
+		if err := s.Check(t.Context(), 0); err == nil {
+			t.Error("Check given no time succeeded, want an error")
+		}
+	})
 
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	if err := s.Check(ctx); !errors.Is(err, context.Canceled) {
-		t.Errorf("Check with its context ended = %v, want context.Canceled", err)
-	}
-
-	// Removed, the database still reads through the connections, which
-	// hold the file open; something else in its place is not it either.
+	// The connections hold the file open, and have read its pages already:
+	// each change below, from outside SQLite, shows only to a check of the
+	// files themselves.
 	for _, tc := range []struct {
 		name, want string
-		replace    func(path string) error
+		damage     func(t *testing.T, path string)
 	}{
-		{"removed", "Pisati cannot find its database file", nil},
-		{"a directory in its place", "is not a regular file any more", func(path string) error { return os.Mkdir(path, 0o700) }},
+		{"its pages and its log overwritten, its header kept", "file is not a database", func(t *testing.T, path string) {
+			overwrite(t, path, 100, 'x')
+			overwrite(t, path+"-wal", 0, 'x')
+		}},
+		{"zeroed, its log left as it is", "does not start as a SQLite database does", func(t *testing.T, path string) {
+			overwrite(t, path, 0, 0)
+		}},
+		{"cut short", "shorter than the 100 bytes", func(t *testing.T, path string) {
+			if err := os.Truncate(path, 50); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"removed", "Pisati cannot find its database file", func(t *testing.T, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a directory in its place", "is not a regular file any more: a directory", func(t *testing.T, path string) {
+			if err := errors.Join(os.Remove(path), os.Mkdir(path, 0o700)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a symbolic link in its place", "is not a regular file any more: a symbolic link", func(t *testing.T, path string) {
+			if err := errors.Join(os.Rename(path, path+".moved"), os.Symlink(path+".moved", path)); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := dbPath(t)
 			s := migratedStore(t, path)
-			if err := os.Remove(path); err != nil {
-				t.Fatal(err)
-			}
-			if tc.replace != nil {
-				if err := tc.replace(path); err != nil {
-					t.Fatal(err)
-				}
-			}
-			err := s.Check(t.Context())
+			tc.damage(t, path)
+			err := s.Check(t.Context(), within)
 			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), path) {
-				t.Errorf("Check with the database file %s = %v, want an error naming %s and holding %q", tc.name, err, path, tc.want)
+				t.Errorf("Check of a database file %s = %v, want an error naming %s and holding %q", tc.name, err, path, tc.want)
 			}
 		})
 	}
+
+	t.Run("its directory moved", func(t *testing.T) {
+		parent := t.TempDir()
+		dir := filepath.Join(parent, "state")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := store.DatabasePath(stateDir(t, dir))
+		s := migratedStore(t, path)
+		moved := filepath.Join(parent, "moved")
+		if err := os.Rename(dir, moved); err != nil {
+			t.Fatal(err)
+		}
+		// Put back before the store closes, which removes its log by path.
+		t.Cleanup(func() {
+			if err := errors.Join(os.RemoveAll(dir), os.Rename(moved, dir)); err != nil {
+				t.Error(err)
+			}
+		})
+		if err := s.Check(t.Context(), within); err == nil || !strings.Contains(err.Error(), "the directory "+dir+", which holds the database, is gone") {
+			t.Errorf("Check with its directory moved away = %v, want an error saying %s is gone", err, dir)
+		}
+		// Another directory in its place, holding a database of the name.
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		migratedStore(t, path)
+		if err := s.Check(t.Context(), within); err == nil || !strings.Contains(err.Error(), "is not the directory that held the database") {
+			t.Errorf("Check with another directory in its place = %v, want an error saying so", err)
+		}
+	})
+
 	var zero store.Store
-	if err := zero.Check(t.Context()); err == nil {
+	if err := zero.Check(t.Context(), within); err == nil {
 		t.Error("Check of the zero Store succeeded, want an error")
 	}
 }
