@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -657,5 +658,38 @@ func TestHealthzReadsTheDatabase(t *testing.T) {
 	if found := v.stdout.logged(t, failed); len(found) != 1 || found[0]["level"] != "ERROR" ||
 		!strings.Contains(fmt.Sprint(found[0]["error"]), "file is not a database") {
 		t.Errorf("serve logged %v, want one error record of the check, naming SQLite's reason", found)
+	}
+}
+
+func TestServeWarnsWithoutTrustedProxies(t *testing.T) {
+	const warning = "no trusted proxy is set"
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		warning bool
+	}{
+		{"an https base URL, no trusted proxy", map[string]string{"PISATI_SERVER_BASE_URL": "https://blog.example.org"}, true},
+		{"an https base URL and its proxy", map[string]string{
+			"PISATI_SERVER_BASE_URL": "https://blog.example.org", "PISATI_SERVER_TRUSTED_PROXIES": "192.0.2.0/24",
+		}, false},
+		{"an http base URL on localhost", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSite(t)
+			maps.Copy(s.env, tc.env)
+			v := s.serve(t)
+			found := v.stdout.logged(t, warning)
+			switch {
+			case !tc.warning && len(found) != 0:
+				t.Errorf("serve warned %v, want no warning", found)
+			case tc.warning && (len(found) != 1 || found[0]["level"] != "WARN" ||
+				found[0]["setting"] != "server.trusted_proxies (PISATI_SERVER_TRUSTED_PROXIES)" ||
+				!strings.Contains(fmt.Sprint(found[0]["effect"]), "Every visitor then shares the rate limit")):
+				t.Errorf("serve logged %v, want one warning naming the setting and what follows without it", found)
+			}
+			if code := v.stop(); code != 0 {
+				t.Errorf("serve exited %d", code)
+			}
+		})
 	}
 }

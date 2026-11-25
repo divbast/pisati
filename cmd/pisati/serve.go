@@ -92,6 +92,8 @@ func serve(ctx context.Context, h Host, l *life) (err error) {
 		log.WarnContext(ctx, "OpenTelemetry reported an error", "error", err)
 	}))
 
+	warnWithoutProxy(ctx, cfg.Server, log)
+
 	st, err := openServingState(ctx, cfg.Storage.StateDir, l)
 	if err != nil {
 		return ignoreStop(ctx, err)
@@ -108,6 +110,27 @@ func serve(ctx context.Context, h Host, l *life) (err error) {
 		return ignoreStop(ctx, err)
 	}
 	return r.serve(ctx, h, l)
+}
+
+// What the warning without a trusted proxy says.
+const (
+	noProxyEffect = "server.base_url is an https URL. Pisati serves only http, so a proxy in front of Pisati takes " +
+		"the visitors' https connections, and sends their requests on to Pisati. Without a trusted proxy, Pisati " +
+		"sees the proxy's address as the address of every visitor. Every visitor then shares the rate limit that " +
+		"Pisati sets for one visitor: once the visitors together send more requests than one visitor may, Pisati " +
+		"answers them all with status 429, Too Many Requests"
+	noProxyFix = "Set server.trusted_proxies to the proxy's address, such as 192.0.2.1, or to the range of " +
+		"addresses it sends from, such as 192.0.2.0/24"
+)
+
+// warnWithoutProxy logs one warning when srv's base URL is https and it
+// trusts no proxy: Pisati serves no https itself, so every visitor comes
+// through a proxy that Pisati does not believe.
+func warnWithoutProxy(ctx context.Context, srv config.Server, log *slog.Logger) {
+	if srv.BaseURL.IsHTTPS() && len(srv.TrustedProxies) == 0 {
+		log.WarnContext(ctx, "no trusted proxy is set", "setting", "server.trusted_proxies (PISATI_SERVER_TRUSTED_PROXIES)",
+			"effect", noProxyEffect, "fix", noProxyFix)
+	}
 }
 
 // openServingState opens the state directory dir as openState does, and
