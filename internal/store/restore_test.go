@@ -502,7 +502,7 @@ func TestLockIsExclusive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := store.AcquireLock(ctx, config.StateDir{}); err == nil {
-		t.Error("AcquireLock took the zero StateDir")
+	if _, err := store.AcquireLock(ctx, config.StateDir{}); err == nil || !strings.Contains(err.Error(), "which is a bug in Pisati") {
+		t.Errorf("AcquireLock of the zero StateDir: %v; want it refused as a bug", err)
 	}
 }

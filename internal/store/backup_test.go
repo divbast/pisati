@@ -236,25 +236,43 @@ func TestBackupTracked(t *testing.T) {
 			t.Errorf("the earlier file at dest holds %q after remove, want it as it was", got)
 		}
 	})
-	t.Run("stopped: the copy goes", func(t *testing.T) {
+	t.Run("stopped before it is made: nothing is made", func(t *testing.T) {
 		dir := t.TempDir()
 		dest := filepath.Join(dir, "backup.db")
 		ctx, cancel := context.WithCancel(t.Context())
 		var remove func() error
 		err := s.BackupTracked(ctx, dest, func(r func() error) {
 			remove = r
-			// Ended before the copy is made: BackupTracked makes it all
-			// the same, then stops, as its context says.
 			cancel()
 		})
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("BackupTracked with its context ended: %v, want context.Canceled", err)
 		}
 		if err := remove(); err != nil {
-			t.Errorf("remove once BackupTracked removed the copy itself: %v, want nil", err)
+			t.Errorf("remove of a copy never made: %v, want nil", err)
 		}
 		if got := listDir(t, dir); len(got) != 0 {
 			t.Errorf("directory after a stopped backup = %v, want nothing", got)
+		}
+	})
+	t.Run("failed once made: the copy goes", func(t *testing.T) {
+		// A store closed meanwhile: the copy is made, and the copying
+		// into it fails.
+		closed := migratedStore(t, dbPath(t))
+		if err := closed.Close(); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "backup.db")
+		var remove func() error
+		if err := closed.BackupTracked(t.Context(), dest, func(r func() error) { remove = r }); err == nil {
+			t.Fatal("BackupTracked from a closed store succeeded")
+		}
+		if got := listDir(t, dir); len(got) != 0 {
+			t.Errorf("directory after a failed backup = %v, want nothing", got)
+		}
+		if err := remove(); err != nil {
+			t.Errorf("remove once BackupTracked removed the copy itself: %v, want nil", err)
 		}
 	})
 }
