@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/driver"
@@ -34,21 +35,45 @@ func (s *Store) Backup(ctx context.Context, dest string) error {
 }
 
 // BackupTracked is Backup, for a caller that may have to return before
-// Backup does, and must leave nothing of an unfinished copy behind. Once
-// it has created dest, it calls made, unless made is nil, with a function
-// that removes dest and every file SQLite may keep beside it. That
-// function leaves alone a file already gone, may be called from any
-// goroutine and more than once, and returns every failure to remove one.
-// made is not called when Backup refuses dest, or fails before it
-// creates it.
+// Backup does, and must leave nothing of an unfinished copy behind. Unless
+// made is nil, BackupTracked first calls it, before it touches any file,
+// with a function, remove, that removes the copy: dest and every file
+// SQLite may keep beside it. remove works in the directory BackupTracked
+// opened for dest, whatever dest's path names by the time it runs; it may
+// be called from any goroutine, at any time, and more than once, also once
+// BackupTracked has returned. It leaves alone a file already gone, and a
+// dest that BackupTracked refused or never created, and returns every
+// failure to remove a file:
+//   - called before BackupTracked has created dest, it keeps BackupTracked
+//     from creating it: BackupTracked then fails, and nothing is made;
+//   - called while BackupTracked copies, or once it has finished the copy,
+//     it removes what is there;
+//   - called once BackupTracked has failed, which removed the copy itself,
+//     it returns what that removal could not remove.
+//
+// From when it creates dest, BackupTracked holds dest's directory open for
+// remove, until remove has removed every file or BackupTracked fails. A
+// caller that keeps a finished copy, and so never calls remove, leaves
+// that directory open.
 func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove func() error)) (err error) {
 	if err := s.open(); err != nil {
 		return err
 	}
+	// The copy goes whatever stopped the backup, so its removals run
+	// under a context that never ends.
+	cleanup := context.WithoutCancel(ctx)
+	t := &tracked{}
+	if made != nil {
+		made(func() error { return t.remove(cleanup) })
+	}
 	defer func() {
-		if err != nil {
-			err = explain.Wrap(err, "Pisati cannot back up the database %s to %s", s.path, dest)
+		if err == nil {
+			return
 		}
+		if left := t.failed(cleanup); left != nil {
+			err = errors.Join(err, left)
+		}
+		err = explain.Wrap(err, "Pisati cannot back up the database %s to %s", s.path, dest)
 	}()
 	dir, name, err := splitPath(dest, "store.Store.Backup")
 	if err != nil {
@@ -84,28 +109,22 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 		}
 	}
 	// Created here, refusing one that exists: SQLite would open an
-	// existing file and write over it.
-	if err := createFile(ctx, root, name); errors.Is(err, fs.ErrExist) {
+	// existing file and write over it. With the file and its sidecars all
+	// new, every one that exists from now on is the copy's own.
+	switch err := t.create(ctx, root, name); {
+	case err == nil:
+	case errors.Is(err, errRemoved), ctx.Err() != nil && errors.Is(err, ctx.Err()):
+		return err
+	case errors.Is(err, fs.ErrExist):
 		return explain.New(err, "the file %s is there already, and a backup is written only to a new file. Back up to "+
 			"a path where there is no file yet", dest)
-	} else if errors.Is(err, fs.ErrPermission) {
+	case errors.Is(err, fs.ErrPermission):
 		return explain.New(err, "the user that runs Pisati may not create the file %s. Back up to a file in a "+
 			"directory that this user can write to", dest)
-	} else if err != nil {
+	default:
 		return explain.New(err, "Pisati cannot create the file %s: %s. Check that the user that runs Pisati can write "+
 			"to the directory %s", dest, pathless(err), filepath.Clean(dir))
 	}
-	if made != nil {
-		made(func() error { return removePaths(dir, append(sidecars(name), name)...) })
-	}
-	// With the file and its sidecars all new, every one that exists now is
-	// Backup's own.
-	defer func() {
-		if err != nil {
-			// Whatever stopped the backup, the copy goes.
-			err = errors.Join(err, removeFiles(context.WithoutCancel(ctx), root, append(sidecars(name), name)...))
-		}
-	}()
 	path := filepath.Join(dir, name)
 	if err := s.copyTo(ctx, path); err != nil {
 		if stop := stoppedBy(ctx, err, "Pisati stopped before it had copied the database into %s", path); stop != nil {
@@ -122,6 +141,89 @@ func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove
 	if err := syncDir(ctx, root); err != nil {
 		return explain.New(err, "Pisati cannot make sure that the directory %s is written to disk: %s", filepath.Clean(dir),
 			pathless(err))
+	}
+	return nil
+}
+
+// errRemoved is a backup whose caller removed the copy before it was
+// made: BackupTracked makes none after that.
+var errRemoved = errors.New("the backup was called off, and its copy removed, before Pisati had made it")
+
+// tracked is a copy that BackupTracked makes, for the function it hands
+// its caller that removes it. Its methods are safe for concurrent use.
+type tracked struct {
+	mu sync.Mutex
+	// removed is set once remove has been called: no copy is made after.
+	removed bool
+	// dir is the copy's directory, opened for the removal from when the
+	// copy is created until every file of it is removed; nil otherwise.
+	dir   *os.Root
+	names []string
+	// left is what the removal BackupTracked made, as it failed, could not
+	// remove.
+	left error
+}
+
+// create creates the file name in root, as the copy, unless remove has
+// been called already, which returns errRemoved.
+func (t *tracked) create(ctx context.Context, root *os.Root, name string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.removed {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return errRemoved
+	}
+	if err := createFile(ctx, root, name); err != nil {
+		return err
+	}
+	names := append(sidecars(name), name)
+	// The same directory, opened again, so that the removal can outlive
+	// BackupTracked's own handle.
+	dir, err := root.OpenRoot(".")
+	if err != nil {
+		return errors.Join(err, removeFiles(context.WithoutCancel(ctx), root, names...))
+	}
+	t.dir, t.names = dir, names
+	return nil
+}
+
+// remove removes the copy, if one was made and not removed already, and
+// keeps one from being made after.
+func (t *tracked) remove(ctx context.Context) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.removed = true
+	if t.dir == nil {
+		return t.left
+	}
+	if err := removeFiles(ctx, t.dir, t.names...); err != nil {
+		return err
+	}
+	return t.close()
+}
+
+// failed removes the copy as BackupTracked fails, if one was made and not
+// removed already, and returns every failure to remove a file, which
+// remove returns from then on.
+func (t *tracked) failed(ctx context.Context) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.dir == nil {
+		return nil
+	}
+	t.left = removeFiles(ctx, t.dir, t.names...)
+	return errors.Join(t.left, t.close())
+}
+
+// close closes the copy's directory. The caller holds mu.
+func (t *tracked) close() error {
+	name := t.dir.Name()
+	err := t.dir.Close()
+	t.dir = nil
+	if err != nil {
+		return explain.New(err, "Pisati cannot close the directory %s: %s", name, pathless(err))
 	}
 	return nil
 }
@@ -185,18 +287,4 @@ func useRollbackJournal(ctx context.Context, path string) (err error) {
 		return fmt.Errorf("SQLite left the copy in the journal mode %s, not delete", mode)
 	}
 	return nil
-}
-
-// removePaths removes each of names from the directory dir, by its path,
-// leaving alone one that is gone already, and returns every failure.
-// Unlike removeFiles, it needs no open Root, so it can run once Backup has
-// returned.
-func removePaths(dir string, names ...string) error {
-	var errs []error
-	for _, name := range names {
-		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
 }

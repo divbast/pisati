@@ -5,6 +5,7 @@ package store_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -142,15 +143,15 @@ func backup(t *testing.T, s *store.Store, name string) string {
 
 func TestBackupTracked(t *testing.T) {
 	s := migratedStore(t, dbPath(t))
-	t.Run("made, once the copy exists, and removed", func(t *testing.T) {
+	t.Run("made first, and the finished copy removed", func(t *testing.T) {
 		dir := t.TempDir()
 		dest := filepath.Join(dir, "backup.db")
 		var remove func() error
 		calls := 0
 		if err := s.BackupTracked(t.Context(), dest, func(r func() error) {
 			calls++
-			if _, err := os.Lstat(dest); err != nil {
-				t.Errorf("made was called before the copy existed: %v", err)
+			if _, err := os.Lstat(dest); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("made was called once the copy existed (%v), want it called before anything", err)
 			}
 			remove = r
 		}); err != nil {
@@ -172,17 +173,88 @@ func TestBackupTracked(t *testing.T) {
 			t.Errorf("directory after remove = %v, want nothing", got)
 		}
 	})
-	t.Run("not made when the copy is refused", func(t *testing.T) {
+	t.Run("removed from the directory it was made in", func(t *testing.T) {
+		parent := t.TempDir()
+		dir := filepath.Join(parent, "backups")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		dest := filepath.Join(dir, "backup.db")
+		var remove func() error
+		if err := s.BackupTracked(t.Context(), dest, func(r func() error) { remove = r }); err != nil {
+			t.Fatal(err)
+		}
+		// The directory moved, and another put in its place, holding a file
+		// of the copy's name that is not the copy.
+		moved := filepath.Join(parent, "moved")
+		if err := os.Rename(dir, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dest, []byte("another file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := remove(); err != nil {
+			t.Fatalf("remove: %v", err)
+		}
+		if got := listDir(t, moved); len(got) != 0 {
+			t.Errorf("the copy's own directory after remove = %v, want nothing", got)
+		}
+		if got := string(readFile(t, dest)); got != "another file" {
+			t.Errorf("remove changed the file now at the copy's path: it holds %q", got)
+		}
+	})
+	t.Run("removed before it is made: nothing is made", func(t *testing.T) {
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "backup.db")
+		var removed error
+		err := s.BackupTracked(t.Context(), dest, func(r func() error) { removed = r() })
+		if err == nil || removed != nil {
+			t.Errorf("BackupTracked after remove = %v, and remove = %v; want an error, and remove nil", err, removed)
+		}
+		if got := listDir(t, dir); len(got) != 0 {
+			t.Errorf("directory after a backup removed before it began = %v, want nothing", got)
+		}
+	})
+	t.Run("refused: an earlier file at dest stays", func(t *testing.T) {
 		dir := t.TempDir()
 		dest := filepath.Join(dir, "backup.db")
 		if err := os.WriteFile(dest, []byte("an earlier backup"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		err := s.BackupTracked(t.Context(), dest, func(func() error) {
-			t.Error("made was called for a copy Backup refused to make")
-		})
+		var remove func() error
+		err := s.BackupTracked(t.Context(), dest, func(r func() error) { remove = r })
 		if !errors.Is(err, fs.ErrExist) {
 			t.Errorf("BackupTracked over an existing file: %v, want fs.ErrExist", err)
+		}
+		if err := remove(); err != nil {
+			t.Errorf("remove of a copy never made: %v, want nil", err)
+		}
+		if got := string(readFile(t, dest)); got != "an earlier backup" {
+			t.Errorf("the earlier file at dest holds %q after remove, want it as it was", got)
+		}
+	})
+	t.Run("stopped: the copy goes", func(t *testing.T) {
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "backup.db")
+		ctx, cancel := context.WithCancel(t.Context())
+		var remove func() error
+		err := s.BackupTracked(ctx, dest, func(r func() error) {
+			remove = r
+			// Ended before the copy is made: BackupTracked makes it all
+			// the same, then stops, as its context says.
+			cancel()
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("BackupTracked with its context ended: %v, want context.Canceled", err)
+		}
+		if err := remove(); err != nil {
+			t.Errorf("remove once BackupTracked removed the copy itself: %v, want nil", err)
+		}
+		if got := listDir(t, dir); len(got) != 0 {
+			t.Errorf("directory after a stopped backup = %v, want nothing", got)
 		}
 	})
 }
