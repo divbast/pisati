@@ -52,7 +52,7 @@ func (w *Worker) sweep(ctx context.Context) {
 			// A sweep its context cut off was rolled back, and is no
 			// failure.
 			if ctx.Err() == nil {
-				w.log.ErrorContext(ctx, "job sweep failed", "removed", removed, "error", err)
+				w.log.ErrorContext(ctx, "old jobs not deleted", "removed", removed, "error", err)
 			}
 			return
 		}
@@ -62,6 +62,6 @@ func (w *Worker) sweep(ctx context.Context) {
 		}
 	}
 	if removed > 0 {
-		w.log.InfoContext(ctx, "jobs swept", "removed", removed)
+		w.log.InfoContext(ctx, "old jobs deleted", "removed", removed)
 	}
 }

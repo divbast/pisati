@@ -166,10 +166,20 @@ func TestRetryBacksOffThenDeadLetters(t *testing.T) {
 			}
 		}
 		wantRow(t, onlyRow(t, s), "dead", int64(opts.MaxAttempts), errDown.Error())
-		if got := log.find("job retry scheduled"); len(got) != opts.MaxAttempts-1 {
-			t.Errorf("%d retries logged, want %d", len(got), opts.MaxAttempts-1)
+		retries := log.find("job will be tried again")
+		if len(retries) != opts.MaxAttempts-1 {
+			t.Errorf("%d retries logged, want %d", len(retries), opts.MaxAttempts-1)
 		}
-		dead := log.find("job dead-lettered")
+		// The wait is logged as Go writes a duration, "30s", not as a
+		// count of nanoseconds.
+		if len(retries) > 0 {
+			first := retries[0]
+			if want := jobs.Backoff(1, at(0.5)).String(); first.kinds["retry_in"] != slog.KindString || first.attrs["retry_in"] != want {
+				t.Errorf("the first retry logged retry_in %q, of kind %v; want the string %q", first.attrs["retry_in"],
+					first.kinds["retry_in"], want)
+			}
+		}
+		dead := log.find("job given up: it will not be tried again")
 		if len(dead) != 1 || dead[0].level != slog.LevelError || dead[0].attrs["kind"] != k.String() {
 			t.Errorf("logged %+v, want one error naming the kind", dead)
 		}
@@ -223,7 +233,7 @@ func TestExpiredLeaseIsReclaimed(t *testing.T) {
 			synctest.Wait()
 			row := onlyRow(t, s)
 			wantRow(t, row, "leased", 2, "")
-			if lost := firstLog.find("job lease lost"); len(lost) != 1 {
+			if lost := firstLog.find("job outcome not recorded: its time limit ran out, so it may run again"); len(lost) != 1 {
 				t.Errorf("the first worker logged %d lost leases, want 1", len(lost))
 			}
 
@@ -259,7 +269,7 @@ func TestExpiredLeaseIsReclaimed(t *testing.T) {
 			}
 			row := onlyRow(t, s)
 			wantRow(t, row, "dead", 2, noTriesLeft)
-			if dead := secondLog.find("job dead-lettered"); len(dead) != 1 {
+			if dead := secondLog.find("job given up: it will not be tried again"); len(dead) != 1 {
 				t.Errorf("logged %d dead letters, want 1", len(dead))
 			}
 			close(release)
@@ -383,12 +393,12 @@ func TestUnknownKindDeadLetters(t *testing.T) {
 		if len(all) != 2 {
 			t.Fatalf("%d jobs, want 2", len(all))
 		}
-		wantRow(t, all[0], "dead", 1, "no handler for job kind test.unknown")
+		wantRow(t, all[0], "dead", 1, "This version of Pisati has no handler for jobs of the kind test.unknown, so the job cannot run.")
 		wantRow(t, all[1], "done", 1, "")
 		if ran.Load() != 1 {
 			t.Errorf("the known kind's handler ran %d times, want once", ran.Load())
 		}
-		got := log.find("job kind has no handler")
+		got := log.find("job given up: Pisati has no handler for its kind")
 		if len(got) != 1 || got[0].level != slog.LevelError || got[0].attrs["kind"] != unknown.String() {
 			t.Errorf("logged %+v, want one error naming the kind", got)
 		}
@@ -422,12 +432,13 @@ func TestHandlerPanicDeadLetters(t *testing.T) {
 		if len(all) != 2 {
 			t.Fatalf("%d jobs, want 2", len(all))
 		}
-		wantRow(t, all[0], "dead", 1, "handler panicked")
+		wantRow(t, all[0], "dead", 1, "The job's handler crashed with a panic, which is a bug in Pisati. "+
+			"The log of pisati serve holds the details.")
 		wantRow(t, all[1], "done", 1, "")
 		if ran.Load() != 1 {
 			t.Errorf("after the panic, the next job ran %d times, want once", ran.Load())
 		}
-		got := log.find("job handler panicked")
+		got := log.find("job handler crashed with a panic")
 		if len(got) != 1 || got[0].level != slog.LevelError {
 			t.Fatalf("logged %+v, want one error", got)
 		}
@@ -458,12 +469,12 @@ func TestHandlerOutcomes(t *testing.T) {
 		{"a wrapped Retry", fmt.Errorf("fetch: %w", &jobs.Retry{After: time.Minute, Err: errCause}), "ready", time.Minute, "fetch: cause"},
 		{"a Permanent", &jobs.Permanent{Err: errCause}, "dead", 0, "cause"},
 		{"a wrapped Permanent", fmt.Errorf("render: %w", &jobs.Permanent{Err: errCause}), "dead", 0, "render: cause"},
-		{"a Permanent with no error", &jobs.Permanent{}, "dead", 0, "jobs: permanent failure"},
-		{"a Retry with no error", &jobs.Retry{}, "ready", base, "jobs: retry"},
+		{"a Permanent with no error", &jobs.Permanent{}, "dead", 0, "the job failed in a way that trying again cannot fix, and gave no reason"},
+		{"a Retry with no error", &jobs.Retry{}, "ready", base, "the job asked to be tried again, and gave no reason"},
 		{"a long error", errors.New("x" + strings.Repeat("é", 1000)), "ready", base, "x" + strings.Repeat("é", 511)},
-		{"a nil *Retry", (*jobs.Retry)(nil), "ready", base, "jobs: retry"},
-		{"a nil *Permanent", (*jobs.Permanent)(nil), "dead", 0, "jobs: permanent failure"},
-		{"an Outcome of a type outside the package", embedded{&jobs.Retry{Err: errCause}}, "dead", 0, "handler returned an unknown outcome"},
+		{"a nil *Retry", (*jobs.Retry)(nil), "ready", base, "the job asked to be tried again, and gave no reason"},
+		{"a nil *Permanent", (*jobs.Permanent)(nil), "dead", 0, "the job failed in a way that trying again cannot fix, and gave no reason"},
+		{"an Outcome of a type outside the package", embedded{&jobs.Retry{Err: errCause}}, "dead", 0, "The job's handler returned an outcome that Pisati does not know, which is a bug in Pisati."},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			inBubble(t, func(t *testing.T, s *store.Store) {
@@ -551,7 +562,7 @@ func TestRetryJitterComesFromRnd(t *testing.T) {
 				if row := onlyRow(t, s); row.RunAt != want {
 					t.Errorf("the retry is due at %d, want %d", row.RunAt, want)
 				}
-				warned := rec.find("job retry jitter unavailable")
+				warned := rec.find("random source unreadable, so the next wait of a job has no random spread")
 				if c.failed && len(warned) != 1 {
 					t.Errorf("%d warnings for the unreadable source, want 1", len(warned))
 				}
@@ -842,7 +853,7 @@ func TestRunDrainsOnShutdown(t *testing.T) {
 			if row.LeaseToken != 3 {
 				t.Errorf("the third claim's lease token is %d, want 3", row.LeaseToken)
 			}
-			if lost := hungLog.find("job lease lost"); len(lost) != 1 {
+			if lost := hungLog.find("job outcome not recorded: its time limit ran out, so it may run again"); len(lost) != 1 {
 				t.Errorf("the first claim's late outcome logged %d lost leases, want 1", len(lost))
 			}
 

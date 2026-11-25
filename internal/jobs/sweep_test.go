@@ -101,7 +101,7 @@ func TestSweepRemovesOldJobs(t *testing.T) {
 				t.Error("the key of a dead job swept is still taken")
 			}
 			stopped(t, stop)
-			if swept := st.log.find("jobs swept"); len(swept) != 2 {
+			if swept := st.log.find("old jobs deleted"); len(swept) != 2 {
 				t.Errorf("logged %d sweeps that removed jobs, want 2: %+v", len(swept), swept)
 			}
 		})
@@ -143,7 +143,7 @@ func TestSweepRemovesOldJobs(t *testing.T) {
 			synctest.Wait()
 			stopped(t, stop)
 			wantStates(t, s, "after one sweep", "done")
-			swept := st.log.find("jobs swept")
+			swept := st.log.find("old jobs deleted")
 			if len(swept) != 1 || swept[0].attrs["removed"] != "1201" {
 				t.Errorf("logged %+v, want one sweep that removed %d", swept, old)
 			}

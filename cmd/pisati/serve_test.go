@@ -93,7 +93,7 @@ func TestServeAndShutdown(t *testing.T) {
 	})
 	withStore(t, s.state, func(db *store.Store) {
 		if state, attempts, lastError := jobRow(t, db, orphan); state != "dead" || attempts != 2 ||
-			lastError != "no handler for job kind test.orphan" {
+			!strings.Contains(lastError, "no handler for jobs of the kind test.orphan") {
 			t.Errorf("the orphaned job is %s after %d tries (%q), want dead after 2, for its kind", state, attempts, lastError)
 		}
 	})

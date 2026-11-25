@@ -189,7 +189,7 @@ func TestReleaseOrphans(t *testing.T) {
 				t.Errorf("the job ran %d times after its last try, want none", n)
 			}
 			wantRow(t, onlyRow(t, s), "dead", int64(opts.MaxAttempts)+1, noTriesLeft)
-			if dead := log.find("job dead-lettered"); len(dead) != 1 {
+			if dead := log.find("job given up: it will not be tried again"); len(dead) != 1 {
 				t.Errorf("logged %d dead letters, want 1", len(dead))
 			}
 		})

@@ -6,7 +6,6 @@ package jobs
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/divbast/pisati/internal/store/storedb"
 )
@@ -36,7 +35,8 @@ const orphanedError = "An earlier try did not finish, because the Pisati process
 // make, or when the release cannot be written.
 func (w *Worker) ReleaseOrphans(ctx context.Context) (int, error) {
 	if w == nil || w.store == nil {
-		return 0, errors.New("jobs: release orphaned jobs: the Worker was not made by NewWorker")
+		return 0, errors.New("jobs.Worker.ReleaseOrphans was called on a Worker that jobs.NewWorker did not make, which " +
+			"is a bug in Pisati")
 	}
 	var released []storedb.ReleaseOrphanedJobsRow
 	if err := w.store.InTx(ctx, func(q *storedb.Queries) error {
@@ -44,7 +44,7 @@ func (w *Worker) ReleaseOrphans(ctx context.Context) (int, error) {
 		released, err = q.ReleaseOrphanedJobs(ctx, lastError(orphanedError))
 		return err
 	}); err != nil {
-		return 0, fmt.Errorf("jobs: release orphaned jobs: %w", err)
+		return 0, explain(err, "Pisati cannot make the jobs that a stopped Pisati process was running ready to run again: %s", err)
 	}
 	for _, j := range released {
 		w.log.InfoContext(ctx, "job made ready again: the Pisati process that was running it stopped",

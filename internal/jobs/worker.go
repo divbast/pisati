@@ -63,10 +63,11 @@ type Retry struct {
 	Err   error
 }
 
-// Error returns Err's message, or "jobs: retry" when Err is nil.
+// Error returns Err's message, or one that says the job gave no reason
+// when Err is nil.
 func (r *Retry) Error() string {
 	if r == nil || r.Err == nil {
-		return "jobs: retry"
+		return "the job asked to be tried again, and gave no reason"
 	}
 	return r.Err.Error()
 }
@@ -87,11 +88,11 @@ type Permanent struct {
 	Err error
 }
 
-// Error returns Err's message, or "jobs: permanent failure" when Err is
-// nil.
+// Error returns Err's message, or one that says the job gave no reason
+// when Err is nil.
 func (p *Permanent) Error() string {
 	if p == nil || p.Err == nil {
-		return "jobs: permanent failure"
+		return "the job failed in a way that trying again cannot fix, and gave no reason"
 	}
 	return p.Err.Error()
 }
@@ -175,10 +176,10 @@ func DefaultOptions() Options {
 func (o Options) problems() []error {
 	var errs []error
 	if o.Workers < 1 {
-		errs = append(errs, fmt.Errorf("jobs: %w options: Workers is %d, want at least 1", ErrInvalid, o.Workers))
+		errs = append(errs, badOptions("Workers is %d, but it must be at least 1", o.Workers))
 	}
 	if o.MaxAttempts < 1 {
-		errs = append(errs, fmt.Errorf("jobs: %w options: MaxAttempts is %d, want at least 1", ErrInvalid, o.MaxAttempts))
+		errs = append(errs, badOptions("MaxAttempts is %d, but it must be at least 1", o.MaxAttempts))
 	}
 	for _, d := range []struct {
 		name  string
@@ -194,20 +195,42 @@ func (o Options) problems() []error {
 		{"KeepDead", o.KeepDead},
 	} {
 		if d.value <= 0 {
-			errs = append(errs, fmt.Errorf("jobs: %w options: %s is %v, want it positive", ErrInvalid, d.name, d.value))
+			errs = append(errs, badOptions("%s is %v, but it must be longer than 0", d.name, d.value))
 		}
 	}
 	if o.BackoffCap < o.BackoffBase {
-		errs = append(errs, fmt.Errorf("jobs: %w options: BackoffCap %v is shorter than BackoffBase %v",
-			ErrInvalid, o.BackoffCap, o.BackoffBase))
+		errs = append(errs, badOptions("BackoffCap is %v, but it must be no shorter than BackoffBase, %v",
+			o.BackoffCap, o.BackoffBase))
 	}
 	if o.Reserve > 0 && o.Reserve >= o.Drain {
-		errs = append(errs, fmt.Errorf("jobs: %w options: Reserve %v is not shorter than Drain %v", ErrInvalid, o.Reserve, o.Drain))
+		errs = append(errs, badOptions("Reserve is %v, but it must be shorter than Drain, %v", o.Reserve, o.Drain))
 	}
 	if math.IsNaN(o.Jitter) || o.Jitter < 0 || o.Jitter >= 1 {
-		errs = append(errs, fmt.Errorf("jobs: %w options: Jitter is %v, want it in [0, 1)", ErrInvalid, o.Jitter))
+		errs = append(errs, badOptions("Jitter is %v, but it must be at least 0 and below 1", o.Jitter))
 	}
 	return errs
+}
+
+// badOptions is the error for Options whose field breaks its rule, as
+// format and args say: a bug in Pisati, which gives its Options in code.
+func badOptions(format string, args ...any) error {
+	return explain(ErrInvalid, "jobs.NewWorker was given Options whose %s, which is a bug in Pisati",
+		fmt.Sprintf(format, args...))
+}
+
+// plainError is an error whose message is Pisati's own, worded for the
+// operator, around err, which errors.Is and errors.AsType still find.
+type plainError struct {
+	msg string
+	err error
+}
+
+func (e *plainError) Error() string { return e.msg }
+func (e *plainError) Unwrap() error { return e.err }
+
+// explain returns err behind the message format and args give.
+func explain(err error, format string, args ...any) error {
+	return &plainError{msg: fmt.Sprintf(format, args...), err: err}
 }
 
 // Worker runs the jobs queued in a Store with the Handler for each job's
@@ -258,25 +281,26 @@ type Worker struct {
 // Kind, clock, rnd or log is nil, or opts has a field outside its range.
 func NewWorker(s *store.Store, h map[Kind]Handler, clock func() time.Time, rnd io.Reader, log *slog.Logger, opts Options) (*Worker, error) {
 	var errs []error
+	const bug = "which is a bug in Pisati"
 	if s.DB() == nil {
-		errs = append(errs, fmt.Errorf("jobs: %w store: it is not open", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "jobs.NewWorker was given a store that is not open, %s", bug))
 	}
 	for k, handler := range h {
 		if k == (Kind{}) {
-			errs = append(errs, fmt.Errorf("jobs: %w handlers: one is for the zero Kind", ErrInvalid))
+			errs = append(errs, explain(ErrInvalid, "jobs.NewWorker was given a handler for the zero Kind, %s", bug))
 		}
 		if handler == nil {
-			errs = append(errs, fmt.Errorf("jobs: %w handlers: the one for %q is nil", ErrInvalid, k))
+			errs = append(errs, explain(ErrInvalid, "jobs.NewWorker was given a nil handler for the kind %q, %s", k, bug))
 		}
 	}
 	if clock == nil {
-		errs = append(errs, fmt.Errorf("jobs: %w clock: nil", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "jobs.NewWorker was given no clock, %s", bug))
 	}
 	if rnd == nil {
-		errs = append(errs, fmt.Errorf("jobs: %w random source: nil", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "jobs.NewWorker was given no random source, %s", bug))
 	}
 	if log == nil {
-		errs = append(errs, fmt.Errorf("jobs: %w logger: nil", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "jobs.NewWorker was given no logger, %s", bug))
 	}
 	errs = append(errs, opts.problems()...)
 	if err := errors.Join(errs...); err != nil {
@@ -330,10 +354,10 @@ func NewWorker(s *store.Store, h map[Kind]Handler, clock func() time.Time, rnd i
 // ended.
 func (w *Worker) Run(ctx context.Context) error {
 	if w == nil || w.store == nil {
-		return errors.New("jobs: run: the Worker was not made by NewWorker")
+		return errors.New("jobs.Worker.Run was called on a Worker that jobs.NewWorker did not make, which is a bug in Pisati")
 	}
 	if !w.running.CompareAndSwap(false, true) {
-		return errors.New("jobs: run: the Worker is running already")
+		return errors.New("jobs.Worker.Run was called on a Worker that is running already, which is a bug in Pisati")
 	}
 
 	// The first sweep runs before the workers start, so that it never
@@ -404,7 +428,7 @@ func (w *Worker) stillActive() []storedb.ClaimJobRow {
 
 // errDrained is the cause with which Run ends the Handlers' contexts when
 // the drain deadline passes.
-var errDrained = errors.New("jobs: the drain deadline passed")
+var errDrained = errors.New("the job was told to stop, because Pisati is stopping and the time for running jobs has passed")
 
 // Notify wakes an idle worker of a running Run to claim at once, rather
 // than at its next poll. A worker that claims a job wakes another in
@@ -475,7 +499,7 @@ func (w *Worker) claim(ctx context.Context) (storedb.ClaimJobRow, bool) {
 		// was rolled back.
 		return storedb.ClaimJobRow{}, false
 	}
-	w.log.ErrorContext(ctx, "job claim failed", "error", err)
+	w.log.ErrorContext(ctx, "next job not taken from the queue", "error", err)
 	return storedb.ClaimJobRow{}, false
 }
 
@@ -501,8 +525,8 @@ func (w *Worker) process(ctx, rec context.Context, j storedb.ClaimJobRow) {
 	}
 	h, ok := w.handler(j.Kind)
 	if !ok {
-		if w.deadLetter(rec, j, "no handler for job kind "+j.Kind) {
-			w.log.ErrorContext(rec, "job kind has no handler", "kind", j.Kind, "job_id", j.ID)
+		if w.deadLetter(rec, j, "This version of Pisati has no handler for jobs of the kind "+j.Kind+", so the job cannot run.") {
+			w.log.ErrorContext(rec, "job given up: Pisati has no handler for its kind", "kind", j.Kind, "job_id", j.ID)
 		}
 		return
 	}
@@ -526,7 +550,8 @@ func (w *Worker) release(ctx context.Context, j storedb.ClaimJobRow) {
 	if w.settle(ctx, j, func(q *storedb.Queries) (int64, error) {
 		return q.ReleaseJob(ctx, storedb.ReleaseJobParams{ID: j.ID, LeaseToken: j.LeaseToken})
 	}) {
-		w.log.InfoContext(ctx, "job released at shutdown", "kind", j.Kind, "job_id", j.ID, "attempt", j.Attempts)
+		w.log.InfoContext(ctx, "job given back at the stop, to run again, this try not counted", "kind", j.Kind,
+			"job_id", j.ID, "attempt", j.Attempts)
 	}
 }
 
@@ -544,12 +569,18 @@ func (w *Worker) handler(name string) (Handler, bool) {
 // can return it, as it is not exported.
 var errPanicked = errors.New("handler panicked")
 
+// The last errors kept with a job that Pisati gives up for a bug.
+const (
+	panicked       = "The job's handler crashed with a panic, which is a bug in Pisati. The log of pisati serve holds the details."
+	unknownOutcome = "The job's handler returned an outcome that Pisati does not know, which is a bug in Pisati."
+)
+
 // call runs h on j's payload under ctx. This is the top of the job's run,
 // so it recovers a panic in h, which it logs and returns as errPanicked.
 func (w *Worker) call(ctx context.Context, h Handler, j storedb.ClaimJobRow) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			w.log.ErrorContext(ctx, "job handler panicked", "kind", j.Kind, "job_id", j.ID,
+			w.log.ErrorContext(ctx, "job handler crashed with a panic", "kind", j.Kind, "job_id", j.ID,
 				"attempt", j.Attempts, "panic", describePanic(r), "stack", string(debug.Stack()))
 			err = errPanicked
 		}
@@ -580,7 +611,7 @@ func (w *Worker) record(ctx context.Context, j storedb.ClaimJobRow, err error) {
 	}
 	if errors.Is(err, errPanicked) {
 		// call has logged it.
-		w.deadLetter(ctx, j, errPanicked.Error())
+		w.deadLetter(ctx, j, panicked)
 		return
 	}
 	outcome, ok := errors.AsType[Outcome](err)
@@ -600,7 +631,7 @@ func (w *Worker) record(ctx context.Context, j storedb.ClaimJobRow, err error) {
 	default:
 		// Only a type outside the package that embeds a variant reaches
 		// here: a bug, which trying again would only repeat.
-		if w.deadLetter(ctx, j, "handler returned an unknown outcome") {
+		if w.deadLetter(ctx, j, unknownOutcome) {
 			w.log.ErrorContext(ctx, "job handler returned an unknown outcome", "kind", j.Kind,
 				"job_id", j.ID, "attempt", j.Attempts, "type", fmt.Sprintf("%T", o))
 		}
@@ -628,8 +659,8 @@ func (w *Worker) retry(ctx context.Context, j storedb.ClaimJobRow, err error, af
 			LeaseToken: j.LeaseToken,
 		})
 	}) {
-		w.log.WarnContext(ctx, "job retry scheduled", "kind", j.Kind, "job_id", j.ID,
-			"attempt", j.Attempts, "retry_in", delay, "error", why.String)
+		w.log.WarnContext(ctx, "job will be tried again", "kind", j.Kind, "job_id", j.ID,
+			"attempt", j.Attempts, "retry_in", delay.String(), "error", why.String)
 	}
 }
 
@@ -637,7 +668,7 @@ func (w *Worker) retry(ctx context.Context, j storedb.ClaimJobRow, err error, af
 // that it did.
 func (w *Worker) bury(ctx context.Context, j storedb.ClaimJobRow, why string) {
 	if w.deadLetter(ctx, j, why) {
-		w.log.ErrorContext(ctx, "job dead-lettered", "kind", j.Kind, "job_id", j.ID,
+		w.log.ErrorContext(ctx, "job given up: it will not be tried again", "kind", j.Kind, "job_id", j.ID,
 			"attempt", j.Attempts, "error", lastError(why).String)
 	}
 }
@@ -678,7 +709,8 @@ func (w *Worker) settle(ctx context.Context, j storedb.ClaimJobRow, update func(
 			"attempt", j.Attempts, "error", err)
 		return false
 	case changed == 0:
-		w.log.WarnContext(ctx, "job lease lost", "kind", j.Kind, "job_id", j.ID, "attempt", j.Attempts)
+		w.log.WarnContext(ctx, "job outcome not recorded: its time limit ran out, so it may run again", "kind", j.Kind,
+			"job_id", j.ID, "attempt", j.Attempts)
 		return false
 	}
 	return true
@@ -693,7 +725,7 @@ func (w *Worker) jitter(ctx context.Context) func() float64 {
 	_, err := io.ReadFull(w.rnd, b[:])
 	w.rndMu.Unlock()
 	if err != nil {
-		w.log.WarnContext(ctx, "job retry jitter unavailable", "error", err)
+		w.log.WarnContext(ctx, "random source unreadable, so the next wait of a job has no random spread", "error", err)
 		return nil
 	}
 	// The top 53 bits over 2^53: exact as a float64, and below 1.
