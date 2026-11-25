@@ -22,9 +22,9 @@ const (
 
 // TestImageCarriesLockfile checks the image holds the lockfile of the npm
 // packages that built the stylesheets and scripts compiled into the
-// binary, so that an image scanner, which finds no node_modules in it,
-// still sees which packages they came from: exactly this repository's
-// pnpm-lock.yaml, as a regular file.
+// binary: exactly this repository's pnpm-lock.yaml, as a regular file.
+// The image holds no node_modules, so this file is its one record of
+// which packages those were.
 func TestImageCarriesLockfile(t *testing.T) {
 	t.Parallel()
 	e, image := underTest(t)

@@ -65,8 +65,8 @@ breaking change.
 | Internal port | **8081** — `/healthz` and `/metrics` only, never the site, meant to stay unpublished |
 | Other listeners | **none** |
 | tmpfs required | exactly one: `/tmp`, at **16 MiB**, `noexec,nosuid,nodev` |
-| Writable mounts | `/tmp`, where nothing written can run, and the state volume; on Podman, `--read-only-tmpfs=false` |
-| Volume | **one**, which the operator mounts at `/var/lib/pisati` for Pisati's state; the image declares **no** `VOLUME` |
+| Writable mounts | `/tmp` and the state volume, both `noexec,nosuid,nodev`, so nothing written can run; on Podman, `--read-only-tmpfs=false` |
+| Volume | **one**, which the operator mounts at `/var/lib/pisati` for Pisati's state, `noexec,nosuid,nodev`; the image declares **no** `VOLUME` |
 | Required setting | `PISATI_SERVER_BASE_URL`, the site's address: `https://`, or `http://` on localhost, 127.0.0.1 or [::1] alone. It has no default |
 | Outbound network | **none** with the default settings |
 | Shell, package manager | **none** |

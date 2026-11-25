@@ -5,13 +5,12 @@ package acceptance_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/fs"
 	"maps"
 	"net/http"
-	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,25 +18,27 @@ import (
 	"github.com/divbast/ci/harness"
 )
 
-// written are the files Pisati keeps in the state directory, each of
-// which it writes on its first start: the database, the lock a running
-// Pisati holds, and the main key it generates when none is configured.
-var written = []string{"pisati.db", "pisati.lock", "keys/main.key"}
+// The files Pisati keeps in the state directory, each of which it writes
+// on its first start: the database, the lock a running Pisati holds, and
+// the main key it generates when none is configured.
+const (
+	database = "pisati.db"
+	lock     = "pisati.lock"
+	mainKey  = "keys/main.key"
+)
 
-// mainKey is where in the state directory Pisati keeps the main key it
-// generates.
-const mainKey = "keys/main.key"
-
-// migrated is what pisati migrate prints: the schema's number before and
-// after.
-var migrated = regexp.MustCompile(`^schema (\d+) -> (\d+)\n$`)
+// written are those files.
+var written = []string{database, lock, mainKey}
 
 // TestStatePersists serves from a fresh volume, and checks what Pisati
 // wrote there is its user's alone: every file 0600, every directory 0700.
-// It stops that container, and runs pisati migrate in a new one on the
-// volume, which finds the database the first left, already at the schema
-// it migrates to. It then serves the volume again from a third container,
-// which starts with the main key the first generated.
+// It stops that container, runs pisati migrate on the volume in a second,
+// and serves the volume again from a third, which it stops too. Nothing
+// in a migrate with nothing to do, or in a start with nothing due, writes
+// to the database, so each container after the first must leave the
+// database exactly as the first left it, byte for byte: a database made
+// anew, as when the state did not persist, differs. The third must also
+// start with the main key the first generated.
 func TestStatePersists(t *testing.T) {
 	t.Parallel()
 	e, image := underTest(t)
@@ -68,31 +69,31 @@ func TestStatePersists(t *testing.T) {
 		}
 		harness.Equal(checks, "only Pisati's user may use "+name+" in the state directory", want.String(), f.mode.String())
 	}
-
-	out, _, err := stop(ctx, e, first.C)
-	checks.True("the first container stops", err == nil, string(out))
-	code, err := first.C.WaitExit(ctx, time.Second)
-	if err != nil {
-		checks.True("the first container exits", false, err.Error())
+	left, ok := stopAndCopy(ctx, t, checks, e, first.C, "the first container")
+	if !ok {
 		return
 	}
-	harness.Equal(checks, "the first container exits 0", 0, code)
 
 	spec := serving(image, state)
 	spec.Network = "none"
 	spec.Entrypoint = []string{binary, "migrate"}
-	res, err := runToExit(ctx, t, e, &spec)
+	migrate, err := e.Start(ctx, t, &spec)
 	if err != nil {
-		checks.True("pisati migrate runs on the volume", false, err.Error())
+		checks.True("pisati migrate starts on the volume", false, err.Error())
 		return
 	}
-	harness.Equal(checks, "pisati migrate exits 0", 0, res.Code)
-	before, after, ok := schemas(string(res.Stdout))
-	checks.True("pisati migrate prints the schema before and after", ok, harness.Clip(string(res.Stdout)+string(res.Stderr)))
-	if ok {
-		checks.True("pisati migrate finds the database the first start migrated, at the schema it migrates to",
-			before == after && before > 0, fmt.Sprintf("schema %d -> %d", before, after))
+	code, err := migrate.WaitExit(ctx, harness.ServeWithin)
+	if err != nil {
+		checks.True("pisati migrate exits", false, err.Error())
+		return
 	}
+	harness.Equal(checks, "pisati migrate exits 0", 0, code)
+	migrated, err := copyOut(ctx, e, migrate, stateDir)
+	if err != nil {
+		checks.True("the state directory pisati migrate left can be read", false, err.Error())
+		return
+	}
+	same(checks, "pisati migrate leaves the database the first start left", database, left, migrated)
 
 	third, err := e.Serve(ctx, t, &harness.ServeSpec{Run: serving(image, state), AppPort: appPort})
 	if err != nil {
@@ -100,34 +101,51 @@ func TestStatePersists(t *testing.T) {
 		return
 	}
 	harness.StatusIs(t, third, "GET / from the third container answers 200", http.StatusOK, "/")
-	again, err := copyOut(ctx, e, third.C, stateDir)
-	if err != nil {
-		checks.True("the third container's state directory can be read", false, err.Error())
+	last, ok := stopAndCopy(ctx, t, checks, e, third.C, "the third container")
+	if !ok {
 		return
 	}
-	// A check's detail says what it found, and never the key itself.
-	key, kept := again[mainKey]
-	same := kept && len(key.data) > 0 && bytes.Equal(key.data, files[mainKey].data)
-	found := fmt.Sprintf("the same %d bytes", len(key.data))
-	switch {
-	case !kept:
-		found = "no " + mainKey
-	case !same:
-		found = "another key, or an empty file"
-	}
-	checks.True("the third container starts with the main key the first generated", same, found)
+	same(checks, "the third container starts with the main key the first generated", mainKey, left, last)
+	same(checks, "the third container leaves the database the first start left", database, left, last)
 }
 
-// schemas returns the schema's numbers before and after in out, what
-// pisati migrate printed, and whether out is that one line.
-func schemas(out string) (before, after int, ok bool) {
-	m := migrated.FindStringSubmatch(out)
-	if m == nil {
-		return 0, 0, false
+// stopAndCopy stops c, named what, checks that it exits 0, and returns
+// what its state directory holds then, once everything Pisati holds open
+// is closed: its write-ahead log is then in the database itself. It says
+// whether there was a state directory to read.
+func stopAndCopy(ctx context.Context, tb testing.TB, checks *harness.Checks, e harness.Engine, c *harness.Container, what string) (map[string]copied, bool) {
+	tb.Helper()
+	out, _, err := stop(ctx, e, c)
+	checks.True(what+" stops", err == nil, string(out))
+	code, err := c.WaitExit(ctx, time.Second)
+	if err != nil {
+		checks.True(what+" exits", false, err.Error())
+		return nil, false
 	}
-	before, errBefore := strconv.Atoi(m[1])
-	after, errAfter := strconv.Atoi(m[2])
-	return before, after, errBefore == nil && errAfter == nil
+	harness.Equal(checks, what+" exits 0", 0, code)
+	files, err := copyOut(ctx, e, c, stateDir)
+	if err != nil {
+		checks.True("the state directory "+what+" left can be read", false, err.Error())
+		return nil, false
+	}
+	return files, true
+}
+
+// same checks that the file name, in the state directory, is in both want
+// and got, not empty, and the same bytes in each. Its detail gives sizes
+// alone, never the content, which holds the main key.
+func same(checks *harness.Checks, what, name string, want, got map[string]copied) {
+	w, inWant := want[name]
+	g, inGot := got[name]
+	ok := inWant && inGot && len(w.data) > 0 && bytes.Equal(w.data, g.data)
+	found := fmt.Sprintf("the same %d bytes", len(g.data))
+	switch {
+	case !inWant || !inGot:
+		found = fmt.Sprintf("%s in the first: %t; in the second: %t", name, inWant, inGot)
+	case !ok:
+		found = fmt.Sprintf("%d bytes, which differ from the %d the first left", len(g.data), len(w.data))
+	}
+	checks.True(what, ok, found)
 }
 
 // listed returns the names files holds, sorted, for a check's detail.

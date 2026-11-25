@@ -96,14 +96,20 @@ type copied struct {
 	data []byte
 }
 
-// maxCopied bounds what copyOut reads.
-const maxCopied = 64 << 20
+// What one copyOut may take: its bytes, and its time.
+const (
+	maxCopied  = 64 << 20
+	copyWithin = time.Minute
+)
 
 // copyOut copies src, a path in c, out of c with `<engine> cp`, which
 // reads a volume mounted in c too, and returns every entry it copied,
 // keyed by its path below src: "." for src itself. A file's mode is the
-// one it has in c. c may be running or stopped.
+// one it has in c. c may be running or stopped. The copy, and the engine
+// command it runs, end within copyWithin.
 func copyOut(ctx context.Context, e harness.Engine, c *harness.Container, src string) (map[string]copied, error) {
+	ctx, cancel := context.WithTimeout(ctx, copyWithin)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, e.Name(), "cp", c.ID+":"+src, "-") //nolint:gosec // G204: the engine and the container are the harness's own, and src a constant here
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -115,19 +121,24 @@ func copyOut(ctx context.Context, e harness.Engine, c *harness.Container, src st
 		return nil, err
 	}
 	entries, readErr := readTar(io.LimitReader(stdout, maxCopied+1), path.Base(src))
-	if readErr != nil {
-		// What is left unread would hold cp up.
-		//nolint:errcheck // the copy has failed already, and draining what is left only lets cp exit
-		io.Copy(io.Discard, stdout)
-	}
+	// Every read from the pipe must end before Wait. What the tar reader
+	// left, the padding after the archive's end or the rest of a stream it
+	// refused, is read to its end and dropped.
+	_, drainErr := io.Copy(io.Discard, stdout)
 	if err := cmd.Wait(); err != nil {
-		return nil, fmt.Errorf("%s cp %s:%s: %w: %s", e.Name(), c, src, err, strings.TrimSpace(stderr.String()))
+		drainErr = errors.Join(drainErr, fmt.Errorf("%s cp %s:%s: %w: %s", e.Name(), c, src, err, strings.TrimSpace(stderr.String())))
 	}
-	return entries, readErr
+	if err := errors.Join(readErr, drainErr); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
-// readTar reads the tar stream r, as `<engine> cp` writes it, whose
-// entries are under base, src's own name.
+// readTar reads the tar stream r, as `<engine> cp` writes it, and keys
+// each entry by its path below src, whose own name is base. Docker writes
+// the entries under base, as "pisati/keys/main.key". Podman does too for a
+// running container, but writes a stopped container's volume from src
+// itself, as "/" and "/keys/main.key".
 func readTar(r io.Reader, base string) (map[string]copied, error) {
 	entries := make(map[string]copied)
 	tr := tar.NewReader(r)
@@ -140,14 +151,9 @@ func readTar(r io.Reader, base string) (map[string]copied, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading what cp copied: %w", err)
 		}
-		name := path.Clean(strings.TrimPrefix(hdr.Name, "./"))
-		rel, ok := strings.CutPrefix(name, base)
-		if !ok || (rel != "" && !strings.HasPrefix(rel, "/")) {
-			return nil, fmt.Errorf("cp copied %q, which is not under %q", hdr.Name, base)
-		}
-		rel = strings.TrimPrefix(rel, "/")
-		if rel == "" {
-			rel = "."
+		rel, err := below(hdr.Name, base)
+		if err != nil {
+			return nil, err
 		}
 		var data []byte
 		if hdr.Typeflag == tar.TypeReg {
@@ -162,4 +168,25 @@ func readTar(r io.Reader, base string) (map[string]copied, error) {
 		}
 		entries[rel] = copied{mode: hdr.FileInfo().Mode(), data: data}
 	}
+}
+
+// below returns where name, an entry of what cp copied of src, whose own
+// name is base, is below src: "." for src itself. A name that starts with
+// "/" is from src itself; any other must be base or under it.
+func below(name, base string) (string, error) {
+	name = strings.TrimPrefix(name, "./")
+	var rel string
+	if strings.HasPrefix(name, "/") {
+		rel = strings.TrimPrefix(path.Clean(name), "/")
+	} else {
+		under, ok := strings.CutPrefix(path.Clean(name), base)
+		if !ok || (under != "" && !strings.HasPrefix(under, "/")) {
+			return "", fmt.Errorf("cp copied %q, which is not under %q", name, base)
+		}
+		rel = strings.TrimPrefix(under, "/")
+	}
+	if rel == "" {
+		return ".", nil
+	}
+	return rel, nil
 }
