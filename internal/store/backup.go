@@ -27,7 +27,19 @@ import (
 // with an error wrapping fs.ErrExist: SQLite would read those as the
 // copy's own. It removes what it wrote when it fails, and stops, failing,
 // when ctx ends.
-func (s *Store) Backup(ctx context.Context, dest string) (err error) {
+func (s *Store) Backup(ctx context.Context, dest string) error {
+	return s.BackupTracked(ctx, dest, nil)
+}
+
+// BackupTracked is Backup, for a caller that may have to return before
+// Backup does, and must leave nothing of an unfinished copy behind. Once
+// it has created dest, it calls made, unless made is nil, with a function
+// that removes dest and every file SQLite may keep beside it. That
+// function leaves alone a file already gone, may be called from any
+// goroutine and more than once, and returns every failure to remove one.
+// made is not called when Backup refuses dest, or fails before it
+// creates it.
+func (s *Store) BackupTracked(ctx context.Context, dest string, made func(remove func() error)) (err error) {
 	if err := s.open(); err != nil {
 		return err
 	}
@@ -60,6 +72,9 @@ func (s *Store) Backup(ctx context.Context, dest string) (err error) {
 	// existing file and write over it.
 	if err := createFile(root, name); err != nil {
 		return err
+	}
+	if made != nil {
+		made(func() error { return removePaths(dir, append(sidecars(name), name)...) })
 	}
 	// With the file and its sidecars all new, every one that exists now is
 	// Backup's own.
@@ -137,4 +152,18 @@ func useRollbackJournal(ctx context.Context, path string) (err error) {
 		return fmt.Errorf("the copy's journal mode stayed %s", mode)
 	}
 	return nil
+}
+
+// removePaths removes each of names from the directory dir, by its path,
+// leaving alone one that is gone already, and returns every failure.
+// Unlike removeFiles, it needs no open Root, so it can run once Backup has
+// returned.
+func removePaths(dir string, names ...string) error {
+	var errs []error
+	for _, name := range names {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }

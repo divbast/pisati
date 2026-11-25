@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	"github.com/ncruces/go-sqlite3"
 
 	"github.com/divbast/pisati/internal/config"
 	"github.com/divbast/pisati/internal/crypto"
+	"github.com/divbast/pisati/internal/jobs"
 	"github.com/divbast/pisati/internal/store"
 )
 
@@ -46,6 +48,10 @@ type Host struct {
 	// ends at the first. serve then stops at once, without finishing its
 	// drain. Nil means it never closes.
 	Halt <-chan struct{}
+	// Jobs are kinds of job, each with its handler, that serve's job
+	// worker runs beside Pisati's own: a test's fakes. The process gives
+	// none. A kind of Pisati's own given here is refused.
+	Jobs map[jobs.Kind]jobs.Handler
 }
 
 // The codes run exits with.
@@ -69,7 +75,7 @@ type cli struct {
 	Migrate migrateCmd `cmd:"" help:"Update the database's schema to the one this Pisati uses. Print the schema's number before and after, as: schema <before> -> <after>."`
 	Backup  backupCmd  `cmd:"" help:"Copy the database to a new file. pisati serve can keep running. The copy does not hold the main key, so keep a copy of the main key too: pisati serve refuses to start with a restored database whose main key it does not have."`
 	Restore restoreCmd `cmd:"" help:"Replace the database with a copy that pisati backup made. Stop pisati serve first. Pisati then needs the main key that was in use when the copy was made."`
-	Keys    keysCmd    `cmd:"" help:"Change the encryption keys: the main key, and the data keys that the main key encrypts. This version of Pisati encrypts no other data with them yet."`
+	Keys    keysCmd    `cmd:"" help:"Change the encryption keys: the main key, and the data keys that the main key encrypts. In this version of Pisati, no data is encrypted with the data keys yet."`
 	Health  healthCmd  `cmd:"" help:"Send GET /healthz to the running pisati serve, on server.internal_listen. Print nothing and exit 0 when it answers 200, which means that it runs and its database answers. Otherwise print why, and exit 1."`
 	Version versionCmd `cmd:"" help:"Print the version of Pisati."`
 }
@@ -173,10 +179,20 @@ func untilHalt(h Host, work func() error) error {
 	}
 }
 
-// stopped reports whether err is ctx's own error, after ctx has ended: the
-// command was stopped by a signal, and nothing else failed.
+// stopped reports whether err is what a stop leaves, after ctx has ended:
+// the command was stopped by a signal, and nothing else failed. Each
+// problem err reports must be ctx's own error, or SQLite's "database is
+// locked", which a wait for a lock returns when ctx cuts it short.
 func stopped(ctx context.Context, err error) bool {
-	return ctx.Err() != nil && errors.Is(err, ctx.Err())
+	if ctx.Err() == nil || err == nil {
+		return false
+	}
+	for _, p := range separate(err) {
+		if !errors.Is(p.err, ctx.Err()) && !errors.Is(p.err, sqlite3.BUSY) {
+			return false
+		}
+	}
+	return true
 }
 
 // usage writes kong's error for the command line, err, and the short usage
@@ -205,8 +221,9 @@ func report(w io.Writer, err error) {
 // problems returns each problem err reports, one a line, each a whole
 // sentence: it ends with a full stop, which takes the place of a trailing
 // ":". Each error a join holds is a problem of its own, and so is each of
-// a wrapped join's, with the wrapper's words before it; any other error is
-// one problem, its lines joined with spaces.
+// a wrapped join's, with the wrapper's words before it. Any other error,
+// one from fmt.Errorf with several %w among them, is one problem, its
+// lines joined with spaces.
 func problems(err error) []string {
 	var lines []string
 	for _, p := range leaves(err) {
@@ -223,37 +240,67 @@ func problems(err error) []string {
 	return lines
 }
 
-// joined is an error that joins others, as errors.Join's do.
-type joined interface {
-	error
-	Unwrap() []error
+// joined returns the errors err joins, when it is a join of separate
+// problems, as errors.Join makes: its message is theirs, a line each, and
+// nothing more. fmt.Errorf with several %w also holds several errors, but
+// says in its own words how they make one problem, so it is no join here.
+func joined(err error) ([]error, bool) {
+	j, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return nil, false
+	}
+	var msgs []string
+	held := j.Unwrap()
+	for _, e := range held {
+		if e != nil {
+			msgs = append(msgs, e.Error())
+		}
+	}
+	return held, err.Error() == strings.Join(msgs, "\n")
 }
 
-// leaves returns the messages of the separate problems err reports: one
-// for each error a join holds, the wrapper's words kept before each of a
-// wrapped join's, and err's own message for any other error.
-func leaves(err error) []string {
-	//nolint:errorlint // err itself, not an error it wraps: only a join at the top holds separate problems
-	if j, ok := err.(joined); ok {
-		var out []string
-		for _, e := range j.Unwrap() {
+// separate returns the separate problems err reports, each with its
+// message: one for each error a join holds, the wrapper's words kept
+// before each of a wrapped join's, and err itself for any other error.
+func separate(err error) []problem {
+	if errs, ok := joined(err); ok {
+		var out []problem
+		for _, e := range errs {
 			if e != nil {
-				out = append(out, leaves(e)...)
+				out = append(out, separate(e)...)
 			}
 		}
 		return out
 	}
-	//nolint:errorlint // the error err wraps directly, for its wrapper's words
-	if inner, ok := errors.Unwrap(err).(joined); ok {
-		if words, ok := strings.CutSuffix(err.Error(), inner.Error()); ok {
-			var out []string
-			for _, l := range leaves(inner) {
-				out = append(out, words+l)
+	if inner := errors.Unwrap(err); inner != nil {
+		if _, ok := joined(inner); ok {
+			if words, ok := strings.CutSuffix(err.Error(), inner.Error()); ok {
+				out := separate(inner)
+				for i := range out {
+					out[i].msg = words + out[i].msg
+				}
+				return out
 			}
-			return out
 		}
 	}
-	return []string{err.Error()}
+	return []problem{{msg: err.Error(), err: err}}
+}
+
+// problem is one problem an error reports: its message, and the error
+// that holds it, to tell what it is.
+type problem struct {
+	msg string
+	err error
+}
+
+// leaves returns the messages of the separate problems err reports, as
+// separate says.
+func leaves(err error) []string {
+	var out []string
+	for _, p := range separate(err) {
+		out = append(out, p.msg)
+	}
+	return out
 }
 
 // say writes to stderr, w. A failure to write is not reported: stderr is
@@ -380,7 +427,8 @@ func directory(h Host, name string) (string, error) {
 func directoryRule(v string) string {
 	switch {
 	case strings.Contains(v, ":"):
-		return "which names more than one directory. Set it to one directory"
+		return `which has ":" in it. Pisati reads ":" as the mark between two directories, and takes one directory ` +
+			`here. Set it to one directory, whose full path has no ":" in it`
 	case !filepath.IsAbs(v):
 		return `which is not a full path. Set it to a full path that starts with "/"`
 	case strings.Contains(v, "//"):
@@ -388,7 +436,8 @@ func directoryRule(v string) string {
 	case len(v) > 1 && strings.HasSuffix(v, "/"):
 		return `which ends with "/". Remove the "/" at the end`
 	case filepath.Clean(v) != v:
-		return `which has "." or ".." as one of its directory names. Write the path without them`
+		return `which has "." or ".." as one of its directory names. Set it to the full path of the directory it ` +
+			`names, written with no "." or ".." in it`
 	}
 	return ""
 }
@@ -459,7 +508,7 @@ func (s *state) close() error {
 // for the advice the state directory's errors give.
 const stateDirSetting = "storage.state_dir (PISATI_STORAGE_STATE_DIR)"
 
-// checkFile starts the name of the file checkStateDir writes.
+// checkFile starts the name of the file checkStateDir makes.
 const checkFile = ".pisati-write-check-"
 
 // checkStateDir checks that the state directory dir exists and can be
@@ -491,23 +540,26 @@ func checkStateDir(dir string) error {
 		return explain(err, "Pisati cannot write to the state directory %s, because its disk is full. Free some space "+
 			"on that disk, or set %s to a directory on another disk", dir, stateDirSetting)
 	case errors.Is(err, syscall.EDQUOT):
-		return explain(err, "Pisati cannot write to the state directory %s, because the user that runs Pisati has used "+
-			"up its disk quota. Free some of that user's space, or raise its quota", dir)
+		return explain(err, "Pisati cannot write to the state directory %s, because a disk quota is used up: the user "+
+			"or the group that runs Pisati, or the directory itself, may store no more on that disk. Delete files that "+
+			"count against that quota, or raise the quota", dir)
 	case err != nil:
 		return explain(err, "Pisati cannot write to the state directory %s: %s. Set %s to a directory that the user "+
 			"that runs Pisati can write to", dir, reason(err), stateDirSetting)
 	}
 	name := f.Name()
-	closeErr, removeErr := f.Close(), os.Remove(name)
-	if errors.Is(removeErr, fs.ErrNotExist) {
-		// Something else removed it already: nothing of it is left.
-		removeErr = nil
+	var errs []error
+	if err := f.Close(); err != nil {
+		errs = append(errs, explain(err, "Pisati made the file %s to check that it can write to the state directory %s, "+
+			"and closing that file failed: %s. So Pisati cannot be sure that it can write there. Check the file system "+
+			"that holds %s, or set %s to a directory on another file system", name, dir, reason(err), dir, stateDirSetting))
 	}
-	if err := errors.Join(closeErr, removeErr); err != nil {
-		return explain(err, "Pisati wrote a file to the state directory %s to check that it can, but cannot remove it: %s. "+
-			"Remove the file whose name starts with %s from %s", dir, reason(err), checkFile, dir)
+	// A check file that something else has removed leaves nothing behind.
+	if err := os.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		errs = append(errs, explain(err, "Pisati made the file %s to check that it can write to the state directory %s, "+
+			"but cannot remove it: %s. Remove that file", name, dir, reason(err)))
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // lockState takes the lock on the state directory dir, which a running
@@ -578,7 +630,8 @@ func openKeyring(ctx context.Context, h Host, st *state, src config.SecretSource
 // it says where the key came from, and where to put the right one.
 func mainKeyMismatch(cause error, src config.SecretSource, dir string, origin keyOrigin) error {
 	const (
-		needs = "The database needs the main key it was used with, for example the one backed up with it. "
+		needs = "This database needs the main key it was last used with. A backup made by pisati backup does not " +
+			"hold that key. "
 		other = "set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it"
 	)
 	switch s := src.(type) {
@@ -587,14 +640,14 @@ func mainKeyMismatch(cause error, src config.SecretSource, dir string, origin ke
 		what := fmt.Sprintf("the main key in %s cannot decrypt the data keys in this database. ", path)
 		if origin == keyGeneratedNow {
 			what = fmt.Sprintf("there was no main key in %s, so Pisati created one on this start. "+
-				"That key cannot decrypt the data keys in this database. ", path)
+				"That new key cannot decrypt the data keys in this database. ", path)
 		}
-		return explain(cause, "%s%sPut that key at %s, or %s, or put it in the credential pisati-main-key",
+		return explain(cause, "%s%sReplace the file %s with that key, or %s, or put it in the credential pisati-main-key",
 			what, needs, path, other)
 	case config.FromFile:
 		return explain(cause, "the main key in %[1]s cannot decrypt the data keys in this database. "+
-			"keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE names that file. %[2]sPut that key in %[1]s, or %[3]s",
-			s.Path, needs, other)
+			"keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE names that file. %[2]sReplace the file %[1]s with that key, "+
+			"or %[3]s", s.Path, needs, other)
 	case config.FromCredential:
 		return explain(cause, "the main key in the credential %[1]s cannot decrypt the data keys in this database. "+
 			"%[2]sPut that key in the credential %[1]s, or %[3]s", s.Name, needs, other)

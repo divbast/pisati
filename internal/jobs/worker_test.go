@@ -657,9 +657,11 @@ func TestRunDrainsOnShutdown(t *testing.T) {
 						t.Errorf("the job is due at %d with lease %v, want due at %d, as before, and no lease",
 							row.RunAt, row.LeaseUntil, runAt.UnixMilli())
 					}
-					if got := log.find("job handlers told to stop: the stop deadline is near"); len(got) != 1 ||
-						got[0].level != slog.LevelWarn || got[0].attrs["after"] != "7s" || got[0].kinds["after"] != slog.KindString {
-						t.Errorf("logged %+v, want one warning, after the string 7s", got)
+					got := log.find("running jobs told to stop, so that their results can be recorded before the stop deadline")
+					if len(got) != 1 || got[0].level != slog.LevelWarn ||
+						got[0].attrs["after"] != "7s" || got[0].kinds["after"] != slog.KindString ||
+						got[0].attrs["left"] != "1s" || got[0].kinds["left"] != slog.KindString {
+						t.Errorf("logged %+v, want one warning, after the string 7s, with the string 1s left", got)
 					}
 					if c.state != "ready" {
 						return

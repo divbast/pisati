@@ -63,12 +63,17 @@ ci-checkout:
     git -C .ci fetch -q --depth 1 https://github.com/divbast/ci "${sha}"
     git -C .ci checkout -q FETCH_HEAD && rm -rf .ci/bin
 
-# Run the acceptance suite against the image. As divbast/ci's recipe of the
-# same name, but from inside test/acceptance, which is a module of its own.
-# ci-tools runs first every time, so the tool is the one this checkout of ci
-# builds. pipefail keeps go test's exit status through divbast-testcount.
-acceptance: ci-tools
-    set -o pipefail; ENGINE={{ ENGINE }} IMAGE={{ IMAGE }} go -C test/acceptance test -json -count=1 -timeout 90m ./... | {{ ci_dir }}/bin/divbast-testcount
+# As divbast/ci's recipe of the same name, but from inside test/acceptance,
+# which is a module of its own. ci-tools runs first every time, so the tool
+# is the one this checkout of ci builds. It runs from the body, and .ci is
+# named as a path rather than by ci's ci_dir, so that the justfile still
+# parses before .ci exists. pipefail keeps go test's exit status through
+# divbast-testcount.
+
+# Run the acceptance suite against the image
+acceptance:
+    {{ just_executable() }} ci-tools
+    set -o pipefail; ENGINE={{ ENGINE }} IMAGE={{ IMAGE }} go -C test/acceptance test -json -count=1 -timeout 90m ./... | .ci/bin/divbast-testcount
 
 # The Go gates run under .golangci.yml, in place of ci's go-lint and
 # go-test. Each runs in the root module and the acceptance module, which is
@@ -261,10 +266,14 @@ generate-check:
 # wrapper, with bash (SHELL is bash for templ alone, so that its command
 # is the wrapper itself). The wrapper builds Pisati and runs it in a
 # process group of its own, which neither templ's signals nor Ctrl-C
-# reach. Pisati gets one SIGTERM, from whichever stops it first: the
-# wrapper, on templ's first signal, or this recipe as it exits, since
-# templ kills the wrapper outright when it stops itself. Only the one that
-# moves Pisati's pid file away sends it.
+# reach, and sets its trap before Pisati starts, so that no stop finds
+# Pisati running without it. Pisati gets one SIGTERM, from whichever stops
+# it first: the wrapper, on templ's first signal, or this recipe as it
+# exits, since templ kills the wrapper outright when it stops itself.
+# Only the one that moves Pisati's pid file away sends it. A second
+# Ctrl-C, while Pisati stops, has the recipe send it a second SIGTERM, so
+# that it stops at once; the recipe still stops Vite and removes its run
+# directory before it returns.
 
 # Run Pisati in dev mode: Vite's dev server, and Pisati rebuilt as it changes
 [script("mise", "exec", "--", "bash", "-euo", "pipefail")]
@@ -276,12 +285,20 @@ dev:
         kill -TERM -- "-$(cat "${DEV_SERVE_RUN}/stopping")" 2>/dev/null || true
     fi
     EOF
+    cat >"${run}/halt" <<'EOF'
+    if pid=$(cat "${DEV_SERVE_RUN}/stopping" 2>/dev/null); then
+        kill -TERM -- "-${pid}" 2>/dev/null || true
+    fi
+    EOF
     finish() {
+        trap 'bash "${run}/halt"' INT TERM
         bash "${run}/stop"
         # The prompt comes back once Pisati has stopped, after its last record.
         if pid=$(cat "${run}/stopping" 2>/dev/null); then
-            while kill -0 "${pid}" 2>/dev/null; do sleep 0.1; done
+            while kill -0 "${pid}" 2>/dev/null; do sleep 0.1 || true; done
         fi
+        # Pisati has stopped: the stop below is Vite's and templ's alone.
+        trap '' INT TERM
         rm -rf -- "${run}"
         kill 0
     }
@@ -289,11 +306,19 @@ dev:
     pnpm exec vp dev &
     serve=$(cat <<'EOF'
     set -m
+    stop=no
+    trap 'trap "" INT TERM; stop=yes; bash "${DEV_SERVE_RUN}/stop"' INT TERM
     go build -o "${DEV_SERVE_RUN}/pisati" ./cmd/pisati || exit
+    if [[ "${stop}" == yes ]]; then
+        exit 0
+    fi
     "${DEV_SERVE_RUN}/pisati" serve &
     pid=$!
     echo "${pid}" >"${DEV_SERVE_RUN}/pid"
-    trap 'trap "" INT TERM; bash "${DEV_SERVE_RUN}/stop"' INT TERM
+    # A stop that came before the pid file did found nothing to stop.
+    if [[ "${stop}" == yes ]]; then
+        bash "${DEV_SERVE_RUN}/stop"
+    fi
     status=0
     wait "${pid}" || status=$?
     # A signal ends the first wait early: wait for Pisati to stop.
@@ -302,6 +327,10 @@ dev:
         wait "${pid}" || status=$?
     fi
     rm -f -- "${DEV_SERVE_RUN}/pid"
+    stopped=$(cat "${DEV_SERVE_RUN}/stopping" 2>/dev/null || true)
+    if [[ "${stopped}" == "${pid}" ]]; then
+        rm -f -- "${DEV_SERVE_RUN}/stopping"
+    fi
     echo "pisati serve exited with status ${status}" >&2
     exit "${status}"
     EOF

@@ -27,6 +27,7 @@ import (
 
 	"go.uber.org/goleak"
 
+	"github.com/divbast/pisati/internal/jobs"
 	"github.com/divbast/pisati/internal/store"
 	"github.com/divbast/pisati/internal/store/storedb"
 )
@@ -116,6 +117,8 @@ type site struct {
 	state            string
 	public, internal int
 	env              map[string]string
+	// jobs are fake job kinds serve runs beside its own: Host.Jobs.
+	jobs map[jobs.Kind]jobs.Handler
 }
 
 // newSite returns a site whose environment sets what every command needs:
@@ -175,6 +178,7 @@ func (s *site) host(args ...string) (Host, *stream, *stream) {
 		Rand:     rand.Reader,
 		Stdout:   stdout,
 		Stderr:   stderr,
+		Jobs:     s.jobs,
 	}, stdout, stderr
 }
 
@@ -523,6 +527,38 @@ func holdWriteLock(t *testing.T, state string) (release func()) {
 	})
 	// Released at the test's end too, should the test stop before it
 	// releases it itself.
+	t.Cleanup(release)
+	return release
+}
+
+// holdReadLock holds a lock on the database at state, in a connection of
+// its own, that keeps every other connection from reading it, until the
+// test calls release or ends. Opening the database waits for it, for up
+// to the store's busy timeout.
+func holdReadLock(t *testing.T, state string) (release func()) {
+	t.Helper()
+	db, err := store.Open(t.Context(), store.DatabasePath(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithoutCancel(t.Context())
+	conn, err := db.DB().Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// In WAL mode, a connection in exclusive locking mode holds the
+	// database's locks from its first exclusive transaction until it
+	// closes.
+	for _, stmt := range []string{"PRAGMA locking_mode = EXCLUSIVE", "BEGIN EXCLUSIVE", "COMMIT"} {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	release = sync.OnceFunc(func() {
+		if err := errors.Join(conn.Close(), db.Close()); err != nil {
+			t.Error(err)
+		}
+	})
 	t.Cleanup(release)
 	return release
 }

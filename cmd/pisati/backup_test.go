@@ -4,8 +4,10 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -112,4 +114,60 @@ func TestBackupRestoreCommands(t *testing.T) {
 			t.Errorf("%d data keys after the restore, want the backup's 1", n)
 		}
 	})
+}
+
+func TestBackupStopped(t *testing.T) {
+	// No connection can open the database while another holds this lock,
+	// so the backup waits, as a slow one would, when the signal comes.
+	for _, tc := range []struct {
+		name string
+		stop func(cancel func(), halt func())
+		want string
+	}{
+		{
+			"by a first signal", func(cancel, _ func()) { cancel() },
+			"pisati: the backup stopped before it finished, because a SIGTERM or SIGINT signal arrived. " +
+				"No backup was made, and nothing was left at %s.",
+		},
+		{
+			"by a second signal", func(_, halt func()) { halt() },
+			"pisati: the backup stopped at once, before it finished, because a second SIGTERM or SIGINT signal " +
+				"arrived. No backup was made, and nothing was left at %s.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSite(t)
+			s.mustRun(t, "migrate")
+			release := holdReadLock(t, s.state)
+			dir := t.TempDir()
+			dest := filepath.Join(dir, "copy.db")
+			h, stdout, stderr := s.host("backup", dest)
+			halted := make(chan struct{})
+			h.Halt = halted
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan int, 1)
+			go func() { done <- run(ctx, h) }()
+			time.Sleep(500 * time.Millisecond)
+			stopping := time.Now()
+			tc.stop(cancel, func() { close(halted) })
+			var code int
+			select {
+			case code = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("pisati backup did not stop within 10 s")
+			}
+			took := time.Since(stopping)
+			r := result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+			if want := fmt.Sprintf(tc.want, dest); r.code != 1 || r.line(t) != want || r.stdout != "" || took >= time.Second {
+				t.Errorf("pisati backup stopped after %v = %d, %q, %q; want 1, %q, at once", took, r.code, r.stdout, r.stderr, want)
+			}
+			// Once the database is free again, the backup does not go on.
+			release()
+			settle(t)
+			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+				t.Errorf("the backup's directory holds %v (%v), want nothing", entries, err)
+			}
+		})
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"sync/atomic"
 
 	"github.com/divbast/pisati/internal/store"
 )
@@ -20,18 +21,44 @@ type backupCmd struct {
 
 // Run writes a copy of the database to the file c.Dest names. It takes no
 // lock, so serve can run beside it. With no database, it refuses, and
-// writes nothing: the store would make an empty one to copy.
+// writes nothing: the store would make an empty one to copy. A signal
+// that stops it leaves nothing of an unfinished copy at c.Dest; a second
+// one stops it at once, and Run removes what the copy has written so far.
 func (c backupCmd) Run(ctx context.Context, h Host) error {
-	return untilHalt(h, func() error { return c.backup(ctx, h) })
-}
-
-// backup is Run's work.
-func (c backupCmd) backup(ctx context.Context, h Host) (err error) {
-	cfg, _, err := loadConfig(ctx, h)
+	dest, err := absolute(c.Dest)
 	if err != nil {
 		return err
 	}
-	dest, err := absolute(c.Dest)
+	// Ended by a halt too, so that the copy stops writing then.
+	work, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var remove atomic.Pointer[func() error]
+	err = untilHalt(h, func() error {
+		return c.backup(work, h, dest, func(r func() error) { remove.Store(&r) })
+	})
+	var why string
+	switch {
+	case errors.Is(err, errHalted):
+		cancel()
+		why = "the backup stopped at once, before it finished, because a second SIGTERM or SIGINT signal arrived"
+	case stopped(ctx, err):
+		why = "the backup stopped before it finished, because a SIGTERM or SIGINT signal arrived"
+	default:
+		return err
+	}
+	if r := remove.Load(); r != nil {
+		if err := (*r)(); err != nil {
+			return explain(err, "%s. No backup was made, but Pisati cannot remove what the unfinished copy wrote at %s: "+
+				"%s. Remove it", why, dest, reason(err))
+		}
+	}
+	return fmt.Errorf("%s. No backup was made, and nothing was left at %s", why, dest)
+}
+
+// backup is Run's work: it copies the database to dest, and calls made
+// as the store's BackupTracked does.
+func (c backupCmd) backup(ctx context.Context, h Host, dest string, made func(remove func() error)) (err error) {
+	cfg, _, err := loadConfig(ctx, h)
 	if err != nil {
 		return err
 	}
@@ -49,7 +76,7 @@ func (c backupCmd) backup(ctx context.Context, h Host) (err error) {
 	defer func() {
 		err = errors.Join(err, db.Close())
 	}()
-	return db.Backup(ctx, dest)
+	return db.BackupTracked(ctx, dest, made)
 }
 
 // restoreCmd is pisati restore.

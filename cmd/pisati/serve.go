@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -132,22 +133,52 @@ func openServingState(ctx context.Context, dir string, l *life) (_ *state, err e
 	return st, nil
 }
 
-// sameAddress refuses two listeners that would listen on the same port at
-// the same address: the same address, or the same port with one of them
-// on every address. It refuses them before anything is opened, the same
-// on every system, though some would let one of them listen.
+// sameAddress refuses two listeners on the same port whose hosts, as
+// written, are the same, or one of which stands for every address. It
+// refuses them before anything is opened, the same on every system,
+// though some would let both listen. It looks no host name up, so two
+// names of one address are not refused here: the second listener then
+// finds the address in use, and listen says so.
 func sameAddress(srv config.Server) error {
 	public, internal := srv.Listen, srv.InternalListen
 	if public.Port() != internal.Port() {
 		return nil
 	}
 	a, b := listenHost(public), listenHost(internal)
-	if a != b && !everyAddress(a) && !everyAddress(b) {
-		return nil
+	if a == b {
+		return fmt.Errorf("%s and %s are both %s. Pisati needs a different address for each. Set one of them to "+
+			"another port", publicSetting, internalSetting, public)
 	}
-	return fmt.Errorf("server.listen (PISATI_SERVER_LISTEN) is %s and server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) "+
-		"is %s. Both would listen on port %d at the same address, which only one of them can do. Set one of them to "+
-		"another port", public, internal, public.Port())
+	var every []string
+	for _, l := range []config.ListenAddr{public, internal} {
+		if scope := addressScope(listenHost(l)); scope != "" {
+			every = append(every, fmt.Sprintf("%s stands for %s", l, scope))
+		}
+	}
+	switch len(every) {
+	case 0:
+		return nil
+	case 2:
+		// The second without its verb: "and [::]:8080 for every address".
+		every[1] = strings.Replace(every[1], " stands for ", " for ", 1)
+	}
+	return fmt.Errorf("%s is %s and %s is %s, both on port %d. %s, so Pisati needs the two on different ports. Set one "+
+		"of them to another port", publicSetting, public, internalSetting, internal, public.Port(), strings.Join(every, ", and "))
+}
+
+// addressScope says which addresses of this machine host stands for when
+// it names none of them: every address for none, or for [::], which
+// listens on IPv4 too, and every IPv4 address for 0.0.0.0. It is "" for a
+// host that names an address or a name.
+func addressScope(host string) string {
+	ip, err := netip.ParseAddr(host)
+	switch {
+	case host == "", err == nil && ip.IsUnspecified() && ip.Is6():
+		return "every address of this machine"
+	case err == nil && ip.IsUnspecified():
+		return "every IPv4 address of this machine"
+	}
+	return ""
 }
 
 // listenHost returns the host a listens on: "" for none.
@@ -157,13 +188,6 @@ func listenHost(a config.ListenAddr) string {
 		return ""
 	}
 	return host
-}
-
-// everyAddress reports whether host stands for every address of the
-// machine: none, 0.0.0.0 or [::].
-func everyAddress(host string) bool {
-	ip, err := netip.ParseAddr(host)
-	return host == "" || (err == nil && ip.IsUnspecified())
 }
 
 // life is what serve has opened so far, so that a halt can close it from
@@ -203,8 +227,8 @@ func (l *life) opened(close func() error) {
 }
 
 // stopping logs "stopping", once, as the stop begins: from the first
-// signal, a failure among serve's goroutines, or a halt, whichever comes
-// first.
+// signal, or a failure among serve's goroutines, whichever comes first.
+// A halt logs none: its own record says why serve stops.
 func (l *life) stopping(ctx context.Context) {
 	l.stopOnce.Do(func() {
 		l.mu.Lock()
@@ -216,23 +240,22 @@ func (l *life) stopping(ctx context.Context) {
 	})
 }
 
-// halt stops serve at once, whatever it is doing. It logs "stopping", if
-// that is not logged yet, and then the halt's one record, after which the
-// log takes no record more. It then closes everything serve has opened,
+// halt stops serve at once, whatever it is doing. It logs its one record,
+// and no "stopping" of its own, after which the log takes no record more.
+// It then closes everything serve has opened,
 // in the reverse order: the servers, cutting their connections, telemetry,
 // without waiting for it to send what it holds, the database, and the
 // state directory's lock, released explicitly. It returns a *haltError
 // that says whether the halt was logged, and holds every failure in
 // closing.
 func (l *life) halt(ctx context.Context) error {
-	l.stopping(ctx)
 	l.mu.Lock()
 	direct, shut, closers := l.direct, l.shut, slices.Clone(l.closers)
 	l.mu.Unlock()
 	if direct != nil {
 		shut.Store(true)
-		direct.ErrorContext(ctx, "stop cut short: a second SIGTERM or SIGINT signal arrived, so Pisati stops now, "+
-			"without waiting for requests and jobs to finish")
+		direct.ErrorContext(ctx, "stop cut short: a second SIGTERM or SIGINT signal arrived, so Pisati stops at once, "+
+			"without waiting for the work it was doing to finish")
 	}
 	errs := make([]error, 0, len(closers))
 	for _, closeIt := range slices.Backward(closers) {
@@ -352,7 +375,14 @@ func start(ctx context.Context, h Host, cfg config.Config, creds fs.FS, st *stat
 	}
 	opts := jobs.DefaultOptions()
 	opts.Drain = drain
-	worker, err := jobs.NewWorker(st.db, map[jobs.Kind]jobs.Handler{reencrypt.Kind(): reencrypt.Handle}, h.Clock, h.Rand, log, opts)
+	handlers := map[jobs.Kind]jobs.Handler{reencrypt.Kind(): reencrypt.Handle}
+	for kind, handle := range h.Jobs {
+		if _, ok := handlers[kind]; ok {
+			return nil, fmt.Errorf("the job kind %s is Pisati's own, and given again, which is a bug in Pisati", kind)
+		}
+		handlers[kind] = handle
+	}
+	worker, err := jobs.NewWorker(st.db, handlers, h.Clock, h.Rand, log, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -429,11 +459,11 @@ func listenBoth(ctx context.Context, srv config.Server) (public, internal net.Li
 	var lc net.ListenConfig
 	both, _ := newGroup(ctx)
 	both.Go(func() (err error) {
-		public, err = listen(ctx, &lc, srv.Listen, publicSetting)
+		public, err = listen(ctx, &lc, srv.Listen, publicSetting, srv.InternalListen, internalSetting)
 		return err
 	})
 	both.Go(func() (err error) {
-		internal, err = listen(ctx, &lc, srv.InternalListen, internalSetting)
+		internal, err = listen(ctx, &lc, srv.InternalListen, internalSetting, srv.Listen, publicSetting)
 		return err
 	})
 	if err := both.Wait(); err != nil {
@@ -448,9 +478,19 @@ func listenBoth(ctx context.Context, srv config.Server) (public, internal net.Li
 }
 
 // listen listens on addr, the address the setting named setting gives.
-func listen(ctx context.Context, lc *net.ListenConfig, addr config.ListenAddr, setting string) (net.Listener, error) {
+// other is the other listener's address, which the setting otherSetting
+// gives: on the same port, it may hold addr itself, under another name.
+func listen(ctx context.Context, lc *net.ListenConfig, addr config.ListenAddr, setting string,
+	other config.ListenAddr, otherSetting string,
+) (net.Listener, error) {
 	ln, err := lc.Listen(ctx, "tcp", addr.String())
 	switch {
+	case errors.Is(err, syscall.EADDRINUSE) && other.Port() == addr.Port():
+		return nil, explain(err, "Pisati cannot listen on %[1]s, the address that %[2]s sets, because that address is in "+
+			"use already. %[4]s is %[3]s, on the same port. If %[6]s and %[5]s name the same address, Pisati itself uses "+
+			"it, for %[4]s: set one of the two settings to another port. If they do not, another process uses it: stop "+
+			"that process, or set %[2]s to another address", addr, setting, other, otherSetting, listenHost(addr),
+			listenHost(other))
 	case errors.Is(err, syscall.EADDRINUSE):
 		return nil, explain(err, "Pisati cannot listen on %s, the address that %s sets, because another process already "+
 			"uses it. Stop that process, or set %s to another address", addr, setting, setting)
@@ -587,7 +627,8 @@ func (r *running) serve(ctx context.Context, h Host, l *life) error {
 	deadline, cancel := context.WithDeadline(context.WithoutCancel(ctx), stopAt())
 	defer cancel()
 	if ferr := r.tel.Shutdown(deadline); ferr != nil {
-		r.log.WarnContext(deadline, "telemetry stopped before it could send every trace it held", "error", ferr)
+		r.log.WarnContext(deadline, "stopping telemetry failed, so some traces or metrics may not have reached the collector",
+			"error", ferr)
 	}
 	return err
 }

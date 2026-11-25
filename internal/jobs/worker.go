@@ -369,7 +369,8 @@ func (w *Worker) Run(ctx context.Context) error {
 	case <-finished:
 		return nil
 	case <-cut.C:
-		w.log.WarnContext(ctx, "job handlers told to stop: the stop deadline is near", "after", handlers.String())
+		w.log.WarnContext(ctx, "running jobs told to stop, so that their results can be recorded before the stop deadline",
+			"after", handlers.String(), "left", w.opts.Reserve.String())
 		stopWork(errDrained)
 	}
 	reserve := time.NewTimer(w.opts.Reserve)

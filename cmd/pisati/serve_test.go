@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/divbast/pisati/internal/jobs"
 	"github.com/divbast/pisati/internal/store"
 )
 
@@ -165,14 +166,15 @@ func closeAndSettle(t *testing.T, conn net.Conn) {
 }
 
 // haltRecord is the one record a halt logs.
-const haltRecord = "stop cut short: a second SIGTERM or SIGINT signal arrived, so Pisati stops now, " +
-	"without waiting for requests and jobs to finish"
+const haltRecord = "stop cut short: a second SIGTERM or SIGINT signal arrived, so Pisati stops at once, " +
+	"without waiting for the work it was doing to finish"
 
 // mustHaveHalted fails the test unless serve, run as v, ended as a halt
-// ends it: exit 1, took after the halt, which is at once; "stopping"
-// logged, and then the halt's one record, last; nothing on stderr; and the
-// state directory's lock free.
-func mustHaveHalted(t *testing.T, s *site, v *serving, code int, took time.Duration) {
+// ends it: exit 1, took after the halt, which is at once; the halt's one
+// record, last, after "stopping" when a first signal had begun the stop,
+// and with no "stopping" when none had; nothing on stderr; and the state
+// directory's lock free.
+func mustHaveHalted(t *testing.T, s *site, v *serving, code int, took time.Duration, stoppedFirst bool) {
 	t.Helper()
 	if code != 1 {
 		t.Errorf("serve stopped by a second signal exited %d, want 1", code)
@@ -188,8 +190,14 @@ func mustHaveHalted(t *testing.T, s *site, v *serving, code int, took time.Durat
 		msgs = append(msgs, fmt.Sprint(rec["msg"]))
 	}
 	stopping := slices.Index(msgs, "stopping")
-	if n := len(msgs); n == 0 || msgs[n-1] != haltRecord || stopping < 0 || stopping > n-2 {
-		t.Errorf("serve logged %q; want \"stopping\", and the halt's record last", msgs)
+	if n := len(msgs); n == 0 || msgs[n-1] != haltRecord {
+		t.Errorf("serve logged %q; want the halt's record last", msgs)
+	}
+	switch {
+	case stoppedFirst && (stopping < 0 || stopping > len(msgs)-2):
+		t.Errorf("serve logged %q; want \"stopping\", from the first signal, before the halt's record", msgs)
+	case !stoppedFirst && stopping >= 0:
+		t.Errorf("serve logged %q; want no \"stopping\": the halt logs only its own record", msgs)
 	}
 	if cut := v.stdout.logged(t, haltRecord); len(cut) != 1 || cut[0]["level"] != "ERROR" {
 		t.Errorf("serve logged %v, want one error record of the halt", cut)
@@ -333,7 +341,8 @@ func mustNotHaveStarted(t *testing.T, r result) {
 
 func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 	keys := t.TempDir()
-	const advice = "The database needs the main key it was used with, for example the one backed up with it. "
+	const advice = "This database needs the main key it was last used with. A backup made by pisati backup does not " +
+		"hold that key. "
 	for _, tc := range []struct {
 		name string
 		// key, when set, gives the old site's main key and the new
@@ -348,7 +357,8 @@ func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 			want: func(s *site) string {
 				path := filepath.Join(s.state, "keys", "main.key")
 				return "pisati: there was no main key in " + path + ", so Pisati created one on this start. " +
-					"That key cannot decrypt the data keys in this database. " + advice + "Put that key at " + path +
+					"That new key cannot decrypt the data keys in this database. " + advice + "Replace the file " + path +
+					" with that key" +
 					", or set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it, " +
 					"or put it in the credential pisati-main-key."
 			},
@@ -359,7 +369,7 @@ func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 			want: func(s *site) string {
 				path := filepath.Join(s.state, "keys", "main.key")
 				return "pisati: the main key in " + path + " cannot decrypt the data keys in this database. " +
-					advice + "Put that key at " + path +
+					advice + "Replace the file " + path + " with that key" +
 					", or set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it, " +
 					"or put it in the credential pisati-main-key."
 			},
@@ -372,7 +382,8 @@ func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 			want: func(s *site) string {
 				path := s.env["PISATI_KEYS_MAIN_KEY_FILE"]
 				return "pisati: the main key in " + path + " cannot decrypt the data keys in this database. " +
-					"keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE names that file. " + advice + "Put that key in " + path +
+					"keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE names that file. " + advice + "Replace the file " + path +
+					" with that key" +
 					", or set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it."
 			},
 		},
@@ -455,7 +466,7 @@ func TestSecondSignalCutsStopShort(t *testing.T) {
 		halting := time.Now()
 		v.halt()
 		code := v.wait()
-		mustHaveHalted(t, s, v, code, time.Since(halting))
+		mustHaveHalted(t, s, v, code, time.Since(halting), true)
 		closeAndSettle(t, conn)
 		mustLogNothingAfterHalt(t, v)
 	})
@@ -479,7 +490,7 @@ func TestSecondSignalCutsStopShort(t *testing.T) {
 		halting := time.Now()
 		v.halt()
 		code := v.wait()
-		mustHaveHalted(t, s, v, code, time.Since(halting))
+		mustHaveHalted(t, s, v, code, time.Since(halting), true)
 		close(hold)
 		collector.Close()
 		settle(t)
@@ -495,11 +506,46 @@ func TestSecondSignalCutsStopShort(t *testing.T) {
 		halting := time.Now()
 		v.halt()
 		code := v.wait()
-		mustHaveHalted(t, s, v, code, time.Since(halting))
+		mustHaveHalted(t, s, v, code, time.Since(halting), false)
 		if strings.Contains(v.stdout.String(), "serving started") {
 			t.Errorf("serve started serving before the halt:\n%s", v.stdout.String())
 		}
 		release()
+		settle(t)
+		mustLogNothingAfterHalt(t, v)
+	})
+
+	t.Run("with a job running", func(t *testing.T) {
+		// A job whose handler runs until the test lets it go: the halt
+		// does not wait for the job worker.
+		kind, err := jobs.NewKind("test.held")
+		if err != nil {
+			t.Fatal(err)
+		}
+		running, letGo := make(chan struct{}), make(chan struct{})
+		s := newSite(t)
+		s.jobs = map[jobs.Kind]jobs.Handler{kind: func(context.Context, []byte) error {
+			close(running)
+			<-letGo
+			return nil
+		}}
+		s.mustRun(t, "migrate")
+		withStore(t, s.state, func(db *store.Store) {
+			if _, err := jobs.Enqueue(t.Context(), db.Queries(), jobs.Job{Kind: kind}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		v := s.serve(t)
+		select {
+		case <-running:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the job did not start within 10 s")
+		}
+		halting := time.Now()
+		v.halt()
+		code := v.wait()
+		mustHaveHalted(t, s, v, code, time.Since(halting), false)
+		close(letGo)
 		settle(t)
 		mustLogNothingAfterHalt(t, v)
 	})
@@ -535,12 +581,28 @@ func TestServeWithPprof(t *testing.T) {
 }
 
 func TestServeRefusesSameAddress(t *testing.T) {
+	const both = "server.listen (PISATI_SERVER_LISTEN) is %s and server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN) " +
+		"is %s, both on port %d. "
 	for _, tc := range []struct {
 		name, public, internal string
+		// why is what the line says after the settings, with %[1]d for
+		// the port.
+		why string
 	}{
-		{"the same address", "127.0.0.1:%d", "127.0.0.1:%d"},
-		{"every address and one of them", ":%d", "127.0.0.1:%d"},
-		{"one address and every address", "127.0.0.1:%d", "[::]:%d"},
+		{"the same address", "127.0.0.1:%d", "127.0.0.1:%d", ""},
+		{
+			"every address and one of them", ":%d", "127.0.0.1:%d",
+			":%[1]d stands for every address of this machine, so Pisati needs the two on different ports.",
+		},
+		{
+			"one address and every address", "127.0.0.1:%d", "[::]:%d",
+			"[::]:%[1]d stands for every address of this machine, so Pisati needs the two on different ports.",
+		},
+		{
+			"every IPv4 address and every address", "0.0.0.0:%d", "[::]:%d",
+			"0.0.0.0:%[1]d stands for every IPv4 address of this machine, and [::]:%[1]d for every address of this " +
+				"machine, so Pisati needs the two on different ports.",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newSite(t)
@@ -549,9 +611,13 @@ func TestServeRefusesSameAddress(t *testing.T) {
 			s.env["PISATI_SERVER_INTERNAL_LISTEN"] = internal
 			holdPorts(t, s)
 			r := s.run(t, "serve")
-			want := fmt.Sprintf("pisati: server.listen (PISATI_SERVER_LISTEN) is %s and server.internal_listen "+
-				"(PISATI_SERVER_INTERNAL_LISTEN) is %s. Both would listen on port %d at the same address, which only one "+
-				"of them can do. Set one of them to another port.", public, internal, s.public)
+			want := fmt.Sprintf("pisati: server.listen (PISATI_SERVER_LISTEN) and server.internal_listen "+
+				"(PISATI_SERVER_INTERNAL_LISTEN) are both %s. Pisati needs a different address for each. Set one of them "+
+				"to another port.", public)
+			if tc.why != "" {
+				want = "pisati: " + fmt.Sprintf(both, public, internal, s.public) + fmt.Sprintf(tc.why, s.public) +
+					" Set one of them to another port."
+			}
 			if r.code != 1 || r.line(t) != want {
 				t.Errorf("serve = %d, %q; want 1, %q", r.code, r.stderr, want)
 			}
@@ -561,4 +627,31 @@ func TestServeRefusesSameAddress(t *testing.T) {
 			mustNotHaveStarted(t, r)
 		})
 	}
+}
+
+func TestServeNamesItsOwnListener(t *testing.T) {
+	// Two names that Pisati does not compare, as it looks no name up:
+	// localhost listens on 127.0.0.1 here, so the second listener finds
+	// the address in use by the first, whichever binds first.
+	s := newSite(t)
+	s.env["PISATI_SERVER_LISTEN"] = fmt.Sprintf("localhost:%d", s.public)
+	s.env["PISATI_SERVER_INTERNAL_LISTEN"] = fmt.Sprintf("127.0.0.1:%d", s.public)
+	r := s.run(t, "serve")
+	line := func(addr, setting, other, otherSetting, host, otherHost string) string {
+		return fmt.Sprintf("pisati: Pisati cannot listen on %[1]s, the address that %[2]s sets, because that address is "+
+			"in use already. %[4]s is %[3]s, on the same port. If %[6]s and %[5]s name the same address, Pisati itself "+
+			"uses it, for %[4]s: set one of the two settings to another port. If they do not, another process uses it: "+
+			"stop that process, or set %[2]s to another address.", addr, setting, other, otherSetting, host, otherHost)
+	}
+	public, internal := s.env["PISATI_SERVER_LISTEN"], s.env["PISATI_SERVER_INTERNAL_LISTEN"]
+	const publicSetting = "server.listen (PISATI_SERVER_LISTEN)"
+	const internalSetting = "server.internal_listen (PISATI_SERVER_INTERNAL_LISTEN)"
+	wants := []string{
+		line(internal, internalSetting, public, publicSetting, "127.0.0.1", "localhost"),
+		line(public, publicSetting, internal, internalSetting, "localhost", "127.0.0.1"),
+	}
+	if lines := r.lines(t); r.code != 1 || len(lines) != 1 || !slices.Contains(wants, lines[0]) {
+		t.Errorf("serve = %d, %q; want 1, and one of:\n%s", r.code, r.stderr, strings.Join(wants, "\n"))
+	}
+	mustNotHaveStarted(t, r)
 }

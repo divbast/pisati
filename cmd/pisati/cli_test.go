@@ -105,15 +105,39 @@ func TestConfigProblemsOneLineEach(t *testing.T) {
 	}
 }
 
+func TestConfigValueOneLine(t *testing.T) {
+	// A value config refuses is one problem, however many errors its
+	// message wraps: one line, with the value and what config wants.
+	for _, tc := range []struct {
+		command []string
+		prefix  string
+	}{
+		{[]string{"migrate"}, "pisati: "},
+		{[]string{"health"}, "config: "},
+	} {
+		s := newSite(t)
+		s.env["PISATI_SERVER_LISTEN"] = "bogus"
+		r := s.run(t, tc.command...)
+		want := tc.prefix + `server.listen (PISATI_SERVER_LISTEN): invalid value "bogus": it is not host:port; ` +
+			"want host:port, with a port from 1 to 65535."
+		if r.code != 1 || r.stderr != want+"\n" {
+			t.Errorf("pisati %q with a bad listen address = %d, %q; want 1, and the one line %q", tc.command, r.code, r.stderr, want)
+		}
+	}
+}
+
 func TestDirectoryVariablesRefused(t *testing.T) {
 	for _, name := range []string{"CONFIGURATION_DIRECTORY", "CREDENTIALS_DIRECTORY"} {
 		for _, tc := range []struct{ value, rule string }{
-			{"/a:/b", "which names more than one directory. Set it to one directory."},
+			{"/a:/b", `which has ":" in it. Pisati reads ":" as the mark between two directories, and takes one ` +
+				`directory here. Set it to one directory, whose full path has no ":" in it.`},
 			{"etc/pisati", `which is not a full path. Set it to a full path that starts with "/".`},
 			{"/etc//pisati", `which has "//" in it. Write one "/" there instead.`},
 			{"/etc/pisati/", `which ends with "/". Remove the "/" at the end.`},
-			{"/etc/./pisati", `which has "." or ".." as one of its directory names. Write the path without them.`},
-			{"/etc/pisati/..", `which has "." or ".." as one of its directory names. Write the path without them.`},
+			{"/etc/./pisati", `which has "." or ".." as one of its directory names. Set it to the full path of the ` +
+				`directory it names, written with no "." or ".." in it.`},
+			{"/etc/pisati/..", `which has "." or ".." as one of its directory names. Set it to the full path of the ` +
+				`directory it names, written with no "." or ".." in it.`},
 		} {
 			s := newSite(t)
 			s.env[name] = tc.value
@@ -131,24 +155,39 @@ func TestDirectoryVariablesRefused(t *testing.T) {
 
 func TestSecondSignalStopsOtherCommands(t *testing.T) {
 	const line = "pisati: the command stopped at once, before it finished, because a second SIGTERM or SIGINT signal arrived."
-	t.Run("keys rotate, waiting for the write lock", func(t *testing.T) {
-		s := newSite(t)
-		s.mustRun(t, "migrate")
-		release := holdWriteLock(t, s.state)
-		halt, wait := s.halting(t, "keys", "rotate")
-		time.Sleep(500 * time.Millisecond)
-		halting := time.Now()
-		halt()
-		r := wait()
-		// Its log, on stderr too, holds the warning of the key it
-		// generated: the halt's line comes last.
-		lines := r.lines(t)
-		if took := time.Since(halting); r.code != 1 || lines[len(lines)-1] != line || took >= time.Second {
-			t.Errorf("pisati keys rotate halted = %d, %q after %v; want 1, %q last, at once", r.code, r.stderr, took, line)
-		}
-		release()
-		settle(t)
-	})
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		migrate bool
+	}{
+		{"migrate, waiting for the write lock", []string{"migrate"}, false},
+		{"keys rotate, waiting for the write lock", []string{"keys", "rotate"}, true},
+		{"keys rewrap, waiting for the write lock", []string{"keys", "rewrap", "--new-main-key-file", "new.key"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSite(t)
+			if tc.migrate {
+				s.mustRun(t, "migrate")
+			}
+			dir := t.TempDir()
+			t.Chdir(dir)
+			writeKeyFile(t, dir, "new.key")
+			release := holdWriteLock(t, s.state)
+			halt, wait := s.halting(t, tc.args...)
+			time.Sleep(500 * time.Millisecond)
+			halting := time.Now()
+			halt()
+			r := wait()
+			// The keys commands log to stderr too, a generated key's
+			// warning among them: the halt's line comes last.
+			lines := r.lines(t)
+			if took := time.Since(halting); r.code != 1 || lines[len(lines)-1] != line || took >= time.Second {
+				t.Errorf("pisati %q halted = %d, %q after %v; want 1, %q last, at once", tc.args, r.code, r.stderr, took, line)
+			}
+			release()
+			settle(t)
+		})
+	}
 	t.Run("health, waiting for an answer", func(t *testing.T) {
 		var lc net.ListenConfig
 		ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
@@ -170,8 +209,11 @@ func TestSecondSignalStopsOtherCommands(t *testing.T) {
 		halting := time.Now()
 		halt()
 		r := wait()
-		if took := time.Since(halting); r.code != 1 || r.line(t) != line || took >= time.Second {
-			t.Errorf("pisati health halted = %d, %q after %v; want 1, %q at once", r.code, r.stderr, took, line)
+		// health's lines are all "<check>: <reason>".
+		const healthLine = "healthz: pisati health stopped at once, before it finished, because a second SIGTERM or " +
+			"SIGINT signal arrived."
+		if took := time.Since(halting); r.code != 1 || r.line(t) != healthLine || took >= time.Second {
+			t.Errorf("pisati health halted = %d, %q after %v; want 1, %q at once", r.code, r.stderr, took, healthLine)
 		}
 		if err := ln.Close(); err != nil {
 			t.Error(err)
@@ -217,6 +259,93 @@ func TestDirectoryVariablesAmongOtherProblems(t *testing.T) {
 		if named := strings.Contains(text, "server.base_url"); named != tc.missing {
 			t.Errorf("%s bad: server.base_url reported missing: %t, want %t:\n%s", tc.name, named, tc.missing, text)
 		}
+	}
+}
+
+func TestHealthStoppedBySignal(t *testing.T) {
+	// A listener that accepts, and never answers.
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+		close(accepted)
+	}()
+	s := newSite(t)
+	s.env["PISATI_SERVER_INTERNAL_LISTEN"] = fmt.Sprintf("127.0.0.1:%d", portOf(t, ln))
+	h, stdout, stderr := s.host("health")
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan int, 1)
+	go func() { done <- run(ctx, h) }()
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	code := <-done
+	r := result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	want := "healthz: pisati health stopped before it finished, because a SIGTERM or SIGINT signal arrived."
+	if r.code != 1 || r.line(t) != want || r.stdout != "" {
+		t.Errorf("pisati health stopped by its context = %d, %q, %q; want 1, %q", r.code, r.stdout, r.stderr, want)
+	}
+	if err := ln.Close(); err != nil {
+		t.Error(err)
+	}
+	for conn := range accepted {
+		if err := conn.Close(); err != nil {
+			t.Error(err)
+		}
+	}
+	settle(t)
+}
+
+func TestCommandStoppedWhileWaiting(t *testing.T) {
+	// A first signal while a command waits for a lock another connection
+	// holds: SQLite's wait then ends with "database is locked", which is
+	// the stop, and no failure.
+	const line = "pisati: the command stopped before it finished, because a SIGTERM or SIGINT signal arrived."
+	for _, tc := range []struct {
+		name string
+		args []string
+		// read holds the lock that keeps the database from being opened,
+		// rather than the write lock.
+		read bool
+		// code and want are the exit code and the last line on stderr.
+		code int
+		want string
+	}{
+		{"keys rotate, for the write lock", []string{"keys", "rotate"}, false, 1, line},
+		{"migrate, to open the database", []string{"migrate"}, true, 1, line},
+		// serve stopped in its start exits 0, with nothing on stderr.
+		{"serve, for the write lock", []string{"serve"}, false, 0, ""},
+		{"serve, to open the database", []string{"serve"}, true, 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSite(t)
+			s.mustRun(t, "migrate")
+			release := holdWriteLock
+			if tc.read {
+				release = holdReadLock
+			}
+			defer release(t, s.state)()
+			h, _, stderr := s.host(tc.args...)
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan int, 1)
+			go func() { done <- run(ctx, h) }()
+			time.Sleep(500 * time.Millisecond)
+			cancel()
+			code := <-done
+			last := ""
+			if lines := strings.Split(strings.TrimSuffix(stderr.String(), "\n"), "\n"); stderr.String() != "" {
+				last = lines[len(lines)-1]
+			}
+			if code != tc.code || last != tc.want {
+				t.Errorf("pisati %q stopped while waiting = %d, %q; want %d, and %q last", tc.args, code, stderr.String(), tc.code, tc.want)
+			}
+		})
 	}
 }
 

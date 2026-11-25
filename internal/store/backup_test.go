@@ -117,3 +117,50 @@ func backup(t *testing.T, s *store.Store, name string) string {
 	}
 	return dest
 }
+
+func TestBackupTracked(t *testing.T) {
+	s := migratedStore(t, dbPath(t))
+	t.Run("made, once the copy exists, and removed", func(t *testing.T) {
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "backup.db")
+		var remove func() error
+		calls := 0
+		if err := s.BackupTracked(t.Context(), dest, func(r func() error) {
+			calls++
+			if _, err := os.Lstat(dest); err != nil {
+				t.Errorf("made was called before the copy existed: %v", err)
+			}
+			remove = r
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 1 || remove == nil {
+			t.Fatalf("made was called %d times, want once with a remover", calls)
+		}
+		// A journal SQLite left beside the copy is the copy's own too.
+		if err := os.WriteFile(dest+"-journal", []byte("a journal"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for range 2 {
+			if err := remove(); err != nil {
+				t.Errorf("remove: %v, want nil, the second time too", err)
+			}
+		}
+		if got := listDir(t, dir); len(got) != 0 {
+			t.Errorf("directory after remove = %v, want nothing", got)
+		}
+	})
+	t.Run("not made when the copy is refused", func(t *testing.T) {
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "backup.db")
+		if err := os.WriteFile(dest, []byte("an earlier backup"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := s.BackupTracked(t.Context(), dest, func(func() error) {
+			t.Error("made was called for a copy Backup refused to make")
+		})
+		if !errors.Is(err, fs.ErrExist) {
+			t.Errorf("BackupTracked over an existing file: %v, want fs.ErrExist", err)
+		}
+	})
+}
