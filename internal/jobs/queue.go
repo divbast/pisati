@@ -159,8 +159,9 @@ func Enqueue(ctx context.Context, q *storedb.Queries, j Job) (bool, error) {
 		return false, explain.New(ErrInvalid, "jobs.Enqueue was given no queries for a %s job, which is a bug in Pisati", j.Kind)
 	}
 	if len(j.Payload) > MaxPayload {
-		return false, explain.New(errors.Join(ErrInvalid, ErrPayloadTooLarge), "the payload of a %s job is %d bytes, more "+
-			"than the %d bytes (1 MiB) a job can hold, so Pisati does not queue it", j.Kind, len(j.Payload), MaxPayload)
+		return false, explain.New(errors.Join(ErrInvalid, ErrPayloadTooLarge), "the payload of a %s job is %s, more "+
+			"than the %s a job can hold, so Pisati does not queue it", j.Kind, explain.Bytes(int64(len(j.Payload))),
+			explain.Bytes(MaxPayload))
 	}
 	payload := j.Payload
 	if payload == nil {

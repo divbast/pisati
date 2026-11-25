@@ -165,7 +165,8 @@ func TestRetryBacksOffThenDeadLetters(t *testing.T) {
 				t.Errorf("attempt %d came %v after attempt %d, want %v", n+1, gap, n, want)
 			}
 		}
-		wantRow(t, onlyRow(t, s), "dead", int64(opts.MaxAttempts), errDown.Error())
+		// Kept as a sentence: a capital letter first, a full stop last.
+		wantRow(t, onlyRow(t, s), "dead", int64(opts.MaxAttempts), "The far end is down.")
 		retries := log.find("job will be tried again")
 		if len(retries) != opts.MaxAttempts-1 {
 			t.Errorf("%d retries logged, want %d", len(retries), opts.MaxAttempts-1)
@@ -179,7 +180,7 @@ func TestRetryBacksOffThenDeadLetters(t *testing.T) {
 					first.kinds["retry_in"], want)
 			}
 		}
-		dead := log.find("job given up: it will not be tried again")
+		dead := log.find("job marked as failed: it will not be tried again")
 		if len(dead) != 1 || dead[0].level != slog.LevelError || dead[0].attrs["kind"] != k.String() {
 			t.Errorf("logged %+v, want one error naming the kind", dead)
 		}
@@ -269,7 +270,7 @@ func TestExpiredLeaseIsReclaimed(t *testing.T) {
 			}
 			row := onlyRow(t, s)
 			wantRow(t, row, "dead", 2, noTriesLeft)
-			if dead := secondLog.find("job given up: it will not be tried again"); len(dead) != 1 {
+			if dead := secondLog.find("job marked as failed: it will not be tried again"); len(dead) != 1 {
 				t.Errorf("logged %d dead letters, want 1", len(dead))
 			}
 			close(release)
@@ -398,7 +399,7 @@ func TestUnknownKindDeadLetters(t *testing.T) {
 		if ran.Load() != 1 {
 			t.Errorf("the known kind's handler ran %d times, want once", ran.Load())
 		}
-		got := log.find("job given up: Pisati has no handler for its kind")
+		got := log.find("job marked as failed: Pisati has no handler for its kind")
 		if len(got) != 1 || got[0].level != slog.LevelError || got[0].attrs["kind"] != unknown.String() {
 			t.Errorf("logged %+v, want one error naming the kind", got)
 		}
@@ -461,19 +462,24 @@ func TestHandlerOutcomes(t *testing.T) {
 		lastError string
 	}{
 		{"nil", nil, "done", 0, ""},
-		{"a bare error", errCause, "ready", base, "cause"},
-		{"a Retry with After", &jobs.Retry{After: 10 * time.Minute, Err: errCause}, "ready", 10 * time.Minute, "cause"},
-		{"a Retry without After", &jobs.Retry{Err: errCause}, "ready", base, "cause"},
-		{"a Retry with a negative After", &jobs.Retry{After: -time.Minute, Err: errCause}, "ready", base, "cause"},
-		{"a Retry past the cap", &jobs.Retry{After: 48 * time.Hour, Err: errCause}, "ready", backCap, "cause"},
-		{"a wrapped Retry", fmt.Errorf("fetch: %w", &jobs.Retry{After: time.Minute, Err: errCause}), "ready", time.Minute, "fetch: cause"},
-		{"a Permanent", &jobs.Permanent{Err: errCause}, "dead", 0, "cause"},
-		{"a wrapped Permanent", fmt.Errorf("render: %w", &jobs.Permanent{Err: errCause}), "dead", 0, "render: cause"},
-		{"a Permanent with no error", &jobs.Permanent{}, "dead", 0, "the job failed in a way that trying again cannot fix, and gave no reason"},
-		{"a Retry with no error", &jobs.Retry{}, "ready", base, "the job asked to be tried again, and gave no reason"},
-		{"a long error", errors.New("x" + strings.Repeat("é", 1000)), "ready", base, "x" + strings.Repeat("é", 511)},
-		{"a nil *Retry", (*jobs.Retry)(nil), "ready", base, "the job asked to be tried again, and gave no reason"},
-		{"a nil *Permanent", (*jobs.Permanent)(nil), "dead", 0, "the job failed in a way that trying again cannot fix, and gave no reason"},
+		// Each last error is kept as a sentence: a capital letter first and
+		// a full stop last, added where the error has none.
+		{"a bare error", errCause, "ready", base, "Cause."},
+		{"a Retry with After", &jobs.Retry{After: 10 * time.Minute, Err: errCause}, "ready", 10 * time.Minute, "Cause."},
+		{"a Retry without After", &jobs.Retry{Err: errCause}, "ready", base, "Cause."},
+		{"a Retry with a negative After", &jobs.Retry{After: -time.Minute, Err: errCause}, "ready", base, "Cause."},
+		{"a Retry past the cap", &jobs.Retry{After: 48 * time.Hour, Err: errCause}, "ready", backCap, "Cause."},
+		{"a wrapped Retry", fmt.Errorf("fetch: %w", &jobs.Retry{After: time.Minute, Err: errCause}), "ready", time.Minute, "Fetch: cause."},
+		{"a Permanent", &jobs.Permanent{Err: errCause}, "dead", 0, "Cause."},
+		{"a wrapped Permanent", fmt.Errorf("render: %w", &jobs.Permanent{Err: errCause}), "dead", 0, "Render: cause."},
+		{"a sentence already", errors.New("The far end said no."), "ready", base, "The far end said no."},
+		{"an empty error", errors.New(""), "ready", base, "The job failed, and gave no reason."},
+		{"a Permanent with no error", &jobs.Permanent{}, "dead", 0, "The job failed in a way that trying again cannot fix, and gave no reason."},
+		{"a Retry with no error", &jobs.Retry{}, "ready", base, "The job asked to be tried again, and gave no reason."},
+		// Cut to 1 KiB with its full stop: 1023 bytes of it, then the stop.
+		{"a long error", errors.New("x" + strings.Repeat("é", 1000)), "ready", base, "X" + strings.Repeat("é", 511) + "."},
+		{"a nil *Retry", (*jobs.Retry)(nil), "ready", base, "The job asked to be tried again, and gave no reason."},
+		{"a nil *Permanent", (*jobs.Permanent)(nil), "dead", 0, "The job failed in a way that trying again cannot fix, and gave no reason."},
 		{"an Outcome of a type outside the package", embedded{&jobs.Retry{Err: errCause}}, "dead", 0, "The job's handler returned an outcome that Pisati does not know, which is a bug in Pisati."},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -562,7 +568,7 @@ func TestRetryJitterComesFromRnd(t *testing.T) {
 				if row := onlyRow(t, s); row.RunAt != want {
 					t.Errorf("the retry is due at %d, want %d", row.RunAt, want)
 				}
-				warned := rec.find("random source unreadable, so the next wait of a job has no random spread")
+				warned := rec.find("random source unreadable, so the wait before a job's next try is not varied at random")
 				if c.failed && len(warned) != 1 {
 					t.Errorf("%d warnings for the unreadable source, want 1", len(warned))
 				}

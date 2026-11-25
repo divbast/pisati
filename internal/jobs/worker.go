@@ -17,9 +17,11 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/divbast/pisati/internal/explain"
@@ -68,7 +70,7 @@ type Retry struct {
 // when Err is nil.
 func (r *Retry) Error() string {
 	if r == nil || r.Err == nil {
-		return "the job asked to be tried again, and gave no reason"
+		return "The job asked to be tried again, and gave no reason"
 	}
 	return r.Err.Error()
 }
@@ -93,7 +95,7 @@ type Permanent struct {
 // when Err is nil.
 func (p *Permanent) Error() string {
 	if p == nil || p.Err == nil {
-		return "the job failed in a way that trying again cannot fix, and gave no reason"
+		return "The job failed in a way that trying again cannot fix, and gave no reason"
 	}
 	return p.Err.Error()
 }
@@ -512,7 +514,7 @@ func (w *Worker) process(ctx, rec context.Context, j storedb.ClaimJobRow) {
 	h, ok := w.handler(j.Kind)
 	if !ok {
 		if w.deadLetter(rec, j, "This version of Pisati has no handler for jobs of the kind "+j.Kind+", so the job cannot run.") {
-			w.log.ErrorContext(rec, "job given up: Pisati has no handler for its kind", "kind", j.Kind, "job_id", j.ID)
+			w.log.ErrorContext(rec, "job marked as failed: Pisati has no handler for its kind", "kind", j.Kind, "job_id", j.ID)
 		}
 		return
 	}
@@ -536,7 +538,7 @@ func (w *Worker) release(ctx context.Context, j storedb.ClaimJobRow) {
 	if w.settle(ctx, j, func(q *storedb.Queries) (int64, error) {
 		return q.ReleaseJob(ctx, storedb.ReleaseJobParams{ID: j.ID, LeaseToken: j.LeaseToken})
 	}) {
-		w.log.InfoContext(ctx, "job given back at the stop, to run again, this try not counted", "kind", j.Kind,
+		w.log.InfoContext(ctx, "job cut off at the stop and made ready to run again, with this try not counted", "kind", j.Kind,
 			"job_id", j.ID, "attempt", j.Attempts)
 	}
 }
@@ -654,7 +656,7 @@ func (w *Worker) retry(ctx context.Context, j storedb.ClaimJobRow, err error, af
 // that it did.
 func (w *Worker) bury(ctx context.Context, j storedb.ClaimJobRow, why string) {
 	if w.deadLetter(ctx, j, why) {
-		w.log.ErrorContext(ctx, "job given up: it will not be tried again", "kind", j.Kind, "job_id", j.ID,
+		w.log.ErrorContext(ctx, "job marked as failed: it will not be tried again", "kind", j.Kind, "job_id", j.ID,
 			"attempt", j.Attempts, "error", lastError(why).String)
 	}
 }
@@ -711,7 +713,8 @@ func (w *Worker) jitter(ctx context.Context) func() float64 {
 	_, err := io.ReadFull(w.rnd, b[:])
 	w.rndMu.Unlock()
 	if err != nil {
-		w.log.WarnContext(ctx, "random source unreadable, so the next wait of a job has no random spread", "error", err)
+		w.log.WarnContext(ctx, "random source unreadable, so the wait before a job's next try is not varied at random",
+			"error", err)
 		return nil
 	}
 	// The top 53 bits over 2^53: exact as a float64, and below 1.
@@ -722,15 +725,34 @@ func (w *Worker) jitter(ctx context.Context) func() float64 {
 // maxLastError bounds the error recorded with a job, in bytes.
 const maxLastError = 1 << 10
 
-// lastError returns msg as a job's last error: cut to at most 1 KiB, at
-// the start of a character, so that valid UTF-8 stays valid.
+// lastError returns msg as a job's last error, which an operator reads in
+// the database: a sentence, as sentence makes it, cut to at most 1 KiB at
+// the start of a character, so that valid UTF-8 stays valid, and ending
+// with its full stop still.
 func lastError(msg string) sql.NullString {
+	msg = sentence(msg)
 	if len(msg) > maxLastError {
-		cut := maxLastError
+		cut := maxLastError - len(".")
 		for cut > 0 && !utf8.RuneStart(msg[cut]) {
 			cut--
 		}
-		msg = msg[:cut]
+		msg = msg[:cut] + "."
 	}
 	return sql.NullString{String: msg, Valid: true}
+}
+
+// sentence returns msg, an error's message, as a sentence: its first
+// letter a capital, and a full stop at its end, each added only where msg
+// has none. An empty msg says that the job gave no reason.
+func sentence(msg string) string {
+	if msg == "" {
+		return "The job failed, and gave no reason."
+	}
+	if r, n := utf8.DecodeRuneInString(msg); unicode.IsLower(r) {
+		msg = string(unicode.ToUpper(r)) + msg[n:]
+	}
+	if !strings.HasSuffix(msg, ".") {
+		msg += "."
+	}
+	return msg
 }

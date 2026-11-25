@@ -52,7 +52,7 @@ func (w *Worker) sweep(ctx context.Context) {
 			// A sweep its context cut off was rolled back, and is no
 			// failure.
 			if ctx.Err() == nil {
-				w.log.ErrorContext(ctx, "old jobs not deleted", "removed", removed, "error", err)
+				w.log.ErrorContext(ctx, "old jobs not all deleted", "removed", removed, "error", err)
 			}
 			return
 		}
