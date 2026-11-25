@@ -397,14 +397,26 @@ dev:
 # playwright test: --update-snapshots writes this platform's baselines
 # afresh, and --project=webkit runs one browser. A failed run leaves its
 # screenshots, diffs and Pisati's logs where it says, in a directory of
-# its own unless BROWSER_RESULTS names one.
+# its own unless BROWSER_RESULTS names one. Every other way out, a failed
+# build among them, leaves nothing: the run directory goes, and so does
+# any Pisati still running from it, as one a killed test worker leaves.
 
 # Run the browser suite: Chromium, Firefox and WebKit, with axe-core and screenshots
 [positional-arguments]
 [script("mise", "exec", "--", "bash", "-euo", "pipefail")]
 browser *ARGS:
-    {{ just_executable() }} fe-build
     run=$(mktemp -d)
+    keep=no
+    finish() {
+        pkill -KILL -f -- "${run}/pisati" || true
+        if [[ "${keep}" == yes ]]; then
+            rm -f -- "${run}/pisati"
+        else
+            rm -rf -- "${run}"
+        fi
+    }
+    trap finish EXIT
+    {{ just_executable() }} fe-build
     results="${BROWSER_RESULTS:-${run}/results}"
     go build -o "${run}/pisati" ./cmd/pisati
     pnpm exec playwright install chromium firefox webkit
@@ -412,11 +424,12 @@ browser *ARGS:
     BROWSER_PISATI="${run}/pisati" pnpm exec playwright test --config test/browser/playwright.config.ts \
         --output "${results}" "$@" || status=$?
     if [[ "${status}" -ne 0 ]]; then
-        rm -f -- "${run}/pisati"
+        if [[ -z "${BROWSER_RESULTS:-}" ]]; then
+            keep=yes
+        fi
         echo "browser: the run's screenshots, diffs and logs are in ${results}" >&2
-        exit "${status}"
     fi
-    rm -rf -- "${run}"
+    exit "${status}"
 
 # How long fuzz gives each fuzz target: just FUZZTIME=30s fuzz
 FUZZTIME := "10m"
@@ -434,8 +447,9 @@ fuzz:
 
 # The packages that differ from main are those with a Go file, or a fuzz
 # corpus under testdata/fuzz, that differs from main's, committed on this
-# branch or not: added, changed or removed. The acceptance module, a module
-# of its own, and tools/ hold no fuzz target.
+# branch or not: added, changed or removed. A moved file counts in both
+# its old and its new package, so renames are not followed. The
+# acceptance module, a module of its own, and tools/ hold no fuzz target.
 
 # Fuzz the targets in every package that differs from main, for 30 s each
 [script("mise", "exec", "--", "bash", "-euo", "pipefail")]
@@ -444,7 +458,7 @@ fuzz-changed:
         echo "fuzz-changed: there is no branch main to compare with; fetch it first" >&2
         exit 1
     fi
-    changed=$({ git diff --name-only "${base}" --; git ls-files --others --exclude-standard; } |
+    changed=$({ git diff --name-only --no-renames "${base}" --; git ls-files --others --exclude-standard; } |
         awk '/(^|\/)testdata\/fuzz\// { sub(/(^|\/)testdata\/fuzz\/.*/, ""); print ($0 == "" ? "." : $0); next }
             /\.go$/ { print (sub(/\/[^\/]*$/, "") ? $0 : ".") }' | sort -u)
     root=$(go list -m -f '{{{{.Dir}}')

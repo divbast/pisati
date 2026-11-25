@@ -59,6 +59,9 @@ jobs:
           name: browser-baselines
           path: test/browser/baselines/*-linux.png
           retention-days: 7
+          # The action refuses a name the run already holds, as a re-run
+          # may find it: this replaces the earlier upload instead.
+          overwrite: true
           if-no-files-found: ignore
 
       - name: Keep the run's screenshots, diffs and logs
@@ -68,4 +71,7 @@ jobs:
           name: browser-results
           path: ${{ runner.temp }}/browser-results
           retention-days: 7
+          # The action refuses a name the run already holds, as a re-run
+          # may find it: this replaces the earlier upload instead.
+          overwrite: true
           if-no-files-found: ignore

@@ -22,10 +22,17 @@
       "minimumReleaseAge": "7 days"
     },
     {
-      "description": "Playwright brings the builds of Chromium, Firefox and WebKit the browser suite runs, and a new build can move pixels in the approved screenshot baselines. Only just browser and the dispatched browser.yml check them, never a pull request's checks, so an update waits for approval on the Dependency Dashboard: the baselines are then checked, and approved again if they change, with it.",
+      "description": "Playwright and axe-core never merge by themselves. A new Playwright brings new builds of Chromium, Firefox and WebKit, which can move pixels in the approved screenshot baselines, and a new axe-core can find what the last one did not, and no pull request's checks run the browser suite. So an update waits for approval on the Dependency Dashboard, and once approved it does not automerge: a person runs just browser, has any new baselines approved, and merges it.",
       "matchManagers": ["npm"],
-      "matchDepNames": ["@playwright/test", "playwright", "playwright-core"],
-      "dependencyDashboardApproval": true
+      "matchDepNames": [
+        "@playwright/test",
+        "playwright",
+        "playwright-core",
+        "@axe-core/playwright",
+        "axe-core"
+      ],
+      "dependencyDashboardApproval": true,
+      "automerge": false
     }
   ]
 }

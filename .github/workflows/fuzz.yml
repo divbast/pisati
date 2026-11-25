@@ -52,4 +52,7 @@ jobs:
             **/testdata/fuzz/**
             !test/acceptance/**
           retention-days: 7
+          # The action refuses a name the run already holds, as a re-run
+          # may find it: this replaces the earlier upload instead.
+          overwrite: true
           if-no-files-found: ignore
