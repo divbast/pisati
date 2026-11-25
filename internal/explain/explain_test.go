@@ -151,3 +151,22 @@ func TestBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestCount(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		n    int64
+		want string
+	}{
+		{0, "0 values"},
+		{1, "1 value"},
+		{2, "2 values"},
+		{1500, "1,500 values"},
+		{-1, "-1 values"},
+	} {
+		if got := explain.Count(c.n, "value", "values"); got != c.want {
+			t.Errorf("Count(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}

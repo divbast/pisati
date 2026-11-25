@@ -58,6 +58,13 @@ func Wrap(cause error, format string, args ...any) error {
 // that gives a size or a limit writes it so, from the number itself, so
 // that no unit written beside it can disagree with it.
 func Bytes(n int64) string {
+	return Count(n, "byte", "bytes")
+}
+
+// Count returns n, its digits in groups of three joined by commas, then
+// one, the singular, when n is 1, and many otherwise: "1 value", "0
+// values", "1,500 values". A message that prints a count writes it so.
+func Count(n int64, one, many string) string {
 	digits := strconv.FormatInt(n, 10)
 	sign := ""
 	if n < 0 {
@@ -67,7 +74,7 @@ func Bytes(n int64) string {
 		digits = digits[:i] + "," + digits[i:]
 	}
 	if n == 1 {
-		return "1 byte"
+		return "1 " + one
 	}
-	return sign + digits + " bytes"
+	return sign + digits + " " + many
 }
