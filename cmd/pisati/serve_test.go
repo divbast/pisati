@@ -631,3 +631,31 @@ func TestServeNamesItsOwnListener(t *testing.T) {
 	}
 	mustNotHaveStarted(t, r)
 }
+
+func TestHealthzReadsTheDatabase(t *testing.T) {
+	s := newSite(t)
+	v := s.serve(t)
+	healthz := fmt.Sprintf("http://127.0.0.1:%d/healthz", s.internal)
+
+	// Every byte of the database and of its write-ahead log overwritten in
+	// place, as a fault of the disk would leave them: the files are still
+	// there, and still open, but hold no database.
+	for _, name := range []string{"pisati.db", "pisati.db-wal"} {
+		path := filepath.Join(s.state, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(strings.Repeat("x", int(info.Size()))), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status, body := get(t, http.MethodGet, healthz); status != http.StatusServiceUnavailable || body != "unavailable" {
+		t.Errorf("GET /healthz on a database overwritten = %d %q, want 503 %q", status, body, "unavailable")
+	}
+	const failed = "health check: the database did not answer"
+	if found := v.stdout.logged(t, failed); len(found) != 1 || found[0]["level"] != "ERROR" ||
+		!strings.Contains(fmt.Sprint(found[0]["error"]), "file is not a database") {
+		t.Errorf("serve logged %v, want one error record of the check, naming SQLite's reason", found)
+	}
+}

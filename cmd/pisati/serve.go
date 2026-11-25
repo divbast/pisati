@@ -44,8 +44,8 @@ const (
 	// sessionSweepEvery is how often serve deletes the sessions that have
 	// expired, after a first sweep as it starts.
 	sessionSweepEvery = 10 * time.Minute
-	// pingWithin bounds /healthz's check of the database.
-	pingWithin = 2 * time.Second
+	// checkWithin bounds /healthz's read of the database.
+	checkWithin = 2 * time.Second
 )
 
 // serveCmd is pisati serve.
@@ -556,16 +556,16 @@ func internalHandler(db *store.Store, tel telemetry.Providers, pprof config.Swit
 	return httpx.Chain(mux, httpx.RequestID(), httpx.Recover(log), httpx.AccessLog(log, clock))
 }
 
-// healthz answers 200 ok while the database answers a ping within
-// pingWithin, and otherwise 503 unavailable, logging why: the reason goes
-// to the log alone, never into the answer.
+// healthz answers 200 ok while Pisati reads its database from disk within
+// checkWithin (store.Check), and otherwise 503 unavailable, logging why:
+// the reason goes to the log alone, never into the answer.
 func healthz(db *store.Store, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), pingWithin)
+		ctx, cancel := context.WithTimeout(r.Context(), checkWithin)
 		defer cancel()
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		status, body := http.StatusOK, "ok"
-		if err := db.DB().PingContext(ctx); err != nil {
+		if err := db.Check(ctx); err != nil {
 			if r.Context().Err() == nil {
 				log.ErrorContext(ctx, "health check: the database did not answer", "error", err)
 			}

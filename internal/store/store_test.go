@@ -4,6 +4,8 @@
 package store_test
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"errors"
@@ -183,6 +185,41 @@ func TestOpenSetsPragmas(t *testing.T) {
 				t.Errorf("connection %d: %s = %s, want %s", i, c.query, got, c.want)
 			}
 		}
+	}
+}
+
+func TestCheckReadsTheFiles(t *testing.T) {
+	path := dbPath(t)
+	s := migratedStore(t, path)
+	if err := s.Check(t.Context()); err != nil {
+		t.Fatalf("Check of a database just migrated: %v", err)
+	}
+
+	// The connections have read every page already. Overwritten from
+	// outside SQLite, the database and its write-ahead log hold no
+	// database, which only a read from the files shows.
+	for _, name := range []string{path, path + "-wal"} {
+		info, err := os.Stat(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, bytes.Repeat([]byte("x"), int(info.Size())), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := s.Check(t.Context())
+	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "file is not a database") {
+		t.Errorf("Check of a database overwritten = %v, want an error naming %s and SQLite's reason", err, path)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := s.Check(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Check with its context ended = %v, want context.Canceled", err)
+	}
+	var zero store.Store
+	if err := zero.Check(t.Context()); err == nil {
+		t.Error("Check of the zero Store succeeded, want an error")
 	}
 }
 

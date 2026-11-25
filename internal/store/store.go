@@ -189,6 +189,37 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
+// Check reads the database from its files, as a health check needs: it
+// counts the tables and indexes in the schema, sqlite_schema, which SQLite
+// keeps on the database's first pages. A connection keeps the pages it has
+// read, and reads them again only when another connection has changed
+// them, so a file overwritten or cut short from outside SQLite would go
+// unseen: Check empties its connection's cache of pages first. It returns
+// nil once the read succeeds, and otherwise an error that names the
+// database and gives SQLite's reason, or ctx's error when ctx ends first.
+// The zero Store gets an error.
+func (s *Store) Check(ctx context.Context) (err error) {
+	if err := s.open(); err != nil {
+		return err
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return cannotRead(ctx, err, s.path)
+	}
+	defer func() {
+		err = errors.Join(err, conn.Close())
+	}()
+	// sqlc cannot parse a PRAGMA, so both statements are written here.
+	if _, err := conn.ExecContext(ctx, "PRAGMA shrink_memory"); err != nil {
+		return cannotRead(ctx, err, s.path)
+	}
+	var entries int64
+	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_schema").Scan(&entries); err != nil {
+		return cannotRead(ctx, err, s.path)
+	}
+	return nil
+}
+
 // Queries returns the generated queries, each run outside any transaction
 // on a connection from the pool. It is nil for the zero Store.
 func (s *Store) Queries() *storedb.Queries {
@@ -305,6 +336,24 @@ func cannotOpen(err error, path string) error {
 	}
 	return explain.New(err, "Pisati cannot open the database %s: %s. Check that the user that runs Pisati can read "+
 		"and write the file and the directory that holds it, and that the file is a database that Pisati made", path, err)
+}
+
+// cannotRead is the error for the database at path, which err says Check
+// cannot read: SQLite's reason, and what to do when the reason says. Once
+// ctx has ended, it is ctx's error: the read was stopped, or ran out of
+// time.
+func cannotRead(ctx context.Context, err error, path string) error {
+	switch {
+	case ctx.Err() != nil:
+		return explain.New(ctx.Err(), "Pisati did not finish reading the database %s in the time it had", path)
+	case errors.Is(err, sqlite3.NOTADB), errors.Is(err, sqlite3.CORRUPT):
+		return explain.New(err, "Pisati cannot read the database %s: %s. It is not a SQLite database any more, or it is "+
+			"damaged: restore a backup of it with pisati restore", path, err)
+	case errors.Is(err, sqlite3.IOERR):
+		return explain.New(err, "Pisati cannot read the database %s: %s. The disk or the file system that holds it "+
+			"reported a fault: the system log may say more", path, err)
+	}
+	return explain.Wrap(err, "Pisati cannot read the database %s", path)
 }
 
 // cannotChange is the error, worded as format and args say, for a change
