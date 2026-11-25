@@ -71,13 +71,14 @@ func TestAccessLogOmitsQueryAndIP(t *testing.T) {
 				t.Errorf("logged the keys %q, want exactly %q", keys, wantKeys)
 			}
 			want := map[string]any{
-				"level":      "INFO",
-				"msg":        "request",
-				"method":     http.MethodPost,
-				"path":       "/posts/hello",
-				"status":     tt.status,
-				"bytes":      tt.bytes,
-				"duration":   float64(1500 * time.Millisecond),
+				"level":  "INFO",
+				"msg":    "request answered",
+				"method": http.MethodPost,
+				"path":   "/posts/hello",
+				"status": tt.status,
+				"bytes":  tt.bytes,
+				// Go's text form of a duration, not nanoseconds.
+				"duration":   "1.5s",
 				"request_id": rec.Result().Header.Get("X-Request-ID"),
 			}
 			for k, v := range want {

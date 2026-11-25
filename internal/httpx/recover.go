@@ -45,7 +45,7 @@ func Recover(log *slog.Logger) Middleware {
 					panic(http.ErrAbortHandler)
 				}
 				id, _ := RequestIDFrom(ctx)
-				log.ErrorContext(ctx, "request handler panicked", "request_id", id, "method", r.Method,
+				log.ErrorContext(ctx, "request handler crashed with a panic", "request_id", id, "method", r.Method,
 					"path", r.URL.Path, "panic", describePanic(v), "stack", string(debug.Stack()))
 				if rec.wroteHeader {
 					panic(http.ErrAbortHandler)

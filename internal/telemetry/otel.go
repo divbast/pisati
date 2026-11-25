@@ -49,6 +49,30 @@ import (
 // ErrInvalid is an argument NewProviders refuses.
 var ErrInvalid = errors.New("invalid")
 
+// bug ends the message of what only a mistake in Pisati's code does.
+const bug = "which is a bug in Pisati"
+
+// plainError is an error whose message is Pisati's own, worded for the
+// operator, around err, which errors.Is and errors.AsType still find.
+type plainError struct {
+	msg string
+	err error
+}
+
+func (e *plainError) Error() string { return e.msg }
+func (e *plainError) Unwrap() error { return e.err }
+
+// explain returns err behind the message format and args give.
+func explain(err error, format string, args ...any) error {
+	return &plainError{msg: fmt.Sprintf(format, args...), err: err}
+}
+
+// wrap returns err behind the words format and args give, then ": " and
+// err's own message, as fmt.Errorf's %w would.
+func wrap(err error, format string, args ...any) error {
+	return explain(err, "%s: %s", fmt.Sprintf(format, args...), err)
+}
+
 const (
 	// serviceName is the resource's service.name.
 	serviceName = "pisati"
@@ -124,10 +148,10 @@ type tracing struct {
 func NewProviders(ctx context.Context, c config.Telemetry, version string, log *slog.Logger) (Providers, error) {
 	var errs []error
 	if version == "" {
-		errs = append(errs, fmt.Errorf("telemetry: %w version: empty", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "telemetry.NewProviders was given an empty version, %s", bug))
 	}
 	if log == nil {
-		errs = append(errs, fmt.Errorf("telemetry: %w logger: nil", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "telemetry.NewProviders was given no logger, %s", bug))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return Providers{}, err
@@ -147,7 +171,7 @@ func NewProviders(ctx context.Context, c config.Telemetry, version string, log *
 	}
 	duration, err := httpconv.NewServerRequestDuration(meters.Meter(scope))
 	if err != nil {
-		return Providers{}, fmt.Errorf("telemetry: the request duration histogram: %w", err)
+		return Providers{}, wrap(err, "Pisati cannot make the histogram of how long requests take, for /metrics")
 	}
 	p := Providers{
 		meters:   meters,
@@ -194,7 +218,7 @@ func (p Providers) Shutdown(ctx context.Context) error {
 // made panics, as a bug, on the zero Providers.
 func (p Providers) made() {
 	if p.meters == nil {
-		panic("telemetry: Providers not made by NewProviders")
+		panic("telemetry.Providers was used without telemetry.NewProviders, " + bug)
 	}
 }
 
@@ -210,7 +234,7 @@ func newMeters(res *resource.Resource) (*sdkmetric.MeterProvider, http.Handler, 
 		otelprom.WithoutTargetInfo(),
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("telemetry: the Prometheus exporter: %w", err)
+		return nil, nil, wrap(err, "Pisati cannot set up the metrics that /metrics serves")
 	}
 	meters := sdkmetric.NewMeterProvider(
 		sdkmetric.WithResource(res),
@@ -241,7 +265,8 @@ func newTraces(ctx context.Context, base url.URL, res *resource.Resource, log *s
 		otlptracehttp.WithMaxResponseSize(collectorReply),
 	)
 	if err != nil {
-		return tracing{}, fmt.Errorf("telemetry: the OTLP exporter: %w", err)
+		return tracing{}, wrap(err, "Pisati cannot set up sending traces to the collector that telemetry.otlp_endpoint "+
+			"(PISATI_TELEMETRY_OTLP_ENDPOINT) names")
 	}
 	// Below, every setting an OTEL_ variable would change, at the SDK's
 	// default but for the attribute value bound.
@@ -312,7 +337,8 @@ func (e spanExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnly
 		out[i] = withResource{ReadOnlySpan: s, res: e.res}
 	}
 	if err := e.next.ExportSpans(ctx, out); err != nil {
-		e.log.WarnContext(ctx, "trace export failed", "spans", len(spans), "error", err)
+		e.log.WarnContext(ctx, "traces not sent to the collector that telemetry.otlp_endpoint names", "spans", len(spans),
+			"error", err)
 	}
 	return nil
 }
@@ -323,7 +349,7 @@ func (e spanExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnly
 // logged here instead: all but ctx's end, which that caller is told of.
 func (e spanExporter) Shutdown(ctx context.Context) error {
 	if err := e.next.Shutdown(ctx); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
-		e.log.WarnContext(ctx, "trace exporter shutdown failed", "error", err)
+		e.log.WarnContext(ctx, "sending traces did not stop cleanly, so the last traces may not have been sent", "error", err)
 	}
 	e.client.CloseIdleConnections()
 	return nil

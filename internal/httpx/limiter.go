@@ -20,6 +20,32 @@ import (
 // Every error the package returns for one wraps it and says which rule.
 var ErrInvalid = errors.New("invalid")
 
+// plainError is an error whose message is Pisati's own, worded for the
+// operator, around err, which errors.Is and errors.AsType still find.
+type plainError struct {
+	msg string
+	err error
+}
+
+func (e *plainError) Error() string { return e.msg }
+func (e *plainError) Unwrap() error { return e.err }
+
+// explain returns err behind the message format and args give. A nil err
+// gives an error that wraps nothing.
+func explain(err error, format string, args ...any) error {
+	return &plainError{msg: fmt.Sprintf(format, args...), err: err}
+}
+
+// bug ends the message of what only a mistake in Pisati's code does.
+const bug = "which is a bug in Pisati"
+
+// badOptions is the error for options that the constructor named made
+// gives, whose field breaks its rule, as format and args say: Pisati
+// gives its options in code, so it is a bug.
+func badOptions(made, format string, args ...any) error {
+	return explain(ErrInvalid, "%s was given options whose %s, %s", made, fmt.Sprintf(format, args...), bug)
+}
+
 // Rate is how many events happen in a second.
 type Rate float64
 
@@ -97,26 +123,26 @@ func (o LimiterOptions) problems() []error {
 	var errs []error
 	// NaN fails both comparisons, and +Inf the second.
 	rateOK := o.Rate > 0 && o.Rate <= maxRate
+	const made = "httpx.NewLimiter"
 	if !rateOK {
-		errs = append(errs, fmt.Errorf("httpx: %w limiter options: Rate is %v, want it positive and at most %v",
-			ErrInvalid, o.Rate, maxRate))
+		errs = append(errs, badOptions(made, "Rate is %v, but it must be above 0 and at most %v", o.Rate, maxRate))
 	}
 	if o.Burst < 1 {
-		errs = append(errs, fmt.Errorf("httpx: %w limiter options: Burst is %d, want at least 1", ErrInvalid, o.Burst))
+		errs = append(errs, badOptions(made, "Burst is %d, but it must be at least 1", o.Burst))
 	}
 	if o.MaxEntries < 2 {
-		errs = append(errs, fmt.Errorf("httpx: %w limiter options: MaxEntries is %d, want at least 2, "+
-			"room for an IPv6 client's two buckets", ErrInvalid, o.MaxEntries))
+		errs = append(errs, badOptions(made, "MaxEntries is %d, but it must be at least 2, room for the two buckets "+
+			"of an IPv6 client", o.MaxEntries))
 	}
 	switch {
 	case o.Idle <= 0:
-		errs = append(errs, fmt.Errorf("httpx: %w limiter options: Idle is %v, want it positive", ErrInvalid, o.Idle))
+		errs = append(errs, badOptions(made, "Idle is %v, but it must be longer than 0", o.Idle))
 	case rateOK && o.Burst >= 1:
 		_, client := newRule(o.Rate, o.Burst, 1, o.Idle)
 		_, network := newRule(o.Rate, o.Burst, networkFactor, o.Idle)
 		if !client || !network {
-			errs = append(errs, fmt.Errorf("httpx: %w limiter options: Idle is %v, shorter than Burst / Rate, "+
-				"the time an empty bucket takes to fill", ErrInvalid, o.Idle))
+			errs = append(errs, badOptions(made, "Idle is %v, but it must be no shorter than Burst / Rate, the time "+
+				"an empty bucket takes to fill", o.Idle))
 		}
 	}
 	return errs
@@ -192,7 +218,7 @@ type claim struct {
 func NewLimiter(o LimiterOptions, clock func() time.Time) (*Limiter, error) {
 	errs := o.problems()
 	if clock == nil {
-		errs = append(errs, fmt.Errorf("httpx: %w limiter clock: nil", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "httpx.NewLimiter was given no clock, %s", bug))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
@@ -220,10 +246,10 @@ func NewLimiter(o LimiterOptions, clock func() time.Time) (*Limiter, error) {
 // NewLimiter, is a bug, and Middleware panics on it.
 func (l *Limiter) Middleware(ip ClientIP) Middleware {
 	if l == nil || l.buckets == nil {
-		panic("httpx: Middleware on a Limiter not made by NewLimiter")
+		panic("httpx.Limiter.Middleware was called on a Limiter that httpx.NewLimiter did not make, " + bug)
 	}
 	if ip == nil {
-		panic("httpx: Limiter.Middleware needs a ClientIP")
+		panic("httpx.Limiter.Middleware was given no ClientIP, " + bug)
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

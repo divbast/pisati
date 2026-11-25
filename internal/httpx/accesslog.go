@@ -12,7 +12,8 @@ import (
 // AccessLog logs each request to log once its handler returns, as one
 // record at info level: the method, the path without its query, the
 // status sent, the bytes of body written, how long the handler took by
-// clock, and the request's ID (see RequestID), empty when it has none.
+// clock, in Go's text form for a duration, such as "1.5ms", and the
+// request's ID (see RequestID), empty when it has none.
 // It logs nothing else of the request: no query, no address and no
 // header. A request whose handler panics is not logged here: Recover
 // logs it.
@@ -23,8 +24,8 @@ func AccessLog(log *slog.Logger, clock func() time.Time) Middleware {
 			rec := &recorder{ResponseWriter: w}
 			next.ServeHTTP(rec, r)
 			id, _ := RequestIDFrom(r.Context())
-			log.InfoContext(r.Context(), "request", "method", r.Method, "path", r.URL.Path,
-				"status", rec.sentStatus(), "bytes", rec.bytes, "duration", clock().Sub(start), "request_id", id)
+			log.InfoContext(r.Context(), "request answered", "method", r.Method, "path", r.URL.Path,
+				"status", rec.sentStatus(), "bytes", rec.bytes, "duration", clock().Sub(start).String(), "request_id", id)
 		})
 	}
 }

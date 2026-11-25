@@ -25,7 +25,7 @@ import (
 // it.
 func Pprof(mux *http.ServeMux, s config.Switch) {
 	if mux == nil {
-		panic("telemetry: Pprof needs a mux")
+		panic("telemetry.Pprof was given no mux, " + bug)
 	}
 	switch s {
 	case config.Off:
@@ -42,5 +42,5 @@ func Pprof(mux *http.ServeMux, s config.Switch) {
 		mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
 		return
 	}
-	panic("telemetry: Pprof given an unknown switch, " + strconv.Itoa(int(s)))
+	panic("telemetry.Pprof was given the switch " + strconv.Itoa(int(s)) + ", which it does not know, " + bug)
 }

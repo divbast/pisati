@@ -6,7 +6,6 @@ package httpx
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -70,15 +69,15 @@ func DefaultGuardedOptions() GuardedOptions {
 // problems returns an error for each field of o outside its range.
 func (o GuardedOptions) problems() []error {
 	var errs []error
+	const made = "httpx.NewGuardedClient"
 	if o.Timeout <= 0 {
-		errs = append(errs, fmt.Errorf("httpx: %w guarded client options: Timeout is %v, want it positive", ErrInvalid, o.Timeout))
+		errs = append(errs, badOptions(made, "Timeout is %v, but it must be longer than 0", o.Timeout))
 	}
 	if o.MaxBody <= 0 {
-		errs = append(errs, fmt.Errorf("httpx: %w guarded client options: MaxBody is %d, want it positive", ErrInvalid, o.MaxBody))
+		errs = append(errs, badOptions(made, "MaxBody is %d, but it must be at least 1", o.MaxBody))
 	}
 	if o.MaxRedirects < 0 {
-		errs = append(errs, fmt.Errorf("httpx: %w guarded client options: MaxRedirects is %d, want 0 or more",
-			ErrInvalid, o.MaxRedirects))
+		errs = append(errs, badOptions(made, "MaxRedirects is %d, but it must be 0 or more", o.MaxRedirects))
 	}
 	return errs
 }
@@ -181,7 +180,8 @@ func NewGuardedClient(o GuardedOptions) (*GuardedClient, error) {
 		Timeout: o.Timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > maxRedirects {
-				return fmt.Errorf("httpx: %w: more than %d", ErrTooManyRedirects, maxRedirects)
+				return explain(ErrTooManyRedirects, "the server sent the request to another address more than %d "+
+					"times, and Pisati follows no more", maxRedirects)
 			}
 			return c.check.url(req.URL)
 		},
@@ -203,17 +203,18 @@ func NewGuardedClient(o GuardedOptions) (*GuardedClient, error) {
 // ErrInvalid, a request that sets Accept-Encoding.
 func (c *GuardedClient) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	if c == nil || c.client == nil {
-		return nil, errors.New("httpx: the GuardedClient was not made by NewGuardedClient")
+		return nil, errors.New("httpx.GuardedClient.Do was called on a client that httpx.NewGuardedClient did not " +
+			"make, " + bug)
 	}
 	if req == nil || req.URL == nil {
-		return nil, errors.New("httpx: Do needs a request with a URL")
+		return nil, errors.New("httpx.GuardedClient.Do was given a request with no URL, " + bug)
 	}
 	for key := range req.Header {
 		// Under any key the transport would send: a caller may write to
 		// the map without canonicalising.
 		if strings.EqualFold(key, "Accept-Encoding") {
-			return nil, fmt.Errorf("httpx: %w request: it sets Accept-Encoding, and only a body the transport "+
-				"decodes itself is held to MaxBody as read", ErrInvalid)
+			return nil, explain(ErrInvalid, "httpx.GuardedClient.Do was given a request that sets Accept-Encoding, "+
+				"%s: only a body that the transport decodes itself is held to MaxBody as it is read", bug)
 		}
 	}
 	if err := c.check.url(req.URL); err != nil {
@@ -222,13 +223,15 @@ func (c *GuardedClient) Do(ctx context.Context, req *http.Request) (*http.Respon
 	resp, err := c.client.Do(req.WithContext(ctx)) //nolint:gosec // G704: this is the address-checked client; the check above, CheckRedirect and dial check every URL and address
 	if err != nil {
 		if headerTooLarge(err) {
-			return nil, fmt.Errorf("httpx: %w: a header over %d bytes: %w", ErrTooLarge, maxResponseHeader, err)
+			return nil, explain(errors.Join(ErrTooLarge, err), "the server's answer has a header of more than %d "+
+				"bytes (64 KiB), which is more than Pisati reads", maxResponseHeader)
 		}
 		return nil, err
 	}
 	if !resp.Uncompressed && mayHaveBody(resp) && encoded(resp.Header) {
-		return nil, errors.Join(fmt.Errorf("httpx: %w response: its body is %s, which the transport did not decode, "+
-			"so MaxBody would not count what is read", ErrInvalid, resp.Header.Values("Content-Encoding")), resp.Body.Close())
+		return nil, errors.Join(explain(ErrInvalid, "the server sent its answer encoded as %s, which Pisati did not "+
+			"ask for, so Pisati does not read it", strings.Join(resp.Header.Values("Content-Encoding"), ", ")),
+			resp.Body.Close())
 	}
 	resp.Body = &cappedBody{body: resp.Body, left: c.maxBody, limit: c.maxBody}
 	return resp, nil
@@ -289,11 +292,11 @@ func (c *GuardedClient) dial(ctx context.Context, network, address string) (net.
 	defer cancel()
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
-		return nil, fmt.Errorf("httpx: dialling %q: %w", address, err)
+		return nil, explain(err, "Pisati cannot connect to %q, which is not written as host:port: %s", address, err)
 	}
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil {
-		return nil, fmt.Errorf("httpx: dialling %q: the port is not a number from 0 to 65535", address)
+		return nil, explain(nil, "Pisati cannot connect to %q, whose port is not a number from 0 to 65535", address)
 	}
 	addrs, err := c.addresses(ctx, host)
 	if err != nil {
@@ -306,7 +309,8 @@ func (c *GuardedClient) dial(ctx context.Context, network, address string) (net.
 		}
 	}
 	if len(allowed) == 0 {
-		return nil, fmt.Errorf("httpx: %w: %s has only private or reserved addresses: %v", ErrAddressRefused, host, addrs)
+		return nil, explain(ErrAddressRefused, "Pisati does not connect to %s, because each of its addresses, %v, is "+
+			"private or reserved", host, addrs)
 	}
 	errs := make([]error, 0, len(allowed))
 	for i, to := range allowed {
@@ -316,7 +320,7 @@ func (c *GuardedClient) dial(ctx context.Context, network, address string) (net.
 		if err == nil {
 			return conn, nil
 		}
-		errs = append(errs, fmt.Errorf("httpx: connecting to %v for %s: %w", to, host, err))
+		errs = append(errs, explain(err, "Pisati cannot connect to %v, an address of %s: %s", to, host, err))
 	}
 	return nil, errors.Join(errs...)
 }
@@ -329,10 +333,10 @@ func (c *GuardedClient) addresses(ctx context.Context, host string) ([]netip.Add
 	}
 	addrs, err := c.lookup(ctx, host)
 	if err != nil {
-		return nil, fmt.Errorf("httpx: looking up %s: %w", host, err)
+		return nil, explain(err, "Pisati cannot look up the addresses of %s: %s", host, err)
 	}
 	if len(addrs) == 0 {
-		return nil, fmt.Errorf("httpx: looking up %s: it has no address", host)
+		return nil, explain(nil, "Pisati looked up %s, and found no address for it", host)
 	}
 	return addrs, nil
 }
@@ -424,10 +428,12 @@ func (k addressCheck) allows(a netip.Addr) bool {
 // to.
 func (k addressCheck) url(u *url.URL) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("httpx: %w: the scheme %q is not http or https", ErrAddressRefused, u.Scheme)
+		return explain(ErrAddressRefused, "Pisati sends requests only to http and https URLs, and not to one that "+
+			"starts with %q", u.Scheme+":")
 	}
 	if a, err := netip.ParseAddr(u.Hostname()); err == nil && !k.allows(a) {
-		return fmt.Errorf("httpx: %w: %v is a private or reserved address", ErrAddressRefused, plain(a))
+		return explain(ErrAddressRefused, "Pisati does not send requests to %v, because it is a private or reserved "+
+			"address", plain(a))
 	}
 	return nil
 }
@@ -441,10 +447,11 @@ func (k addressCheck) url(u *url.URL) error {
 func (k addressCheck) control(_, address string, _ syscall.RawConn) error {
 	ap, err := netip.ParseAddrPort(address)
 	if err != nil {
-		return fmt.Errorf("httpx: %w: %q is not an address and port", ErrAddressRefused, address)
+		return explain(ErrAddressRefused, "Pisati does not connect to %q, which is not an address and a port", address)
 	}
 	if !k.allows(ap.Addr()) {
-		return fmt.Errorf("httpx: %w: %v is a private or reserved address", ErrAddressRefused, plain(ap.Addr()))
+		return explain(ErrAddressRefused, "Pisati does not connect to %v, because it is a private or reserved address",
+			plain(ap.Addr()))
 	}
 	return nil
 }
@@ -479,7 +486,8 @@ func (b *cappedBody) Read(p []byte) (int, error) {
 	}
 	n = int(b.left)
 	b.left = 0
-	b.err = fmt.Errorf("httpx: %w: a body over %d bytes", ErrTooLarge, b.limit)
+	b.err = explain(ErrTooLarge, "the server's answer has a body of more than %d bytes, which is more than Pisati "+
+		"reads", b.limit)
 	return n, b.err
 }
 

@@ -74,7 +74,7 @@ func (p Providers) Metrics() http.Handler {
 func (p Providers) HTTP(clock func() time.Time, trusted []netip.Prefix) httpx.Middleware {
 	p.made()
 	if clock == nil {
-		panic("telemetry: HTTP needs a clock")
+		panic("telemetry.Providers.HTTP was given no clock, " + bug)
 	}
 	fromProxy := httpx.NewTrustedPeer(trusted)
 	return func(next http.Handler) http.Handler {

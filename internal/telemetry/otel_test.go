@@ -364,8 +364,9 @@ func TestFailedExportIsLoggedOnce(t *testing.T) {
 				t.Fatalf("%d records, want one: %v", len(recs), recs)
 			}
 			rec := recs[0]
-			if rec["level"] != "WARN" || rec["msg"] != "trace export failed" || rec["spans"] != 1.0 {
-				t.Errorf("the record %v, want level WARN, msg \"trace export failed\", spans 1", rec)
+			const msg = "traces not sent to the collector that telemetry.otlp_endpoint names"
+			if rec["level"] != "WARN" || rec["msg"] != msg || rec["spans"] != 1.0 {
+				t.Errorf("the record %v, want level WARN, msg %q, spans 1", rec, msg)
 			}
 			text, isText := rec["error"].(string)
 			if !isText {

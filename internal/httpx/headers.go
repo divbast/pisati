@@ -57,7 +57,7 @@ type header struct {
 // panics on it.
 func SecurityHeaders(base config.BaseURL, hsts config.HSTSScope, dev config.Dev) Middleware {
 	if base.String() == "" {
-		panic("httpx: SecurityHeaders needs a base URL, and the zero BaseURL is none")
+		panic("httpx.SecurityHeaders was given the zero BaseURL, " + bug + ": config.Load never gives one")
 	}
 	sts := hstsValue(hsts)
 	vite := devServerOf(base, dev)
@@ -106,7 +106,7 @@ func hstsValue(s config.HSTSScope) string {
 	case config.HSTSPreload:
 		return hstsMaxAge + "; includeSubDomains; preload"
 	}
-	panic("httpx: SecurityHeaders was given an unknown " + s.String())
+	panic("httpx.SecurityHeaders was given the HSTS scope " + s.String() + ", which it does not know, " + bug)
 }
 
 // devServerOf returns where dev's Vite dev server is, or the zero
@@ -118,8 +118,8 @@ func devServerOf(base config.BaseURL, dev config.Dev) devServer {
 		return devServer{}
 	}
 	if !base.IsLocal() || !vite.IsLocal() {
-		panic("httpx: SecurityHeaders was given the Vite dev server " + vite.String() + " for the base URL " +
-			base.String() + ", and both must be on localhost, 127.0.0.1 or [::1]")
+		panic("httpx.SecurityHeaders was given a Vite dev server and a base URL that are not both on localhost, " +
+			"127.0.0.1 or [::1], " + bug + ": config.Load never gives them")
 	}
 	socket := "ws://"
 	if vite.IsHTTPS() {
@@ -172,5 +172,5 @@ func (i Isolation) Middleware() Middleware {
 			})
 		}
 	}
-	panic("httpx: Middleware on an unknown Isolation(" + strconv.Itoa(int(i)) + ")")
+	panic("httpx.Isolation.Middleware was called on Isolation(" + strconv.Itoa(int(i)) + "), which it does not know, " + bug)
 }

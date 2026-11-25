@@ -25,7 +25,7 @@ import (
 // on it.
 func NewLogger(w io.Writer, c config.Log) *slog.Logger {
 	if w == nil {
-		panic("telemetry: NewLogger needs a writer")
+		panic("telemetry.NewLogger was given no writer, " + bug)
 	}
 	opts := &slog.HandlerOptions{Level: c.Level}
 	switch c.Format {
@@ -34,5 +34,5 @@ func NewLogger(w io.Writer, c config.Log) *slog.Logger {
 	case config.LogText:
 		return slog.New(slog.NewTextHandler(w, opts))
 	}
-	panic("telemetry: NewLogger given an unknown log format, " + strconv.Itoa(int(c.Format)))
+	panic("telemetry.NewLogger was given the log format " + strconv.Itoa(int(c.Format)) + ", which it does not know, " + bug)
 }

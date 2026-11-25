@@ -120,8 +120,8 @@ func TestRecoverReturns500AndKeepsServing(t *testing.T) {
 					t.Fatalf("logged %d records, want 1: %s", len(records), buf)
 				}
 				rec := records[0]
-				if rec["level"] != "ERROR" || rec["msg"] != "request handler panicked" {
-					t.Errorf("logged %v %q, want ERROR \"request handler panicked\"", rec["level"], rec["msg"])
+				if rec["level"] != "ERROR" || rec["msg"] != "request handler crashed with a panic" {
+					t.Errorf("logged %v %q, want ERROR \"request handler crashed with a panic\"", rec["level"], rec["msg"])
 				}
 				if id := header.Get("X-Request-ID"); id == "" || rec["request_id"] != id {
 					t.Errorf("logged request_id %v, want the response's X-Request-ID %q", rec["request_id"], id)
@@ -164,7 +164,7 @@ func TestRecoverReturns500AndKeepsServing(t *testing.T) {
 		if resp.StatusCode != http.StatusOK || string(body) != "partial" || !errors.Is(err, io.ErrUnexpectedEOF) {
 			t.Errorf("GET /partial = %d %q, %v; want the 200 it began, cut off with io.ErrUnexpectedEOF", resp.StatusCode, body, err)
 		}
-		if records := buf.records(t); len(records) != 1 || records[0]["msg"] != "request handler panicked" {
+		if records := buf.records(t); len(records) != 1 || records[0]["msg"] != "request handler crashed with a panic" {
 			t.Errorf("logged %s, want the one panic", buf)
 		}
 	})
