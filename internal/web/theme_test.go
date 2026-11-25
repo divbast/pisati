@@ -202,6 +202,9 @@ func TestThemeToggleNoJS(t *testing.T) {
 			{method: http.MethodPost, target: "/_/theme", body: "theme=dark&next=%2F&other=%zz"},
 			{method: http.MethodPost, target: "/_/theme", body: "theme=dark;next=%2F"},
 			{method: http.MethodPost, target: "/_/theme?%zz", body: "theme=dark&next=%2F"},
+			// Every pair well formed, but more of them than Go's form
+			// parser takes: 10000.
+			{method: http.MethodPost, target: "/_/theme", body: "theme=dark&next=%2F" + strings.Repeat("&a=b", 10000)},
 		} {
 			w := p.do(req)
 			if w.Code != http.StatusBadRequest {

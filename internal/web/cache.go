@@ -26,8 +26,10 @@ type response struct {
 	signedIn bool
 	// setsCookie is whether the response sets or clears a cookie.
 	setsCookie bool
-	// own is the Cache-Control the static files' handler set itself, if
-	// any: what any other handler sets is not kept.
+	// own is the Cache-Control the static files' handler set itself,
+	// during this request, if any. A Cache-Control the response held
+	// before that handler ran, or that any other handler sets, is not
+	// kept.
 	own string
 }
 
@@ -36,8 +38,9 @@ type response struct {
 //
 //  1. a response that sets or clears a cookie is stored by no cache, even
 //     one that would otherwise be kept;
-//  2. a static file's response keeps the Cache-Control its handler
-//     chose, which is immutable: the only handler whose own is kept;
+//  2. a static file's response keeps a Cache-Control its handler set
+//     during this request, which is immutable: the only handler whose own
+//     is kept;
 //  3. a response to a signed-in visitor is stored by no cache;
 //  4. a GET or HEAD answered 200 or 404 may be kept by any cache for 5
 //     minutes, apart for each set of cookies: Vary: Cookie;
@@ -105,13 +108,17 @@ type servedBy struct {
 type servedByKey struct{}
 
 // keepsOwnCaching serves next, the static files' handler, and marks the
-// response as one whose own Cache-Control the cache policy keeps. No
-// other handler's is kept.
+// response as one whose own Cache-Control the cache policy keeps. It
+// first removes any Cache-Control the response holds, so that what the
+// policy keeps is only what next sets during this request: immutable,
+// for a file. A response next sets none on, a miss, falls to the
+// policy's table. No other handler's is kept.
 func keepsOwnCaching(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if served, ok := r.Context().Value(servedByKey{}).(*servedBy); ok {
 			served.staticFiles = true
 		}
+		w.Header().Del("Cache-Control")
 		next.ServeHTTP(w, r)
 	})
 }

@@ -206,7 +206,7 @@ linters:
           allow:
             - $gostd
             - go/format
-            - github.com/divbast/pisati/cmd/genicons
+            - github.com/divbast/pisati/cmd/genicons/internal/icongen$
           deny:
             - pkg: log$
               desc: use log/slog
@@ -220,7 +220,7 @@ linters:
             - go/format
             - go/parser
             - go/token
-            - github.com/divbast/pisati/cmd/genicons
+            - github.com/divbast/pisati/cmd/genicons/internal/icongen$
             - go.uber.org/goleak
     gosec:
       excludes:

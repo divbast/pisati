@@ -119,6 +119,11 @@ func TestCachePolicyKeepsOnlyTheStaticFilesOwn(t *testing.T) {
 		{name: "the theme switch", req: request{method: http.MethodPost, target: "/_/theme", body: "theme=dark&next=%2F"}, want: noStore},
 		{name: "a static file", req: request{target: "/static/" + script}, want: immutable},
 		{name: "a static file, signed in", req: request{target: "/static/" + script, cookies: signedIn}, want: immutable},
+		// The static handler sets no Cache-Control of its own on a miss, so
+		// what was there before it ran is not its to keep.
+		{name: "a static file not found", req: request{target: "/static/assets/gone-0000.js"}, want: publicPage},
+		{name: "a static file not found, signed in", req: request{target: "/static/assets/gone-0000.js", cookies: signedIn}, want: noStore},
+		{name: "a static file's range not satisfiable", req: request{target: "/static/" + script, header: map[string]string{"Range": "bytes=100000-"}}, want: noStore},
 	} {
 		wantCache(t, p.do(tt.req), tt.want, tt.name)
 	}

@@ -126,9 +126,11 @@ func (s *Site) setTheme(w http.ResponseWriter, r *http.Request) {
 
 // malformedField returns the field of the first pair in body, a form
 // ParseForm refused, that is malformed: themeField or nextField when the
-// pair is one of theirs, and formField for any other pair, or when every
-// pair of body is well formed, and so the request's query failed. It
-// never names a field from what body holds.
+// pair is one of theirs, and formField for any other pair. When every pair
+// of body is well formed, what ParseForm refused is something else: the
+// request's query, or the body's number of pairs, which Go's form parser
+// holds to 10000. Then it is formField too. It never names a field from
+// what body holds.
 func malformedField(body string) app.Field {
 	for pair := range strings.SplitSeq(body, "&") {
 		key, value, _ := strings.Cut(pair, "=")
