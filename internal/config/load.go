@@ -299,9 +299,11 @@ const notDecoded = "it is not TOML, or not a value the setting takes (what the f
 // decodeErrors turns what decoding data, the file name, returned into one
 // error for each problem. An unknown key's gives the file, line and
 // column, and the key. Any other gives the file, and the line and column
-// and the whole key, with its table, when go-toml and failedKey can tell
-// them, in fixed text: never go-toml's own message, which may quote the
-// file, and so a secret in it.
+// when go-toml can tell them, in fixed text: never go-toml's own message,
+// which may quote the file, and so a secret in it. It names the key the
+// failure is in, as failedKey reads it, only as far as that key is a
+// section or a setting: TOML reads a line with no "=" as a key, so a value
+// pasted or wrapped onto a line of its own would be named in full.
 func decodeErrors(name string, data []byte, err error) []error {
 	if err == nil {
 		return nil
@@ -320,7 +322,7 @@ func decodeErrors(name string, data []byte, err error) []error {
 	}
 	row, col := de.Position()
 	where := fmt.Sprintf("%s:%d:%d", name, row, col)
-	if key := failedKey(data, offset(data, row, col)); len(key) > 0 {
+	if key := knownPrefix(failedKey(data, offset(data, row, col))); len(key) > 0 {
 		where += ": " + strings.Join(key, ".")
 	}
 	return []error{fmt.Errorf("%s: %w: %s", where, ErrInvalid, notDecoded)}

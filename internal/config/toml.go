@@ -144,6 +144,21 @@ func fromValue(l *layer, s setting, v any) bool {
 	return false
 }
 
+// knownPrefix returns the longest start of path, a key's parts, that
+// names a section or a setting as the settings table spells them: its
+// section, then the setting in it; none when its first part is no
+// section.
+func knownPrefix(path []string) []string {
+	n := 0
+	if len(path) > 0 && knownSection(path[0]) {
+		n = 1
+		if len(path) > 1 && knownSetting(path[0]+"."+path[1]) {
+			n = 2
+		}
+	}
+	return path[:n]
+}
+
 // knownSection reports whether name is a section the settings table
 // spells, exactly.
 func knownSection(name string) bool {

@@ -790,6 +790,65 @@ func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 			want:  "pisati.toml:3:1: keys" + fixed,
 			value: []string{needle},
 		},
+		// What TOML reads as a key, though it is a value on a line of its
+		// own: an error names only a known setting or table.
+		{
+			name:  "a quoted value on a line of its own",
+			file:  "[keys]\nmain_key_file = \"/k\"\n\"" + needle + "\"\n",
+			want:  "pisati.toml:3:" + strconv.Itoa(3+len(needle)) + ": keys" + fixed,
+			value: []string{needle},
+			crlf:  true,
+		},
+		{
+			name:  "a bare value on a line of its own",
+			file:  "[keys]\nab12cd34ef56\n",
+			want:  "pisati.toml:2:13: keys" + fixed,
+			value: []string{"ab12cd34ef56"},
+			crlf:  true,
+		},
+		{
+			name:  "a value after a dot, as a key's part",
+			file:  "[keys]\nmain_key . \"" + needle + "\"",
+			want:  "pisati.toml:2:" + strconv.Itoa(13+len(needle)) + ": keys.main_key" + fixed,
+			value: []string{needle},
+			crlf:  true,
+		},
+		{
+			name: "the rest of a URL wrapped onto a line of its own",
+			file: "[telemetry]\notlp_endpoint = \"https://" + user + "\"\n\":" + password + "@collector\"\n",
+			want: "pisati.toml:3:" + strconv.Itoa(14+len(password)) + ": telemetry" + fixed,
+			value: []string{
+				user, password, ":" + password, "collector",
+			},
+			crlf: true,
+		},
+		{
+			name:  "a base64 value on a line of its own",
+			file:  "[keys]\n" + needle + "==\n",
+			want:  "pisati.toml:2:" + strconv.Itoa(2+len(needle)) + ": keys" + fixed,
+			value: []string{needle},
+			crlf:  true,
+		},
+		{
+			name: "an empty quoted key with no value",
+			file: "[keys]\n\"\" =\n",
+			want: "pisati.toml:2:5: keys" + fixed,
+			crlf: true,
+		},
+		{
+			name:  "a quoted key that never closes",
+			file:  "[keys]\n\"" + needle,
+			want:  "pisati.toml:2:" + strconv.Itoa(1+len(needle)) + ": keys" + fixed,
+			value: []string{needle},
+			crlf:  true,
+		},
+		{
+			name:  "a table left open whose name is no section",
+			file:  "[" + needle + "\n",
+			want:  "pisati.toml:1:" + strconv.Itoa(2+len(needle)) + fixed,
+			value: []string{needle},
+			crlf:  true,
+		},
 		{
 			name:  "a time cut short at the end of the file",
 			file:  "[keys]\nmain_key = 1979-05-27T",
