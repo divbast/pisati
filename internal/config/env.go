@@ -5,6 +5,7 @@ package config
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -85,6 +86,14 @@ func splitList(v string) []string {
 // with PISATI_ in any case, but that name no setting: sorted, each once,
 // and nil when there are none. It leaves names as it was.
 //
+// It leaves out the variables Kubernetes sets for a Service named pisati,
+// in every container of the Service's namespace, Pisati's among them:
+// PISATI_SERVICE_HOST, PISATI_SERVICE_PORT and PISATI_SERVICE_PORT_<name>,
+// for each named port, PISATI_PORT, and PISATI_PORT_<port>_<protocol>,
+// alone or followed by _PROTO, _PORT or _ADDR, for each port, where
+// <protocol> is TCP, UDP or SCTP. No setting's variable takes one of these
+// shapes, so a misspelt one is still returned.
+//
 // Load already applies it to Sources.EnvNames and reports each name it
 // returns as ErrUnknown, so a caller of Load need not call it as well.
 func UnknownEnv(names []string) []string {
@@ -94,11 +103,53 @@ func UnknownEnv(names []string) []string {
 	}
 	var unknown []string
 	for _, name := range names {
-		if _, ok := known[name]; ok || len(name) < len(envPrefix) || !strings.EqualFold(name[:len(envPrefix)], envPrefix) {
+		if _, ok := known[name]; ok || len(name) < len(envPrefix) || !strings.EqualFold(name[:len(envPrefix)], envPrefix) ||
+			serviceLink(name) {
 			continue
 		}
 		unknown = append(unknown, name)
 	}
 	slices.Sort(unknown)
 	return slices.Compact(unknown)
+}
+
+// serviceLink reports whether name is one of the variables Kubernetes
+// sets for a Service named pisati, as UnknownEnv lists them. Kubernetes
+// writes them in capital letters, with a port's name in capitals and its
+// hyphens as underscores, and a port's number in decimal.
+func serviceLink(name string) bool {
+	rest, ok := strings.CutPrefix(name, envPrefix)
+	if !ok {
+		return false
+	}
+	switch rest {
+	case "SERVICE_HOST", "SERVICE_PORT", "PORT":
+		return true
+	}
+	if portName, ok := strings.CutPrefix(rest, "SERVICE_PORT_"); ok {
+		return portName != "" && !strings.ContainsFunc(portName, func(r rune) bool {
+			return (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_'
+		})
+	}
+	link, ok := strings.CutPrefix(rest, "PORT_")
+	if !ok {
+		return false
+	}
+	number, protocol, ok := strings.Cut(link, "_")
+	if !ok || !portNumber(number) {
+		return false
+	}
+	for _, p := range []string{"TCP", "UDP", "SCTP"} {
+		if part, ok := strings.CutPrefix(protocol, p); ok {
+			return part == "" || part == "_PROTO" || part == "_PORT" || part == "_ADDR"
+		}
+	}
+	return false
+}
+
+// portNumber reports whether s is a port, from 1 to 65535, in decimal as
+// Kubernetes writes it, with no leading zero.
+func portNumber(s string) bool {
+	n, err := strconv.ParseUint(s, 10, 16)
+	return err == nil && n > 0 && !strings.HasPrefix(s, "0")
 }
