@@ -329,7 +329,11 @@ generate-check:
 # Only the one that moves Pisati's pid file away sends it. A second
 # Ctrl-C, while Pisati stops, has the recipe send it a second SIGTERM, so
 # that it stops at once; the recipe still stops Vite and removes its run
-# directory before it returns.
+# directory before it returns. templ runs in the background, and the
+# recipe waits for it, as for the stop it sends: bash runs a trap at once
+# while it waits that way, whereas a command in the foreground holds every
+# trap until it exits, and a second Ctrl-C while templ itself stopped was
+# lost, or cut the recipe's own stop short.
 
 # Run Pisati in dev mode: Vite's dev server, and Pisati rebuilt as it changes
 [script("mise", "exec", "--", "bash", "-euo", "pipefail")]
@@ -346,9 +350,27 @@ dev:
         kill -TERM -- "-${pid}" 2>/dev/null || true
     fi
     EOF
+    templ=
+    # waitfor waits for the child pid to end. A signal ends a wait early,
+    # once its trap has run, so it waits again until the child is gone.
+    waitfor() {
+        while kill -0 "$1" 2>/dev/null; do wait "$1" 2>/dev/null || true; done
+    }
     finish() {
+        # A command run in the background ignores Ctrl-C, so the stop runs
+        # to its end; a second Ctrl-C meanwhile is held until it has.
+        halt=no
+        trap 'halt=yes' INT TERM
+        bash "${run}/stop" &
+        waitfor "$!"
         trap 'bash "${run}/halt"' INT TERM
-        bash "${run}/stop"
+        if [[ "${halt}" == yes ]]; then
+            bash "${run}/halt"
+        fi
+        # templ stops on the same Ctrl-C.
+        if [[ -n "${templ}" ]]; then
+            waitfor "${templ}"
+        fi
         # The prompt comes back once Pisati has stopped, after its last record.
         if pid=$(cat "${run}/stopping" 2>/dev/null); then
             while kill -0 "${pid}" 2>/dev/null; do sleep 0.1 || true; done
@@ -359,6 +381,7 @@ dev:
         kill 0
     }
     trap finish EXIT
+    trap 'exit 130' INT TERM
     pnpm exec vp dev &
     serve=$(cat <<'EOF'
     set -m
@@ -392,7 +415,9 @@ dev:
     EOF
     )
     SHELL=bash go tool -modfile=tools/go.mod templ generate --watch --proxy=http://localhost:8080 --open-browser=false \
-        --cmd="${serve}" --watch-pattern='(.+\.go$)|(.+\.templ$)'
+        --cmd="${serve}" --watch-pattern='(.+\.go$)|(.+\.templ$)' &
+    templ=$!
+    wait "${templ}"
 
 # The slow suites, which the dispatch-only workflows browser.yml and
 # fuzz.yml run too, and slow, below, before every push.
