@@ -582,14 +582,16 @@ func TestSessionsConcurrent(t *testing.T) {
 	clock := func() time.Time {
 		return time.UnixMilli(clockMillis.Add(61_000))
 	}
-	sessions := newSessions(t, s, clock, httpsBase)
+	// Logged, so that a touch that failed under the load, which Load logs
+	// and does not return, still fails the test.
+	sessions, logs := newLoggedSessions(t, s, clock, httpsBase)
 	ctx := t.Context()
 
 	// The sweeps read a clock of their own, which stays at the start, so
 	// that they neither move the requests' clock nor find a session
 	// expired.
 	start := time.UnixMilli(clockMillis.Load())
-	sweeper := newSessions(t, s, func() time.Time { return start }, httpsBase)
+	sweeper, sweeperLogs := newLoggedSessions(t, s, func() time.Time { return start }, httpsBase)
 
 	const goroutines, loads = 50, 20
 	var requests, sweeping sync.WaitGroup
@@ -664,6 +666,13 @@ func TestSessionsConcurrent(t *testing.T) {
 	}
 	if untouched != 0 {
 		t.Errorf("%d sessions never touched, want every one touched by its loads", untouched)
+	}
+	for _, l := range []*logBuffer{logs, sweeperLogs} {
+		for line := range strings.Lines(l.String()) {
+			if strings.Contains(line, `"level":"WARN"`) || strings.Contains(line, `"level":"ERROR"`) {
+				t.Errorf("logged under the load %s; want nothing at warning or above", line)
+			}
+		}
 	}
 }
 
