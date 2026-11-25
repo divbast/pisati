@@ -35,7 +35,9 @@ import (
 )
 
 // The conditions the package's errors report. Each error it returns for
-// one wraps it, and says which file, key or value is at fault.
+// one wraps it, and says which file, key or value is at fault. Their own
+// text does not show in those errors, which say in whole sentences what
+// is wrong.
 var (
 	// ErrInvalid is a value its rule refuses: the zero MainKey or
 	// Keyring, a nil argument, a source or path LoadMainKey cannot use, or
@@ -130,16 +132,16 @@ type Keyring struct {
 func OpenKeyring(ctx context.Context, s *store.Store, m MainKey, clock func() time.Time, rnd io.Reader) (*Keyring, error) {
 	var errs []error
 	if s.DB() == nil {
-		errs = append(errs, fmt.Errorf("crypto: open the keyring: %w store: it is not open", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "crypto.OpenKeyring was given a store that is not open, %s", bug))
 	}
 	if m.key == nil {
-		errs = append(errs, fmt.Errorf("crypto: open the keyring: %w main key: the zero MainKey holds none", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "crypto.OpenKeyring was given a MainKey that holds no key, %s", bug))
 	}
 	if clock == nil {
-		errs = append(errs, fmt.Errorf("crypto: open the keyring: %w clock: nil", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "crypto.OpenKeyring was given no clock, %s", bug))
 	}
 	if rnd == nil {
-		errs = append(errs, fmt.Errorf("crypto: open the keyring: %w random source: nil", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "crypto.OpenKeyring was given no random source, %s", bug))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
@@ -165,7 +167,7 @@ func OpenKeyring(ctx context.Context, s *store.Store, m MainKey, clock func() ti
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("crypto: open the keyring: %w", err)
+		return nil, wrap(err, "Pisati cannot load the data keys from the database")
 	}
 	k.keys, k.current = keys, current
 	return k, nil
@@ -182,7 +184,7 @@ func unwrapAll(m MainKey, rows []storedb.ListDataKeysRow) (map[keyID]dataKey, ke
 	for _, row := range rows {
 		id, ok := toKeyID(row.ID)
 		if !ok {
-			return nil, 0, fmt.Errorf("data key %d: its ID is not from 1 to %d", row.ID, uint32(math.MaxUint32))
+			return nil, 0, badKeyID(row.ID)
 		}
 		key, err := m.unwrap(id, row.Wrapped)
 		if errors.Is(err, errUnwrap) {
@@ -202,15 +204,18 @@ func unwrapAll(m MainKey, rows []storedb.ListDataKeysRow) (map[keyID]dataKey, ke
 			current = append(current, id)
 		case stateRetired:
 		default:
-			return nil, 0, fmt.Errorf("data key %d: its state %q is neither %s nor %s", row.ID, row.State, stateCurrent, stateRetired)
+			return nil, 0, fmt.Errorf("the database's data key %d has the state %q, which is neither %s nor %s, so the "+
+				"database is damaged", row.ID, row.State, stateCurrent, stateRetired)
 		}
 	}
 	if unwrapped < len(rows) {
-		return nil, 0, fmt.Errorf("%w: it unwraps %d of the %d data keys; give Pisati the main key that was backed up with this database",
-			ErrMainKeyMismatch, unwrapped, len(rows))
+		return nil, 0, explain(ErrMainKeyMismatch, "the main key decrypts %d of the database's %d data keys, so it is "+
+			"not the main key that encrypts them. Give Pisati the main key that encrypts this database's data keys",
+			unwrapped, len(rows))
 	}
 	if len(current) != 1 {
-		return nil, 0, fmt.Errorf("the database has %d current data keys, want exactly 1", len(current))
+		return nil, 0, fmt.Errorf("the database has %d current data keys, but it must have exactly 1, so it is damaged",
+			len(current))
 	}
 	return keys, current[0], nil
 }
@@ -224,7 +229,7 @@ func (k *Keyring) addKey(ctx context.Context, q *storedb.Queries) (keyID, dataKe
 	defer clear(key[:])
 	var nonce [nonceSize]byte
 	if err := k.read(key[:], nonce[:]); err != nil {
-		return 0, dataKey{}, fmt.Errorf("draw a data key: %w", err)
+		return 0, dataKey{}, wrap(err, "Pisati cannot get random bytes for a new data key")
 	}
 	next, err := q.NextDataKeyID(ctx)
 	if err != nil {
@@ -232,7 +237,8 @@ func (k *Keyring) addKey(ctx context.Context, q *storedb.Queries) (keyID, dataKe
 	}
 	id, ok := toKeyID(next)
 	if !ok {
-		return 0, dataKey{}, fmt.Errorf("the next data key ID, %d, is past %d", next, uint32(math.MaxUint32))
+		return 0, dataKey{}, fmt.Errorf("the next data key would have the ID %d, which is larger than the largest a "+
+			"data key can have, %d", next, uint32(math.MaxUint32))
 	}
 	wrapped, err := k.mainKey.wrap(nonce, id, key)
 	if err != nil {
@@ -265,9 +271,16 @@ func (k *Keyring) read(bufs ...[]byte) error {
 // OpenKeyring did not return.
 func (k *Keyring) opened() error {
 	if k == nil || k.keys == nil {
-		return fmt.Errorf("%w keyring: it was not opened with OpenKeyring", ErrInvalid)
+		return explain(ErrInvalid, "a crypto.Keyring that crypto.OpenKeyring did not return was used, %s", bug)
 	}
 	return nil
+}
+
+// badKeyID is the error for the data key whose row has the ID id, which no
+// data key can have.
+func badKeyID(id int64) error {
+	return fmt.Errorf("the database's data key %d has an ID that is not from 1 to %d, so the database is damaged", id,
+		uint32(math.MaxUint32))
 }
 
 // currentKey returns the current data key and its ID.

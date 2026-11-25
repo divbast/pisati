@@ -5,7 +5,6 @@ package crypto
 
 import (
 	"encoding/binary"
-	"fmt"
 	"math"
 )
 
@@ -45,16 +44,16 @@ const (
 // longer than 256 GiB, which XChaCha20-Poly1305 cannot seal.
 func (k *Keyring) Seal(plain, assoc []byte) ([]byte, error) {
 	if err := k.opened(); err != nil {
-		return nil, fmt.Errorf("crypto: seal: %w", err)
+		return nil, err
 	}
 	if len(plain) > maxPlain || len(assoc) > maxAssoc {
-		return nil, fmt.Errorf("crypto: seal: %w value: %d bytes with %d of associated data, more than XChaCha20-Poly1305 takes",
-			ErrInvalid, len(plain), len(assoc))
+		return nil, explain(ErrInvalid, "Pisati cannot encrypt a value of %d bytes, with %d bytes of associated data: "+
+			"that is more than XChaCha20-Poly1305 takes", len(plain), len(assoc))
 	}
 	id, dk := k.currentKey()
 	var nonce [nonceSize]byte
 	if err := k.read(nonce[:]); err != nil {
-		return nil, fmt.Errorf("crypto: seal: draw a nonce: %w", err)
+		return nil, wrap(err, "Pisati cannot get random bytes to encrypt a value with")
 	}
 	out := make([]byte, headerSize, sealedOverhead+len(plain))
 	out[0] = version
@@ -76,27 +75,31 @@ func (k *Keyring) Seal(plain, assoc []byte) ([]byte, error) {
 // error wrapping ErrInvalid.
 func (k *Keyring) Open(sealed, assoc []byte) ([]byte, error) {
 	if err := k.opened(); err != nil {
-		return nil, fmt.Errorf("crypto: open: %w", err)
+		return nil, err
 	}
+	const cannot = "Pisati cannot decrypt a value"
 	if len(sealed) < sealedOverhead {
-		return nil, fmt.Errorf("crypto: open: %w: %d bytes, want at least %d", ErrTooShort, len(sealed), sealedOverhead)
+		return nil, explain(ErrTooShort, "%s: it is %d bytes long, but an encrypted value is at least %d", cannot,
+			len(sealed), sealedOverhead)
 	}
 	if sealed[0] != version {
-		return nil, fmt.Errorf("crypto: open: %w: version %d", ErrUnknownVersion, sealed[0])
+		return nil, explain(ErrUnknownVersion, "%s: it is in format %d, but Pisati knows format %d only", cannot,
+			sealed[0], version)
 	}
 	id := keyID(binary.BigEndian.Uint32(sealed[1:headerSize]))
 	dk, ok := k.key(id)
 	if !ok {
-		return nil, fmt.Errorf("crypto: open: %w: data key %d", ErrUnknownKey, id)
+		return nil, explain(ErrUnknownKey, "%s: it is encrypted with the data key %d, which Pisati has not loaded", cannot, id)
 	}
 	// Seal makes no value longer; XChaCha20-Poly1305 would panic on one.
+	const notAuthentic = "it fails its check, so it is not a value Pisati encrypted there, or it has changed since"
 	if len(sealed)-sealedOverhead > maxPlain || len(assoc) > maxAssoc {
-		return nil, fmt.Errorf("crypto: open: %w: longer than any value Seal makes", ErrNotAuthentic)
+		return nil, explain(ErrNotAuthentic, "%s: it is longer than any value Pisati encrypts", cannot)
 	}
 	nonce, body := sealed[headerSize:headerSize+nonceSize], sealed[headerSize+nonceSize:]
 	plain, err := dk.aead().Open(nil, nonce, body, associated(sealed[:headerSize], assoc))
 	if err != nil {
-		return nil, fmt.Errorf("crypto: open: %w", ErrNotAuthentic)
+		return nil, explain(ErrNotAuthentic, "%s: %s", cannot, notAuthentic)
 	}
 	if plain == nil {
 		// The cipher opens an empty value as nil, which a caller would

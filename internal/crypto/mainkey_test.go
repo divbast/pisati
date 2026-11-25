@@ -91,7 +91,7 @@ func TestGeneratedMainKeyAndWarning(t *testing.T) {
 	if w.level != slog.LevelWarn || !strings.Contains(w.msg, "data volume") || w.attrs["path"] != keyPath {
 		t.Errorf("logged %s %q %v; want a warning that the key is on the data volume, naming %s", w.level, w.msg, w.attrs, keyPath)
 	}
-	if action := w.attrs["action"]; !strings.Contains(action, "back up") || !strings.Contains(action, "restore") ||
+	if action := strings.ToLower(w.attrs["action"]); !strings.Contains(action, "back up") || !strings.Contains(action, "restore") ||
 		!strings.Contains(action, "database") {
 		t.Errorf("the warning's action %q does not say to back the key up, and restore it, with the database", action)
 	}

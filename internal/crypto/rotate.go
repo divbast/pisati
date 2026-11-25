@@ -10,7 +10,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"regexp"
 	"strconv"
 
@@ -40,13 +39,13 @@ const (
 func Rewrap(ctx context.Context, s *store.Store, from, to MainKey) error {
 	var errs []error
 	if s.DB() == nil {
-		errs = append(errs, fmt.Errorf("crypto: rewrap the data keys: %w store: it is not open", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "crypto.Rewrap was given a store that is not open, %s", bug))
 	}
 	if from.key == nil {
-		errs = append(errs, fmt.Errorf("crypto: rewrap the data keys: %w old main key: the zero MainKey holds none", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "crypto.Rewrap was given an old MainKey that holds no key, %s", bug))
 	}
 	if to.key == nil {
-		errs = append(errs, fmt.Errorf("crypto: rewrap the data keys: %w new main key: the zero MainKey holds none", ErrInvalid))
+		errs = append(errs, explain(ErrInvalid, "crypto.Rewrap was given a new MainKey that holds no key, %s", bug))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return err
@@ -62,7 +61,7 @@ func Rewrap(ctx context.Context, s *store.Store, from, to MainKey) error {
 		for _, row := range rows {
 			id, ok := toKeyID(row.ID)
 			if !ok {
-				return fmt.Errorf("data key %d: its ID is not from 1 to %d", row.ID, uint32(math.MaxUint32))
+				return badKeyID(row.ID)
 			}
 			key, err := from.unwrap(id, row.Wrapped)
 			if errors.Is(err, errUnwrap) {
@@ -83,8 +82,8 @@ func Rewrap(ctx context.Context, s *store.Store, from, to MainKey) error {
 			rewrapped = append(rewrapped, storedb.RewrapDataKeyParams{Wrapped: wrapped, ID: row.ID})
 		}
 		if len(rewrapped) < len(rows) {
-			return fmt.Errorf("%w: the old main key unwraps %d of the %d data keys, so none is rewrapped",
-				ErrMainKeyMismatch, len(rewrapped), len(rows))
+			return explain(ErrMainKeyMismatch, "the main key in use decrypts %d of the database's %d data keys, so "+
+				"Pisati encrypts none of them with the new main key", len(rewrapped), len(rows))
 		}
 		for _, p := range rewrapped {
 			n, err := q.RewrapDataKey(ctx, p)
@@ -92,13 +91,14 @@ func Rewrap(ctx context.Context, s *store.Store, from, to MainKey) error {
 				return err
 			}
 			if n != 1 {
-				return fmt.Errorf("data key %d: %d rows rewrapped, want 1", p.ID, n)
+				return fmt.Errorf("the database changed %d rows, not 1, for the data key %d, so Pisati undid the "+
+					"change", n, p.ID)
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("crypto: rewrap the data keys: %w", err)
+		return wrap(err, "Pisati cannot encrypt the data keys with the new main key")
 	}
 	return nil
 }
@@ -120,14 +120,14 @@ func Rewrap(ctx context.Context, s *store.Store, from, to MainKey) error {
 // again. Rotates of one Keyring run one at a time.
 func Rotate(ctx context.Context, s *store.Store, k *Keyring) error {
 	if err := k.opened(); err != nil {
-		return fmt.Errorf("crypto: rotate the data key: %w", err)
+		return err
 	}
 	if s != k.store {
-		return fmt.Errorf("crypto: rotate the data key: %w store: it is not the one the keyring was opened on", ErrInvalid)
+		return explain(ErrInvalid, "crypto.Rotate was given a store other than the one its keyring was opened on, %s", bug)
 	}
 	kind, err := jobs.NewKind(reencryptKind)
 	if err != nil {
-		return fmt.Errorf("crypto: rotate the data key: %w", err)
+		return err
 	}
 	k.rotating.Lock()
 	defer k.rotating.Unlock()
@@ -148,14 +148,16 @@ func Rotate(ctx context.Context, s *store.Store, k *Keyring) error {
 			return err
 		}
 		if current != old {
-			return fmt.Errorf("the database's current data key is %d, not the keyring's, %d: open the keyring again", current, old)
+			return fmt.Errorf("the database's current data key is %d, but the keyring's is %d, so the keys changed "+
+				"after the keyring was opened. Open the keyring again", current, old)
 		}
 		retired, err := q.RetireDataKey(ctx, int64(old))
 		if err != nil {
 			return err
 		}
 		if retired != 1 {
-			return fmt.Errorf("data key %d: %d rows retired, want 1", old, retired)
+			return fmt.Errorf("the database changed %d rows, not 1, to retire the data key %d, so Pisati undid the "+
+				"change", retired, old)
 		}
 		if id, dk, err = k.addKey(ctx, q); err != nil {
 			return err
@@ -169,12 +171,12 @@ func Rotate(ctx context.Context, s *store.Store, k *Keyring) error {
 			// No key's ID is used twice, so this is a bug: say so, rather
 			// than leave the fields under the old key with no job to move
 			// them.
-			err = fmt.Errorf("a %s job for data key %d is queued already", reencryptKind, id)
+			err = fmt.Errorf("a %s job for the data key %d is in the queue already, %s", reencryptKind, id, bug)
 		}
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("crypto: rotate the data key: %w", err)
+		return wrap(err, "Pisati cannot make a new data key")
 	}
 	// Installed only now: a value sealed under a key whose transaction
 	// then failed would have no key left to open it.
@@ -221,8 +223,8 @@ func (f Field) check() error {
 		{"table", f.Table}, {"ID column", f.IDColumn}, {"column", f.Column},
 	} {
 		if !identifier.MatchString(n.name) {
-			return fmt.Errorf("crypto: register a field: %w %s name %q: want a lower-case letter or underscore, then lower-case letters, digits and underscores",
-				ErrInvalid, n.what, n.name)
+			return explain(ErrInvalid, "crypto.NewReencrypter was given a Field whose %s name, %q, is not a lower-case "+
+				"letter or underscore followed by lower-case letters, digits and underscores, %s", n.what, n.name, bug)
 		}
 	}
 	return nil
@@ -258,7 +260,7 @@ type registered struct {
 func NewReencrypter(k *Keyring, fields ...Field) (*Reencrypter, error) {
 	var errs []error
 	if err := k.opened(); err != nil {
-		errs = append(errs, fmt.Errorf("crypto: register the fields: %w", err))
+		errs = append(errs, err)
 	}
 	regs := make([]registered, 0, len(fields))
 	seen := map[[2]string]bool{}
@@ -269,7 +271,8 @@ func NewReencrypter(k *Keyring, fields ...Field) (*Reencrypter, error) {
 		}
 		where := [2]string{f.Table, f.Column}
 		if seen[where] {
-			errs = append(errs, fmt.Errorf("crypto: register a field: %w field %s.%s: it is registered already", ErrInvalid, f.Table, f.Column))
+			errs = append(errs, explain(ErrInvalid, "crypto.NewReencrypter was given the Field %s.%s twice, %s", f.Table,
+				f.Column, bug))
 			continue
 		}
 		seen[where] = true
@@ -331,14 +334,17 @@ func (r *Reencrypter) Kind() jobs.Kind {
 // with it.
 func (r *Reencrypter) Handle(ctx context.Context, payload []byte) error {
 	if r == nil || r.keyring == nil {
-		return &jobs.Permanent{Err: errors.New("crypto: re-encrypt: the Reencrypter was not made by NewReencrypter")}
+		return &jobs.Permanent{Err: fmt.Errorf("the re-encryption job ran on a crypto.Reencrypter that "+
+			"crypto.NewReencrypter did not make, %s", bug)}
 	}
 	if len(payload) != 4 {
-		return &jobs.Permanent{Err: fmt.Errorf("crypto: re-encrypt: the payload is %d bytes, want a data key's four-byte ID", len(payload))}
+		return &jobs.Permanent{Err: fmt.Errorf("the re-encryption job's payload is %d bytes, but it must be the 4-byte "+
+			"ID of a data key, so the job cannot run", len(payload))}
 	}
 	target := keyID(binary.BigEndian.Uint32(payload))
 	if _, ok := r.keyring.key(target); !ok {
-		return fmt.Errorf("crypto: re-encrypt for data key %d: the keyring does not hold it, as the key was made since the keyring was opened; it will once Pisati restarts", target)
+		return fmt.Errorf("the re-encryption job is for the data key %d, which this Pisati has not loaded, as the key "+
+			"was made after this Pisati loaded its keys. The job can run once pisati serve restarts", target)
 	}
 	for _, f := range r.fields {
 		if err := r.reencrypt(ctx, f); err != nil {
@@ -353,14 +359,14 @@ func (r *Reencrypter) reencrypt(ctx context.Context, f registered) error {
 	for {
 		resealed, unopened, err := r.pass(ctx, f)
 		if err != nil {
-			return fmt.Errorf("crypto: re-encrypt %s.%s: %w", f.Table, f.Column, err)
+			return wrap(err, "Pisati cannot re-encrypt the values in %s.%s", f.Table, f.Column)
 		}
 		if resealed > 0 {
 			continue
 		}
 		if unopened > 0 {
-			return fmt.Errorf("crypto: re-encrypt %s.%s: %d values open under no key in the keyring, so they are left as they are",
-				f.Table, f.Column, unopened)
+			return fmt.Errorf("%d values in %s.%s cannot be decrypted with any data key that Pisati holds, so Pisati "+
+				"leaves them as they are", unopened, f.Table, f.Column)
 		}
 		return nil
 	}
@@ -448,8 +454,8 @@ func (r *Reencrypter) batch(ctx context.Context, f registered, after sql.NullInt
 			if n, err := result.RowsAffected(); err != nil {
 				return err
 			} else if n != 1 {
-				return fmt.Errorf("row %d: %d rows have this %s, want 1: the ID column must be a unique integer key",
-					v.id, n, f.IDColumn)
+				return fmt.Errorf("%d rows have the %s %d, not 1, so Pisati undid this batch: the column %s must be a "+
+					"unique integer key, %s", n, f.IDColumn, v.id, f.IDColumn, bug)
 			}
 			res.resealed++
 		}
@@ -465,7 +471,7 @@ func (r *Reencrypter) batch(ctx context.Context, f registered, after sql.NullInt
 // from a Field's names, which the generated queries cannot hold.
 func inTx(ctx context.Context, db *sql.DB, fn func(*sql.Tx) error) (err error) {
 	if db == nil {
-		return errors.New("the keyring's store is not open")
+		return errors.New("the keyring's store is not open, which is a bug in Pisati")
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
