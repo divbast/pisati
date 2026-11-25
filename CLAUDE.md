@@ -73,6 +73,7 @@ breaking change.
 | Processes | **one**, the app as PID 1: `pisati serve` |
 | Healthy | the shipped probe, `pisati health`: `GET /healthz` on 8081 answers **200** within 4 s, as it does while Pisati can read its database |
 | Engine healthcheck | Docker runs it automatically. **Podman does not** — pass `--health-cmd` yourself |
+| Lockfile label | `io.github.divbast.scan.lockfiles` is `/usr/share/doc/pisati/pnpm-lock.yaml`, the lockfile the image holds, whose packages divbast/ci's scan reads from its v4.25.0 |
 
 - **Podman never sees this image's `HEALTHCHECK`.** Its `libimage` reads a
   healthcheck only from a Docker-media-type manifest; divbast images publish
@@ -171,7 +172,9 @@ breaking change.
   stylesheets and scripts are compiled into the binary, and no
   `node_modules` ships. The `pnpm-lock.yaml` they were built from is at
   `/usr/share/doc/pisati/pnpm-lock.yaml`, and `TestImageCarriesLockfile`
-  fails unless that is this repository's own
+  fails unless that is this repository's own. The image's label
+  `io.github.divbast.scan.lockfiles` names it, and
+  `TestImageNamesItsLockfile` fails unless the label is exactly that path
 
 ## Where the shared parts live
 

@@ -70,6 +70,9 @@ LABEL org.opencontainers.image.source="https://github.com/divbast/pisati" \
     org.opencontainers.image.title="pisati" \
     org.opencontainers.image.version="${PISATI_VERSION}" \
     org.opencontainers.image.licenses="AGPL-3.0-only"
+# Names the lockfile above to divbast/ci's scan, which then scans the npm
+# packages it records along with the image's own
+LABEL io.github.divbast.scan.lockfiles="/usr/share/doc/pisati/pnpm-lock.yaml"
 
 EXPOSE 8080 8081
 # Exec form: the shell form would need /bin/sh, which the image lacks.
