@@ -159,9 +159,10 @@ func TestKeysRewrapNeverShowsAKeyGivenAsItsFile(t *testing.T) {
 
 func TestKeyGivenAsAnArgumentNeverShown(t *testing.T) {
 	// A key pasted with no flag before it, in place of
-	// --new-main-key-file's value, which kong refuses as an argument
-	// it did not expect; and a key among the arguments of a command that
-	// takes none, after a flag's value.
+	// --new-main-key-file's value, which kong refuses as an argument it
+	// did not expect; a key among the arguments of a command that takes
+	// none; and a command line refused for another reason, which holds a
+	// key as a flag's value.
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		t.Fatal(err)
@@ -171,6 +172,8 @@ func TestKeyGivenAsAnArgumentNeverShown(t *testing.T) {
 		{"keys", "rewrap", key},
 		{"keys", "rewrap", "--new-main-key-file", "/run/secrets/new.key", key},
 		{"keys", "rotate", key + "\n"},
+		// A flag's value after "=", which the parser's error may quote.
+		{"keys", "rewrap", "--new-main-key-file=" + key, "and-more"},
 	} {
 		s := newSite(t)
 		r := s.run(t, args...)
