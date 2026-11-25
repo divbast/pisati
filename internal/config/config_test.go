@@ -2076,6 +2076,9 @@ func FuzzLoad(f *testing.F) {
 	f.Add("", "[server]\nBAse_url=\"http://127.0.0.1\"", "PISATI_TELEMETRY_OTLP_ENDPOINT=http://A/ ", "/", false)
 	// A table and a key in another case, which go-toml alone would match.
 	f.Add("[SERVER]\nbase_url = \"https://blog.example.org\"\n", "[log]\nLEVEL = \"debug\"\n", "PISATI_SERVER_BASE_URL=https://b.example.org", "", false)
+	// A file that fails at its top, in no table, as an expression before
+	// it, which prefixed adds, must not move it into one.
+	f.Add("log.level = 1979-05-27T\nserver.listen = Ж\n", "", "PISATI_SERVER_BASE_URL=https://b.example.org", "", false)
 	// Files that end where a value is missing or left open, as the value
 	// needled puts after them would be its own.
 	for _, file := range []string{
@@ -2108,6 +2111,7 @@ func FuzzLoad(f *testing.F) {
 		}
 
 		needled(t, file)
+		prefixed(t, file)
 		cfg, err := s.load(t.Context())
 		again, errAgain := s.load(t.Context())
 		if fmt.Sprint(err) != fmt.Sprint(errAgain) || !reflect.DeepEqual(cfg, again) {
@@ -2118,6 +2122,7 @@ func FuzzLoad(f *testing.F) {
 				t.Errorf("Load failed with %v but returned %+v", err, cfg)
 			}
 			errorsAreTheAPI(t, err)
+			namesKnownKeys(t, err)
 			return
 		}
 		valid(t, cfg)
@@ -2135,37 +2140,117 @@ const notDecoded = "it is not TOML, or not a value the setting takes (what the f
 // needle is a value no fixed text holds by chance.
 const needle = "Qz9vNEEDLEq7Zk"
 
+// decodeError is one error, of those Load joins, for a file that does not
+// decode: its file, its line and column when it has them, and the key it
+// names, "" when it names none.
+type decodeError struct {
+	file     string
+	row, col int
+	key      string
+}
+
+// decodeErrorPart reads a decode error from msg, an error Load joins, and
+// reports whether msg is one: its fixed text after its file, its line and
+// column, or neither, and a key, or none.
+func decodeErrorPart(msg string) (decodeError, bool) {
+	head, ok := strings.CutSuffix(msg, ": invalid: "+notDecoded)
+	if !ok {
+		return decodeError{}, false
+	}
+	file, rest, _ := strings.Cut(head, ":")
+	var d decodeError
+	d.file = file
+	if n, err := fmt.Sscanf(rest, "%d:%d", &d.row, &d.col); err == nil && n == 2 {
+		_, rest, _ = strings.Cut(rest, ":")
+		_, rest, _ = strings.Cut(rest, ":")
+	}
+	d.key = strings.TrimPrefix(rest, " ")
+	return d, true
+}
+
+// decodeErrorsOf returns the decode errors err joins for the file name.
+func decodeErrorsOf(err error, name string) []decodeError {
+	var errs []decodeError
+	if err == nil {
+		return nil
+	}
+	for _, part := range errorParts(err) {
+		if d, ok := decodeErrorPart(part.Error()); ok && d.file == name {
+			errs = append(errs, d)
+		}
+	}
+	return errs
+}
+
+// namesKnownKeys fails t unless every key a decode error err joins names
+// is a section or a setting, as the settings table spells them.
+func namesKnownKeys(t *testing.T, err error) {
+	t.Helper()
+	known := map[string]bool{"": true}
+	for _, r := range config.Table() {
+		section, _, _ := strings.Cut(r.Key, ".")
+		known[section], known[r.Key] = true, true
+	}
+	for _, part := range errorParts(err) {
+		if d, ok := decodeErrorPart(part.Error()); ok && !known[d.key] {
+			t.Errorf("error %q names %q, which is no section or setting", part, d.key)
+		}
+	}
+}
+
+// loadAlone returns what Load returns for text as pisati.toml, with a base
+// URL in the environment and nothing else.
+func loadAlone(t *testing.T, text string) error {
+	t.Helper()
+	_, err := setup{
+		files: fstest.MapFS{"pisati.toml": tomlFile(text)},
+		env:   env{"PISATI_SERVER_BASE_URL": baseURL},
+	}.load(t.Context())
+	return err
+}
+
 // needled fails t when a decode error for file, followed by a line that
-// holds needle quoted, holds needle but as the key it is on that line of
-// its own. The line is the value a key the file ends with may miss, or
-// one a string or an array left open at its end may hold.
+// holds needle quoted, holds needle anywhere, or names a key that is no
+// section or setting. The line is the value a key the file ends with may
+// miss, or one a string or an array left open at its end may hold, or a
+// line TOML reads as a key: none is a key an error may name.
 func needled(t *testing.T, file string) {
 	t.Helper()
 	if strings.Contains(file, needle) {
 		return
 	}
-	line := strings.Count(file, "\n") + 2
-	_, err := setup{
-		files: fstest.MapFS{"pisati.toml": tomlFile(file + "\n\"" + needle + "\"\n")},
-		env:   env{"PISATI_SERVER_BASE_URL": baseURL},
-	}.load(t.Context())
-	if err == nil {
+	err := loadAlone(t, file+"\n\""+needle+"\"\n")
+	namesKnownKeys(t, err)
+	for _, part := range errorParts(err) {
+		if _, ok := decodeErrorPart(part.Error()); ok && strings.Contains(part.Error(), needle) {
+			t.Errorf("error %q, for %q and the line after it, holds the value on that line", part, file)
+		}
+	}
+}
+
+// unmoved is a key at the top of a file, with a string of many lines that
+// holds a line like a table header, quotes and a comment: what is after it
+// is still at the top, and in no table.
+const unmoved = needle + "_x = '''\n[log]\n\"\"\" # not a comment\n'''\n"
+
+// prefixed fails t unless file, after unmoved, gives the decode errors it
+// gives alone, lines apart: the expressions before one that fails do not
+// change the key its error names.
+func prefixed(t *testing.T, file string) {
+	t.Helper()
+	if strings.Contains(file, needle) || strings.HasPrefix(file, "\ufeff") {
 		return
 	}
-	for _, part := range errorParts(err) {
-		msg := part.Error()
-		var row, col int
-		if _, scanErr := fmt.Sscanf(msg, "pisati.toml:%d:%d:", &row, &col); scanErr != nil || !strings.HasSuffix(msg, ": invalid: "+notDecoded) {
-			continue
+	alone := decodeErrorsOf(loadAlone(t, file), "pisati.toml")
+	after := decodeErrorsOf(loadAlone(t, unmoved+file), "pisati.toml")
+	lines := strings.Count(unmoved, "\n")
+	for i := range after {
+		if after[i].row > 0 {
+			after[i].row -= lines
 		}
-		where := fmt.Sprintf("pisati.toml:%d:%d: ", row, col)
-		key := strings.TrimSuffix(strings.TrimPrefix(msg, where), ": invalid: "+notDecoded)
-		if row == line && (key == needle || strings.HasSuffix(key, "."+needle)) {
-			continue // the line read as a key, which an error may name
-		}
-		if strings.Contains(msg, needle) {
-			t.Errorf("error %q, for %q and the line after it, holds the value on that line", msg, file)
-		}
+	}
+	if !slices.Equal(alone, after) {
+		t.Errorf("decode errors for %q are %+v, but %+v after a string of many lines at the top", file, alone, after)
 	}
 }
 
