@@ -5,7 +5,6 @@ package config
 
 import (
 	"bytes"
-	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -53,7 +52,11 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 		table, isTable := doc[tableName].(map[string]any)
 		section := strings.ToLower(tableName)
 		if tableName != section || !knownSection(section) {
-			unknown = append(unknown, fmt.Errorf("%s: %s: %w", name, tableName, ErrUnknown))
+			what := aKey
+			if isTable {
+				what = aTable
+			}
+			unknown = append(unknown, unknownName(name, what, tableName, section))
 			if knownSection(section) {
 				for _, t := range tablesOf(doc[tableName]) {
 					for key := range t {
@@ -66,15 +69,16 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 			continue
 		}
 		if !isTable {
-			wrongType = append(wrongType, fmt.Errorf("%s: %s: %w: %s", name, tableName, ErrInvalid, notDecoded))
+			wrongType = append(wrongType, decodeError(name, 0, 0, []string{tableName}))
 			continue
 		}
 		for _, key := range slices.Sorted(maps.Keys(table)) {
 			if knownSetting(section + "." + key) {
 				continue
 			}
-			unknown = append(unknown, fmt.Errorf("%s: %s.%s: %w", name, tableName, key, ErrUnknown))
-			if s := section + "." + strings.ToLower(key); knownSetting(s) {
+			s := section + "." + strings.ToLower(key)
+			unknown = append(unknown, unknownName(name, aKey, tableName+"."+key, s))
+			if knownSetting(s) {
 				otherCase[s] = true
 			}
 		}
@@ -88,10 +92,33 @@ func fromMap(name string, doc map[string]any) (l layer, unknown, wrongType []err
 			continue
 		}
 		if !fromValue(&l, s, v) {
-			wrongType = append(wrongType, fmt.Errorf("%s: %s: %w: %s", name, s.key, ErrInvalid, notDecoded))
+			wrongType = append(wrongType, decodeError(name, 0, 0, strings.Split(s.key, ".")))
 		}
 	}
 	return l, unknown, wrongType, otherCase
+}
+
+// What unknownName calls a name the file holds.
+const (
+	aKey   = "key"
+	aTable = "table"
+)
+
+// unknownName is the problem of written, a table or a key, as what says,
+// that the file name holds, which is no table or setting as the settings
+// table spells them. lower is written in lower case: when that is a table
+// or a setting of Pisati's, the problem is the case alone.
+func unknownName(name, what, written, lower string) error {
+	if knownSection(lower) || knownSetting(lower) {
+		return refuse(ErrUnknown, "the configuration file %s has the %s %s, but Pisati's tables and keys are written "+
+			"in lower case. Write it as %s", name, what, written, lower)
+	}
+	setting := "setting"
+	if what == aTable {
+		setting = "table"
+	}
+	return refuse(ErrUnknown, "the configuration file %s has the %s %s, but Pisati has no %s of that name. Check its "+
+		"spelling, or remove it", name, what, written, setting)
 }
 
 // tablesOf returns the tables v holds, as go-toml decoded it into a map:

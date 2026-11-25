@@ -66,16 +66,17 @@ func TestUnknownEnvRefused(t *testing.T) {
 		command []string
 		line    string
 	}{
-		{[]string{"serve"}, "pisati: PISATI_BOGUS: unknown setting."},
-		{[]string{"migrate"}, "pisati: PISATI_BOGUS: unknown setting."},
-		{[]string{"backup", "/nowhere/copy.db"}, "pisati: PISATI_BOGUS: unknown setting."},
-		{[]string{"health"}, "config: PISATI_BOGUS: unknown setting."},
+		{[]string{"serve"}, "pisati: the environment variable PISATI_BOGUS is set, but"},
+		{[]string{"migrate"}, "pisati: the environment variable PISATI_BOGUS is set, but"},
+		{[]string{"backup", "/nowhere/copy.db"}, "pisati: the environment variable PISATI_BOGUS is set, but"},
+		{[]string{"health"}, "config: the environment variable PISATI_BOGUS is set, but"},
 	} {
 		s := newSite(t)
 		s.env["PISATI_BOGUS"] = "1"
 		r := s.run(t, tc.command...)
-		if r.code != 1 || r.line(t) != tc.line || r.stdout != "" {
-			t.Errorf("pisati %q with PISATI_BOGUS set = %d, %q, %q; want 1 and %q", tc.command, r.code, r.stdout, r.stderr, tc.line)
+		if line := r.line(t); r.code != 1 || !strings.HasPrefix(line, tc.line) || !holdsAll(line, nil) || r.stdout != "" {
+			t.Errorf("pisati %q with PISATI_BOGUS set = %d, %q, %q; want 1 and one line starting %q", tc.command, r.code,
+				r.stdout, r.stderr, tc.line)
 		}
 	}
 }
@@ -96,7 +97,7 @@ func TestConfigProblemsOneLineEach(t *testing.T) {
 		if r.code != 1 || len(lines) != 2 {
 			t.Fatalf("pisati %q with two problems = %d, %q; want 1 and two lines", tc.command, r.code, r.stderr)
 		}
-		for i, want := range []string{"PISATI_BOGUS: unknown setting.", "server.base_url"} {
+		for i, want := range []string{"the environment variable PISATI_BOGUS is set", "server.base_url"} {
 			if !strings.HasPrefix(lines[i], tc.prefix) || !strings.Contains(lines[i], want) || !strings.HasSuffix(lines[i], ".") {
 				t.Errorf("pisati %q: line %d is %q, want it to start %q, name %q and end with a full stop",
 					tc.command, i+1, lines[i], tc.prefix, want)
@@ -118,10 +119,13 @@ func TestConfigValueOneLine(t *testing.T) {
 		s := newSite(t)
 		s.env["PISATI_SERVER_LISTEN"] = "bogus"
 		r := s.run(t, tc.command...)
-		want := tc.prefix + `server.listen (PISATI_SERVER_LISTEN): invalid value "bogus": it is not host:port; ` +
-			"want host:port, with a port from 1 to 65535."
-		if r.code != 1 || r.stderr != want+"\n" {
-			t.Errorf("pisati %q with a bad listen address = %d, %q; want 1, and the one line %q", tc.command, r.code, r.stderr, want)
+		want := []string{
+			tc.prefix + `server.listen (PISATI_SERVER_LISTEN) is set to "bogus", which is not written as host:port.`,
+			"Set it to host:port, with a port from 1 to 65535",
+		}
+		if r.code != 1 || strings.Count(r.stderr, "\n") != 1 || !holdsAll(strings.TrimSuffix(r.stderr, "\n"), want) {
+			t.Errorf("pisati %q with a bad listen address = %d, %q; want 1, and one line holding each of %q", tc.command,
+				r.code, r.stderr, want)
 		}
 	}
 }
@@ -253,7 +257,8 @@ func TestDirectoryVariablesAmongOtherProblems(t *testing.T) {
 			t.Fatalf("%s bad, PISATI_BOGUS set, no base URL: pisati migrate = %d, %q; want 1 and %d lines", tc.name, r.code, r.stderr, want)
 		}
 		text := r.stderr
-		if !strings.Contains(text, "pisati: "+tc.name+` is set to "relative"`) || !strings.Contains(text, "pisati: PISATI_BOGUS: unknown setting.") {
+		if !strings.Contains(text, "pisati: "+tc.name+` is set to "relative"`) ||
+			!strings.Contains(text, "pisati: the environment variable PISATI_BOGUS is set") {
 			t.Errorf("%s bad: the lines are %q, want the variable and PISATI_BOGUS each named", tc.name, lines)
 		}
 		if named := strings.Contains(text, "server.base_url"); named != tc.missing {

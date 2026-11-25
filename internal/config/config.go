@@ -29,7 +29,9 @@ import (
 
 // The conditions Load's errors report. Each error Load returns names the
 // setting, file or variable at fault, and wraps one of these, or, for a
-// source it could not read, that source's own error.
+// source it could not read, that source's own error. Their own text never
+// shows in the errors Load returns, which say in whole sentences what is
+// wrong and what to do.
 var (
 	// ErrInvalid is a value its rule refuses, or a file that is not TOML.
 	ErrInvalid = errors.New("invalid")
@@ -38,6 +40,67 @@ var (
 	// ErrMissing is a setting that has no default and was not given.
 	ErrMissing = errors.New("missing")
 )
+
+// problem is one problem Load reports: a message of Pisati's own, worded
+// for the operator, around err, the sentinel it is, or the error of a
+// source that could not be read, which errors.Is and errors.AsType still
+// find.
+type problem struct {
+	msg string
+	err error
+}
+
+func (p *problem) Error() string { return p.msg }
+func (p *problem) Unwrap() error { return p.err }
+
+// refuse returns the problem err is, in the words format and args give.
+func refuse(err error, format string, args ...any) error {
+	return &problem{msg: fmt.Sprintf(format, args...), err: err}
+}
+
+// badValue is a value that its setting's rule refuses: why, as what
+// follows "which" or "that", and fix, a sentence on what to give instead.
+// The value is shown quoted, unless hidden says why it must not be: a URL
+// may hold a password, and a path may be a secret given in its place.
+// item says the value is one item of a list.
+type badValue struct {
+	value, hidden string
+	item          bool
+	why, fix      string
+}
+
+func (b *badValue) Error() string {
+	if b.hidden != "" {
+		return "the value " + b.why + ". " + b.fix + ". The value is not shown, because " + b.hidden
+	}
+	return "the value " + strconv.Quote(b.value) + " " + b.why + ". " + b.fix
+}
+
+func (b *badValue) Unwrap() error { return ErrInvalid }
+
+// of says b of what label names: a setting, with its variable, or a
+// variable alone.
+func (b *badValue) of(label string) string {
+	switch {
+	case b.hidden != "":
+		return label + " is set to a value that " + b.why + ". " + b.fix +
+			". Pisati does not show the value, because " + b.hidden
+	case b.item:
+		return label + " holds " + strconv.Quote(b.value) + ", which " + b.why + ". " + b.fix
+	}
+	return label + " is set to " + strconv.Quote(b.value) + ", which " + b.why + ". " + b.fix
+}
+
+// whyURLHidden is why a URL is never shown.
+const whyURLHidden = "a URL may hold a password"
+
+// baseURLFix says what server.base_url takes.
+const baseURLFix = "Set it to an https URL with no path, such as https://blog.example.org; or, for development on " +
+	"this machine, an http URL on localhost, 127.0.0.1 or [::1], such as http://localhost:8080"
+
+// listenFix says what a listen address takes.
+const listenFix = "Set it to host:port, with a port from 1 to 65535, such as 127.0.0.1:8080, or :8080 for every " +
+	"address of this machine"
 
 // Config is Pisati's whole configuration. In one that Load returns
 // without an error, every field holds a value its type's rules accept.
@@ -168,17 +231,17 @@ type BaseURL struct {
 // that says why it is not one, without repeating s, which may hold a
 // password. A path of exactly "/" is accepted and left out.
 func ParseBaseURL(s string) (BaseURL, error) {
-	u, err := parseWebURL(s)
-	if err == nil {
+	u, why := parseWebURL(s)
+	if why == "" {
 		if p := u.EscapedPath(); p != "" && p != "/" {
-			err = errors.New("it has a path")
+			why = "has a path after its host"
 		} else if u.Scheme == "http" && !loopback(u.Hostname()) {
-			err = errors.New("it is plain http away from localhost")
+			why = "is an http URL on a host other than localhost, 127.0.0.1 or [::1], but away from this machine " +
+				"the blog must be served over https"
 		}
 	}
-	if err != nil {
-		return BaseURL{}, fmt.Errorf("%w value: %w; want https://host[:port], or http:// on localhost, 127.0.0.1 or [::1] alone "+
-			"(the value is not shown, as a URL may hold a password)", ErrInvalid, err)
+	if why != "" {
+		return BaseURL{}, &badValue{hidden: whyURLHidden, why: why, fix: baseURLFix}
 	}
 	return BaseURL{
 		origin: u.Scheme + "://" + u.Host,
@@ -216,33 +279,49 @@ type ListenAddr struct {
 // error wrapping ErrInvalid that says why it is not one. The host is
 // empty, an IP address (an IPv6 one in brackets) or a host name.
 func ParseListenAddr(s string) (ListenAddr, error) {
-	a, err := parseListenAddr(s)
-	if err != nil {
-		return ListenAddr{}, fmt.Errorf("%w value %q: %w; want host:port, with a port from 1 to 65535", ErrInvalid, s, err)
+	a, why, fix := parseListenAddr(s)
+	if why != "" {
+		return ListenAddr{}, &badValue{value: s, why: why, fix: fix}
 	}
 	return a, nil
 }
 
-func parseListenAddr(s string) (ListenAddr, error) {
+// parseListenAddr returns s as a ListenAddr, or why it is not one and what
+// to give instead.
+func parseListenAddr(s string) (_ ListenAddr, why, fix string) {
 	host, portText, err := net.SplitHostPort(s)
 	if err != nil {
-		return ListenAddr{}, errors.New("it is not host:port")
+		return ListenAddr{}, "is not written as host:port", listenFix
 	}
-	port, err := parsePort(portText)
-	if err != nil {
-		return ListenAddr{}, err
+	port, why := parsePort(portText)
+	if why != "" {
+		return ListenAddr{}, why, listenFix
 	}
 	bracketed := strings.HasPrefix(s, "[")
 	if addr, err := netip.ParseAddr(host); err == nil {
-		if addr.Is6() != bracketed {
-			return ListenAddr{}, errors.New("only an IPv6 address goes in brackets")
+		if why, fix := brackets(addr, bracketed); why != "" {
+			return ListenAddr{}, why, fix
 		}
-		return ListenAddr{host: addr.String(), port: port}, nil
+		return ListenAddr{host: addr.String(), port: port}, "", ""
 	}
 	if host != "" && (bracketed || !hostName(host)) {
-		return ListenAddr{}, errors.New("its host is not a host name or an IP address")
+		return ListenAddr{}, "has a host that is neither a host name nor an IP address", listenFix
 	}
-	return ListenAddr{host: strings.ToLower(host), port: port}, nil
+	return ListenAddr{host: strings.ToLower(host), port: port}, "", ""
+}
+
+// brackets returns why addr, written in brackets when bracketed, is not
+// written as it must be, and what to do, or "" for both when it is: an
+// IPv6 address goes in brackets, and only an IPv6 address does.
+func brackets(addr netip.Addr, bracketed bool) (why, fix string) {
+	switch {
+	case addr.Is6() && !bracketed:
+		return "has an IPv6 address that is not in brackets [ ]", "Write an IPv6 address in brackets, as in [::1]"
+	case !addr.Is6() && bracketed:
+		return "has brackets [ ] around a host that is not an IPv6 address",
+			"Write brackets only around an IPv6 address, as in [::1]"
+	}
+	return "", ""
 }
 
 // String returns the address as host:port, which ParseListenAddr gives
@@ -341,10 +420,12 @@ func ParseOptionalURL(s string) (OptionalURL, error) {
 	if s == "" {
 		return OptionalURL{}, nil
 	}
-	u, err := parseWebURL(s)
-	if err != nil {
-		return OptionalURL{}, fmt.Errorf("%w value: %w; want an http or https URL "+
-			"(the value is not shown, as a URL may hold a password)", ErrInvalid, err)
+	u, why := parseWebURL(s)
+	if why != "" {
+		return OptionalURL{}, &badValue{
+			hidden: whyURLHidden, why: why,
+			fix: "Set it to an https or http URL, or to nothing",
+		}
 	}
 	return OptionalURL{u: u, set: true}, nil
 }
@@ -356,28 +437,28 @@ func (o OptionalURL) Get() (url.URL, bool) {
 
 // parseWebURL returns s as an absolute http or https URL with a host and
 // no user information, query or fragment, whose path holds no character
-// a URL must percent-encode unescaped, its host in canonical form. Its
-// errors say why s is not one, without repeating s.
-func parseWebURL(s string) (url.URL, error) {
+// a URL must percent-encode unescaped, its host in canonical form; or why
+// s is not one, as what follows "a value that", which never repeats s.
+func parseWebURL(s string) (_ url.URL, why string) {
 	// Checked on the text, since url.Parse keeps no trace of an empty
 	// query or fragment, and refuses a control character only as no URL
 	// at all.
 	switch {
 	case strings.ContainsAny(s, "?#"):
-		return url.URL{}, errors.New("it has a query or a fragment")
+		return url.URL{}, `has a query, after "?", or a fragment, after "#"`
 	case strings.ContainsFunc(s, control):
-		return url.URL{}, errors.New("it holds a control character")
+		return url.URL{}, "has a control character in it, such as a tab or a line break"
 	}
 	u, err := url.Parse(s)
 	switch {
 	case err != nil:
-		return url.URL{}, errors.New("it is not a URL")
+		return url.URL{}, "cannot be read as a URL"
 	case u.Scheme != "https" && u.Scheme != "http":
-		return url.URL{}, errors.New("its scheme is not https or http")
+		return url.URL{}, "is not an https or http URL"
 	case u.Opaque != "" || u.Host == "":
-		return url.URL{}, errors.New("it has no host")
+		return url.URL{}, `has no host after "//", as in https://blog.example.org`
 	case u.User != nil:
-		return url.URL{}, errors.New("it holds user information")
+		return url.URL{}, `has a user name or a password in it, before "@"`
 	// RFC 3986 lets a path hold some characters only percent-encoded.
 	// url.Parse keeps them unescaped, and String then escapes most of
 	// them, a space among them, so the URL would not be the one given;
@@ -386,36 +467,38 @@ func parseWebURL(s string) (url.URL, error) {
 	// empty, the path's default escaping, which is EscapedPath and holds
 	// none of them.
 	case !escapedPath(cmp.Or(u.RawPath, u.EscapedPath())):
-		return url.URL{}, errors.New("its path holds a character a URL must percent-encode")
+		return url.URL{}, "has a character in its path that a URL must percent-encode, such as a space, written %20"
 	}
-	host, err := canonicalHost(u)
-	if err != nil {
-		return url.URL{}, err
+	host, why := canonicalHost(u)
+	if why != "" {
+		return url.URL{}, why
 	}
 	u.Host = host
-	return *u, nil
+	return *u, ""
 }
 
 // canonicalHost returns u's host and port in canonical form: a name in
 // lower case, an IP address in its shortest form, IPv6 in brackets, and
-// the port only when it is not the scheme's default.
-func canonicalHost(u *url.URL) (string, error) {
+// the port only when it is not the scheme's default; or why they are not
+// a host and a port, as what follows "a value that".
+func canonicalHost(u *url.URL) (_, why string) {
 	name := u.Hostname()
 	bracketed := strings.HasPrefix(u.Host, "[")
 	var host string
 	if addr, err := netip.ParseAddr(name); err == nil {
+		if why, _ := brackets(addr, bracketed); why != "" {
+			return "", why
+		}
 		switch {
-		case addr.Is6() != bracketed:
-			return "", errors.New("only an IPv6 address goes in brackets, and it must")
 		case addr.Zone() != "":
-			return "", errors.New("its host names an IPv6 zone")
+			return "", "has an IPv6 address with a zone, such as %25eth0, which Pisati does not take"
 		case addr.Is6():
 			host = "[" + addr.String() + "]"
 		default:
 			host = addr.String()
 		}
 	} else if bracketed || !hostName(name) {
-		return "", errors.New("its host is not a host name or an IP address")
+		return "", "has a host that is neither a host name nor an IP address"
 	} else {
 		host = strings.ToLower(name)
 	}
@@ -423,18 +506,18 @@ func canonicalHost(u *url.URL) (string, error) {
 	portText := u.Port()
 	if portText == "" {
 		if strings.HasSuffix(u.Host, ":") {
-			return "", errors.New("it has a colon but no port")
+			return "", `has a ":" after its host, but no port`
 		}
-		return host, nil
+		return host, ""
 	}
-	port, err := parsePort(portText)
-	if err != nil {
-		return "", err
+	port, why := parsePort(portText)
+	if why != "" {
+		return "", why
 	}
 	if (u.Scheme == "https" && port == 443) || (u.Scheme == "http" && port == 80) {
-		return host, nil
+		return host, ""
 	}
-	return host + ":" + strconv.Itoa(int(port)), nil
+	return host + ":" + strconv.Itoa(int(port)), ""
 }
 
 // control reports whether r is an ASCII control character, which a URL
@@ -466,13 +549,13 @@ func hexDigit(c byte) bool {
 	return strings.IndexByte("0123456789abcdefABCDEF", c) >= 0
 }
 
-// parsePort returns s as a port from 1 to 65535.
-func parsePort(s string) (uint16, error) {
+// parsePort returns s as a port from 1 to 65535, or why it is not one.
+func parsePort(s string) (_ uint16, why string) {
 	n, err := strconv.ParseUint(s, 10, 16)
 	if err != nil || n == 0 || n > math.MaxUint16 {
-		return 0, errors.New("its port is not from 1 to 65535")
+		return 0, "has a port that is not a number from 1 to 65535"
 	}
-	return uint16(n), nil
+	return uint16(n), ""
 }
 
 // hostName reports whether name is a DNS host name: dot-separated labels
@@ -553,5 +636,5 @@ func (c choices[T]) parse(s string) (T, error) {
 		}
 	}
 	var zero T
-	return zero, fmt.Errorf("%w value %q: want %s", ErrInvalid, s, c.spelling())
+	return zero, &badValue{value: s, why: "is not one of the values it takes", fix: "Set it to " + c.spelling()}
 }

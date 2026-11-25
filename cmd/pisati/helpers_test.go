@@ -100,6 +100,21 @@ func (r result) line(t *testing.T) string {
 
 // lines returns the result's stderr as its lines, failing the test unless
 // it ends with a newline.
+// holdsAll reports whether line, one line of stderr, starts "pisati: "
+// or another check's prefix, ends with a full stop, and holds each of
+// parts.
+func holdsAll(line string, parts []string) bool {
+	if !strings.HasSuffix(line, ".") || !strings.Contains(line, ": ") {
+		return false
+	}
+	for _, p := range parts {
+		if !strings.Contains(line, p) {
+			return false
+		}
+	}
+	return true
+}
+
 func (r result) lines(t *testing.T) []string {
 	t.Helper()
 	text, ok := strings.CutSuffix(r.stderr, "\n")

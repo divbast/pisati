@@ -402,7 +402,7 @@ func TestFileVariable(t *testing.T) {
 			"PISATI_SERVER_BASE_URL":    baseURL,
 			"PISATI_KEYS_MAIN_KEY_FILE": "secrets/key",
 		}}.load(t.Context())
-		refused(t, err, config.ErrInvalid, "PISATI_KEYS_MAIN_KEY_FILE", "absolute")
+		refused(t, err, config.ErrInvalid, "PISATI_KEYS_MAIN_KEY_FILE", "not a full path")
 	})
 
 	// The key itself, given by mistake where its file's path belongs, is
@@ -422,7 +422,7 @@ func TestFileVariable(t *testing.T) {
 			t.Parallel()
 
 			_, err := s.load(t.Context())
-			refused(t, err, config.ErrInvalid, "keys.main_key_file (PISATI_KEYS_MAIN_KEY_FILE)", "absolute")
+			refused(t, err, config.ErrInvalid, "keys.main_key_file (PISATI_KEYS_MAIN_KEY_FILE)", "not a full path")
 			if strings.Contains(err.Error(), key[:8]) {
 				t.Errorf("error %q repeats the value", err)
 			}
@@ -445,10 +445,10 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 		},
 	}.load(t.Context())
 	refused(t, err, config.ErrUnknown,
-		"pisati.toml:3:1: server.bsae_url",
+		"the configuration file pisati.toml has the key server.bsae_url, at line 3, column 1,",
 		"nope",
-		"pisati.toml.d/10-extra.toml:1:1: toplevel",
-		"PISATI_SERVER_BSAE_URL",
+		"the configuration file pisati.toml.d/10-extra.toml has the key toplevel, at line 1, column 1,",
+		"the environment variable PISATI_SERVER_BSAE_URL is set",
 	)
 	for _, known := range []string{"HOME", "PISATI_SERVER_LISTEN"} {
 		if strings.Contains(err.Error(), known) {
@@ -471,11 +471,16 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 			unknown = append(unknown, part.Error())
 		}
 		want := []string{
-			"pisati.toml:1:10: keys.mian_key: unknown setting",
-			"pisati.toml:2:25: log.fmt.x: unknown setting",
+			"the configuration file pisati.toml has the key keys.mian_key, at line 1, column 10,",
+			"the configuration file pisati.toml has the key log.fmt.x, at line 2, column 25,",
 		}
-		if !slices.Equal(unknown, want) {
+		if len(unknown) != len(want) {
 			t.Errorf("errors %q, want %q", unknown, want)
+		}
+		for i, w := range want {
+			if i < len(unknown) && !strings.HasPrefix(unknown[i], w) {
+				t.Errorf("error %q, want one that starts %q", unknown[i], w)
+			}
 		}
 	})
 
@@ -496,7 +501,7 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 	// hold the base URL, so the base URL is not reported missing.
 	brokenFile := func(t *testing.T, err error, at string) {
 		t.Helper()
-		refused(t, err, config.ErrInvalid, at, "none of the file's settings are used")
+		refused(t, err, config.ErrInvalid, at, "Pisati uses none of this file's settings")
 		if errors.Is(err, config.ErrMissing) {
 			t.Errorf("error %q reports a setting missing, though the file that failed may hold it", err)
 		}
@@ -508,7 +513,7 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 		_, err := setup{
 			files: fstest.MapFS{"pisati.toml": tomlFile("[server]\nbase_url = \"https://blog.example.org\"\nlisten = 8080\n")},
 		}.load(t.Context())
-		brokenFile(t, err, "pisati.toml:3:10: server.listen")
+		brokenFile(t, err, "the configuration file pisati.toml has an error at line 3, column 10, in the setting server.listen:")
 		if strings.Contains(err.Error(), "(PISATI_SERVER_LISTEN)") {
 			t.Errorf("error %q reports server.listen twice", err)
 		}
@@ -520,7 +525,7 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 		_, err := setup{
 			files: fstest.MapFS{"pisati.toml.d/10-broken.toml": tomlFile("[server]\nbase_url = \"https://blog.example.org\"\n[log\n")},
 		}.load(t.Context())
-		brokenFile(t, err, "pisati.toml.d/10-broken.toml:3:")
+		brokenFile(t, err, "the configuration file pisati.toml.d/10-broken.toml has an error at line 3,")
 	})
 
 	t.Run("a secret in a file that fails to decode", func(t *testing.T) {
@@ -535,7 +540,8 @@ func TestUnknownTOMLKeyAndEnvNamed(t *testing.T) {
 				files: fstest.MapFS{"pisati.toml": tomlFile(file)},
 				env:   env{"PISATI_SERVER_BASE_URL": baseURL},
 			}.load(t.Context())
-			refused(t, err, config.ErrInvalid, "pisati.toml: keys.main_key (PISATI_KEYS_MAIN_KEY)", "keys.main_key_file (PISATI_KEYS_MAIN_KEY_FILE)")
+			refused(t, err, config.ErrInvalid, "the configuration file pisati.toml sets keys.main_key,",
+				"keys.main_key_file (PISATI_KEYS_MAIN_KEY_FILE)")
 			if strings.Contains(err.Error(), secret) {
 				t.Errorf("%s: error %q holds the secret", name, err)
 			}
@@ -629,6 +635,12 @@ func TestSettingsTable(t *testing.T) {
 	}
 }
 
+// namesUnknown reports whether msg, an error for an unknown key, names
+// name, as written, in the file file.
+func namesUnknown(msg, file, name string) bool {
+	return strings.HasPrefix(msg, "the configuration file "+file+" has the ") && strings.Contains(msg, " "+name+", but ")
+}
+
 // errorParts returns the errors err joins, or err alone.
 func errorParts(err error) []error {
 	if joined, ok := errors.AsType[interface {
@@ -650,7 +662,7 @@ func TestKeysAreLowerCase(t *testing.T) {
 	const base = "\"https://file.example.org\""
 	tests := []struct {
 		name, file, text string
-		want             []string // the errors, but for ones of a value refused
+		want             []string // file: name, of each unknown key, in order
 		refused          string   // the error of a value refused, if there is one
 	}{
 		{name: "a table", text: "[SERVER]\nbase_url = " + base + "\n", want: []string{"pisati.toml: SERVER"}},
@@ -705,7 +717,7 @@ func TestKeysAreLowerCase(t *testing.T) {
 			name:    "a value of the wrong type beside a key in another case",
 			text:    "[server]\nBASE_URL = " + base + "\nlisten = 8080\n",
 			want:    []string{"pisati.toml: server.BASE_URL"},
-			refused: "pisati.toml: server.listen: invalid: it is not TOML, or not a value the setting takes (what the file holds is not shown); none of the file's settings are used until it decodes",
+			refused: decodeError{file: "pisati.toml", key: "server.listen"}.message(),
 		},
 	}
 	for _, tt := range tests {
@@ -727,12 +739,14 @@ func TestKeysAreLowerCase(t *testing.T) {
 					other = append(other, part.Error())
 				}
 			}
-			want := make([]string, 0, len(tt.want))
-			for _, w := range tt.want {
-				want = append(want, w+": unknown setting")
+			if len(unknown) != len(tt.want) {
+				t.Errorf("unknown keys %q, want %q", unknown, tt.want)
 			}
-			if !slices.Equal(unknown, want) {
-				t.Errorf("unknown keys %q, want %q", unknown, want)
+			for i, w := range tt.want {
+				file, name, _ := strings.Cut(w, ": ")
+				if i < len(unknown) && !namesUnknown(unknown[i], file, name) {
+					t.Errorf("unknown key %q, want one naming %s in %s", unknown[i], name, file)
+				}
 			}
 			if wantOther := slices.DeleteFunc([]string{tt.refused}, func(s string) bool { return s == "" }); !slices.Equal(other, wantOther) {
 				t.Errorf("other errors %q, want %q", other, wantOther)
@@ -751,14 +765,14 @@ func TestKeysAreLowerCase(t *testing.T) {
 func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 	t.Parallel()
 
-	const fixed = ": invalid: " + notDecoded
 	// The value a key misses, on the lines after it, holds needle, or
 	// these: the error must hold none of it, and name the key that misses
 	// it.
 	user, password := "someone-Uq7Zk", "hunter2-Pq7Zk"
 	tests := []struct {
-		name, file, want string
-		value            []string // what of the file the error must not hold
+		name, file string
+		want       string   // where the error is: file:row:col, and ": key" when it names one
+		value      []string // what of the file the error must not hold
 		// crlf is whether the case holds as well with CRLF line endings,
 		// the error at the same line and column.
 		crlf bool
@@ -766,14 +780,14 @@ func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 		{
 			name:  "a secret on the line after its key",
 			file:  "[keys]\nmain_key =\n\"" + needle + "\"\n",
-			want:  "pisati.toml:2:11: keys.main_key" + fixed,
+			want:  "pisati.toml:2:11: keys.main_key",
 			value: []string{needle},
 			crlf:  true,
 		},
 		{
 			name: "a URL with a password, indented, on the line after its key",
 			file: "[telemetry]\notlp_endpoint =\n  \"" + withUserInfo("https://", user, password, "collector.example.org") + "\"\n",
-			want: "pisati.toml:2:16: telemetry.otlp_endpoint" + fixed,
+			want: "pisati.toml:2:16: telemetry.otlp_endpoint",
 			value: []string{
 				user, password, user + ":" + password, "collector.example.org", "https",
 			},
@@ -782,35 +796,35 @@ func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 		{
 			name:  "a bare URL on the line after its key",
 			file:  "[telemetry]\notlp_endpoint =\nhttp://" + needle + "\n",
-			want:  "pisati.toml:2:16: telemetry.otlp_endpoint" + fixed,
+			want:  "pisati.toml:2:16: telemetry.otlp_endpoint",
 			value: []string{"http", needle},
 			crlf:  true,
 		},
 		{
 			name:  "a string left open before the next key",
 			file:  "[keys]\nmain_key = \"" + needle + "\nother = 1\n",
-			want:  "pisati.toml:2:" + strconv.Itoa(13+len(needle)) + ": keys.main_key" + fixed,
+			want:  "pisati.toml:2:" + strconv.Itoa(13+len(needle)) + ": keys.main_key",
 			value: []string{needle, "other"},
 			crlf:  true,
 		},
 		{
 			name:  "a quoted key left open before the next",
 			file:  "[keys]\n'" + needle + "\n'zz' = 1\n",
-			want:  "pisati.toml:2:" + strconv.Itoa(2+len(needle)) + ": keys" + fixed,
+			want:  "pisati.toml:2:" + strconv.Itoa(2+len(needle)) + ": keys",
 			value: []string{needle, "zz"},
 			crlf:  true,
 		},
 		{
 			name:  "a secret after blank lines, in a string of many lines",
 			file:  "[keys]\nmain_key =\n\n\n'''" + needle + "'''\n",
-			want:  "pisati.toml:2:11: keys.main_key" + fixed,
+			want:  "pisati.toml:2:11: keys.main_key",
 			value: []string{needle},
 			crlf:  true,
 		},
 		{
 			name:  "a lone carriage return between two keys",
 			file:  "[keys]\nmain_key_file = \"/run/key\"\n\r" + needle + " = 1\n",
-			want:  "pisati.toml:3:1: keys" + fixed,
+			want:  "pisati.toml:3:1: keys",
 			value: []string{needle},
 		},
 		// What TOML reads as a key, though it is a value on a line of its
@@ -818,28 +832,28 @@ func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 		{
 			name:  "a quoted value on a line of its own",
 			file:  "[keys]\nmain_key_file = \"/k\"\n\"" + needle + "\"\n",
-			want:  "pisati.toml:3:" + strconv.Itoa(3+len(needle)) + ": keys" + fixed,
+			want:  "pisati.toml:3:" + strconv.Itoa(3+len(needle)) + ": keys",
 			value: []string{needle},
 			crlf:  true,
 		},
 		{
 			name:  "a bare value on a line of its own",
 			file:  "[keys]\nab12cd34ef56\n",
-			want:  "pisati.toml:2:13: keys" + fixed,
+			want:  "pisati.toml:2:13: keys",
 			value: []string{"ab12cd34ef56"},
 			crlf:  true,
 		},
 		{
 			name:  "a value after a dot, as a key's part",
 			file:  "[keys]\nmain_key . \"" + needle + "\"",
-			want:  "pisati.toml:2:" + strconv.Itoa(13+len(needle)) + ": keys.main_key" + fixed,
+			want:  "pisati.toml:2:" + strconv.Itoa(13+len(needle)) + ": keys.main_key",
 			value: []string{needle},
 			crlf:  true,
 		},
 		{
 			name: "the rest of a URL wrapped onto a line of its own",
 			file: "[telemetry]\notlp_endpoint = \"https://" + user + "\"\n\":" + password + "@collector\"\n",
-			want: "pisati.toml:3:" + strconv.Itoa(14+len(password)) + ": telemetry" + fixed,
+			want: "pisati.toml:3:" + strconv.Itoa(14+len(password)) + ": telemetry",
 			value: []string{
 				user, password, ":" + password, "collector",
 			},
@@ -848,147 +862,147 @@ func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 		{
 			name:  "a base64 value on a line of its own",
 			file:  "[keys]\n" + needle + "==\n",
-			want:  "pisati.toml:2:" + strconv.Itoa(2+len(needle)) + ": keys" + fixed,
+			want:  "pisati.toml:2:" + strconv.Itoa(2+len(needle)) + ": keys",
 			value: []string{needle},
 			crlf:  true,
 		},
 		{
 			name: "an empty quoted key with no value",
 			file: "[keys]\n\"\" =\n",
-			want: "pisati.toml:2:5: keys" + fixed,
+			want: "pisati.toml:2:5: keys",
 			crlf: true,
 		},
 		{
 			name:  "a quoted key that never closes",
 			file:  "[keys]\n\"" + needle,
-			want:  "pisati.toml:2:" + strconv.Itoa(1+len(needle)) + ": keys" + fixed,
+			want:  "pisati.toml:2:" + strconv.Itoa(1+len(needle)) + ": keys",
 			value: []string{needle},
 			crlf:  true,
 		},
 		{
 			name:  "a table left open whose name is no section",
 			file:  "[" + needle + "\n",
-			want:  "pisati.toml:1:" + strconv.Itoa(2+len(needle)) + fixed,
+			want:  "pisati.toml:1:" + strconv.Itoa(2+len(needle)),
 			value: []string{needle},
 			crlf:  true,
 		},
 		{
 			name:  "a time cut short at the end of the file",
 			file:  "[keys]\nmain_key = 1979-05-27T",
-			want:  "pisati.toml:2:23: keys.main_key" + fixed,
+			want:  "pisati.toml:2:23: keys.main_key",
 			value: []string{"1979"},
 			crlf:  true,
 		},
 		{
 			name:  "a time cut short at the end of the file's last line",
 			file:  "[keys]\nmain_key = 1979-05-27T\n",
-			want:  "pisati.toml:2:23: keys.main_key" + fixed,
+			want:  "pisati.toml:2:23: keys.main_key",
 			value: []string{"1979"},
 			crlf:  true,
 		},
 		{
 			name:  "a secret's key given twice",
 			file:  "[keys]\nmain_key = \"" + needle + "\"\nmain_key = \"y-" + needle + "\"\n",
-			want:  "pisati.toml:3:1: keys.main_key" + fixed,
+			want:  "pisati.toml:3:1: keys.main_key",
 			value: []string{needle},
 			crlf:  true,
 		},
 		{
 			name:  "a key given twice, once dotted",
 			file:  "[log]\nlevel = \"debug\"\n[server]\nlisten = \":1\"\n[log]\nformat = \"text\"\n",
-			want:  "pisati.toml:5:2: log" + fixed,
+			want:  "pisati.toml:5:2: log",
 			value: []string{"debug", "text"},
 			crlf:  true,
 		},
 		{
 			name:  "a key given twice at the top, dotted",
 			file:  "log.level = \"debug\"\nlog.level = \"warn\"\n",
-			want:  "pisati.toml:2:1: log.level" + fixed,
+			want:  "pisati.toml:2:1: log.level",
 			value: []string{"debug", "warn"},
 			crlf:  true,
 		},
 		{
 			name:  "an invalid escape inside a secret",
 			file:  "[keys]\nmain_key = \"ЖЩ\\ЮЯ\"\n",
-			want:  "pisati.toml:2:17: keys.main_key" + fixed,
+			want:  "pisati.toml:2:17: keys.main_key",
 			value: []string{"Ж", "Щ", "Ю", "Я", "Ð", "U+"},
 		},
 		{
 			name:  "an invalid ASCII escape inside a secret",
 			file:  "[keys]\nmain_key = \"pw\\qz\"\n",
-			want:  "pisati.toml:2:15: keys.main_key" + fixed,
+			want:  "pisati.toml:2:15: keys.main_key",
 			value: []string{"'q'", "U+"},
 		},
 		{
 			name:  "a bare float out of range",
 			file:  "[keys]\nmain_key = 98765432109e999\n",
-			want:  "pisati.toml:2:12: keys.main_key" + fixed,
+			want:  "pisati.toml:2:12: keys.main_key",
 			value: []string{"98765", "e999", "parsing", "strconv"},
 		},
 		{
 			name:  "a bad character at the start of a value",
 			file:  "[telemetry]\notlp_endpoint = Жhttp\n",
-			want:  "pisati.toml:2:17: telemetry.otlp_endpoint" + fixed,
+			want:  "pisati.toml:2:17: telemetry.otlp_endpoint",
 			value: []string{"Ж", "Ð", "U+", "http\n"},
 		},
 		{
 			name:  "a bad ASCII character at the start of a value",
 			file:  "[keys]\nmain_key = hunter2\n",
-			want:  "pisati.toml:2:12: keys.main_key" + fixed,
+			want:  "pisati.toml:2:12: keys.main_key",
 			value: []string{"'h'", "U+", "hunter"},
 		},
 		{
 			name:  "a bad character at the start of a key, in a table",
 			file:  "[keys]\nЖmain_key = \"x\"\n",
-			want:  "pisati.toml:2:1: keys" + fixed,
+			want:  "pisati.toml:2:1: keys",
 			value: []string{"Ж", "Ð", "U+"},
 		},
 		{
 			name:  "a bad character at the start of a dotted key, at the top",
 			file:  "keys.main_key = \"x\"\n!q = 1\n",
-			want:  "pisati.toml:2:1" + fixed,
+			want:  "pisati.toml:2:1",
 			value: []string{"'!'", "U+"},
 		},
 		{
 			name:  "junk after a quoted key's value",
 			file:  "[keys]\n\"main_key\" = \"pw\" Ж\n",
-			want:  "pisati.toml:2:19: keys.main_key" + fixed,
+			want:  "pisati.toml:2:19: keys.main_key",
 			value: []string{"Ж", "Ð", "U+"},
 		},
 		{
 			name:  "an invalid escape after a comment",
 			file:  "[keys]\n# the key\nmain_key = \"pw\\qz\"\n",
-			want:  "pisati.toml:3:15: keys.main_key" + fixed,
+			want:  "pisati.toml:3:15: keys.main_key",
 			value: []string{"'q'", "U+"},
 		},
 		{
 			name:  "a control character in a comment before a key",
 			file:  "[keys]\n# the \x01 key\nmain_key = \"pw\"\n",
-			want:  "pisati.toml:2:7: keys" + fixed,
+			want:  "pisati.toml:2:7: keys",
 			value: []string{"U+", "\x01"},
 		},
 		{
 			name:  "a bad value on a later line of an array",
 			file:  "[server]\ntrusted_proxies = [ # a ] here closes nothing\n  \"10.0.0.0/8\",\n  Ж,\n]\n",
-			want:  "pisati.toml:4:3: server.trusted_proxies" + fixed,
+			want:  "pisati.toml:4:3: server.trusted_proxies",
 			value: []string{"Ж", "Ð", "U+"},
 		},
 		{
 			name:  "an invalid escape in a string of many lines, under lines like a table and a comment",
 			file:  "[keys]\nmain_key = \"\"\"\n[log]\n# a ' and a \"\n\\q\"\"\"\n",
-			want:  "pisati.toml:5:1: keys.main_key" + fixed,
+			want:  "pisati.toml:5:1: keys.main_key",
 			value: []string{"'q'", "U+"},
 		},
 		{
 			name:  "a bad value after a string of many lines and a table with a comment",
 			file:  "[log]\nlevel = '''\n\"\"\"\n'''\n[keys] # the key\nmain_key = Жx\n",
-			want:  "pisati.toml:6:12: keys.main_key" + fixed,
+			want:  "pisati.toml:6:12: keys.main_key",
 			value: []string{"Ж", "Ð", "U+"},
 		},
 		{
 			name:  "a table name left open",
 			file:  "[keys\n",
-			want:  "pisati.toml:1:6: keys" + fixed,
+			want:  "pisati.toml:1:6: keys",
 			value: []string{"']'"},
 		},
 	}
@@ -1005,9 +1019,16 @@ func TestDecodeErrorsShowNoneOfTheFile(t *testing.T) {
 					files: fstest.MapFS{"pisati.toml": tomlFile(strings.ReplaceAll(tt.file, "\n", ending))},
 					env:   env{"PISATI_SERVER_BASE_URL": baseURL},
 				}.load(t.Context())
-				refused(t, err, config.ErrInvalid, tt.want)
-				if !slices.ContainsFunc(errorParts(err), func(e error) bool { return e.Error() == tt.want }) {
-					t.Errorf("error %q has no part that is exactly %q", err, tt.want)
+				at := decodeAt(t, tt.want)
+				want := at.message()
+				refused(t, err, config.ErrInvalid)
+				if !slices.ContainsFunc(errorParts(err), func(e error) bool { return e.Error() == want }) {
+					t.Errorf("error %q has no part that is exactly %q", err, want)
+				}
+				// FuzzLoad's checks read decode errors back with
+				// decodeErrorPart, which must know this one.
+				if !slices.Contains(decodeErrorsOf(err, "pisati.toml"), at) {
+					t.Errorf("decodeErrorPart reads none of %q as %+v", err, at)
 				}
 				for _, v := range tt.value {
 					if strings.Contains(err.Error(), v) {
@@ -1213,7 +1234,7 @@ func TestURLSettingsRefuseUnescapedCharacters(t *testing.T) {
 	t.Parallel()
 
 	const (
-		encode  = "a character a URL must percent-encode"
+		encode  = "a URL must percent-encode"
 		control = "a control character"
 	)
 	tests := []struct {
@@ -1248,7 +1269,7 @@ func TestURLSettingsRefuseUnescapedCharacters(t *testing.T) {
 					t.Parallel()
 
 					_, label, err := loadURLSetting(t, key, tt.value, where)
-					refused(t, err, config.ErrInvalid, label+": invalid", tt.reason)
+					refused(t, err, config.ErrInvalid, label+" is set to a value that", tt.reason)
 					if strings.Contains(err.Error(), tt.value) || strings.Contains(err.Error(), "q7z") {
 						t.Errorf("error %q repeats the value", err)
 					}
@@ -1293,7 +1314,7 @@ func TestURLErrorsHideUserInformation(t *testing.T) {
 	const (
 		user     = "someone-Uq7Zk"
 		secret   = "pw-q7Zx9kP"
-		userInfo = "it holds user information"
+		userInfo = "has a user name or a password in it"
 	)
 	tests := []struct {
 		value, reason string
@@ -1319,7 +1340,7 @@ func TestURLErrorsHideUserInformation(t *testing.T) {
 					t.Parallel()
 
 					_, label, err := loadURLSetting(t, key, tt.value, where)
-					refused(t, err, config.ErrInvalid, label+": invalid", tt.reason)
+					refused(t, err, config.ErrInvalid, label+" is set to a value that", tt.reason)
 					for _, part := range []string{secret, user, user + ":" + secret} {
 						if strings.Contains(err.Error(), part) {
 							t.Errorf("error %q shows %q, of the user information", err, part)
@@ -1796,7 +1817,7 @@ func TestDevViteURLs(t *testing.T) {
 				}
 				return
 			}
-			refused(t, err, config.ErrInvalid, "dev.vite_url (PISATI_DEV_VITE_URL): invalid")
+			refused(t, err, config.ErrInvalid, "dev.vite_url (PISATI_DEV_VITE_URL) is set")
 			for _, part := range append(c.userInfo(), url) {
 				if part != "" && strings.Contains(err.Error(), part) {
 					t.Errorf("error %q repeats %q, of the value", err, part)
@@ -2134,8 +2155,9 @@ func FuzzLoad(f *testing.F) {
 
 // notDecoded is the fixed text of every error for a file that does not
 // decode, after its file, line, column and key.
-const notDecoded = "it is not TOML, or not a value the setting takes (what the file holds is not shown); " +
-	"none of the file's settings are used until it decodes"
+const notDecoded = "it is not valid TOML there, or a setting there has a value of the wrong type, such as a number " +
+	"where a setting takes a value in quotes. Pisati does not show what the file holds there, because it may be a " +
+	"secret. Pisati uses none of this file's settings until it is fixed"
 
 // needle is a value no fixed text holds by chance.
 const needle = "Qz9vNEEDLEq7Zk"
@@ -2149,23 +2171,64 @@ type decodeError struct {
 	key      string
 }
 
+// message is the whole message of d, as Load words it: the file, then
+// the line and column when it has them, then the key, a table when it has
+// one part, then the fixed text.
+func (d decodeError) message() string {
+	where := "the configuration file " + d.file + " has an error"
+	if d.row > 0 {
+		where += fmt.Sprintf(" at line %d, column %d", d.row, d.col)
+		if d.key != "" {
+			where += ","
+		}
+	}
+	switch {
+	case d.key == "":
+	case strings.Contains(d.key, "."):
+		where += " in the setting " + d.key
+	default:
+		where += " in the table " + d.key
+	}
+	return where + ": " + notDecoded
+}
+
 // decodeErrorPart reads a decode error from msg, an error Load joins, and
-// reports whether msg is one: its fixed text after its file, its line and
-// column, or neither, and a key, or none.
+// reports whether msg is one: exactly as message words it, with its file,
+// its line and column, or neither, and a key, or none.
 func decodeErrorPart(msg string) (decodeError, bool) {
-	head, ok := strings.CutSuffix(msg, ": invalid: "+notDecoded)
+	rest, ok := strings.CutPrefix(msg, "the configuration file ")
 	if !ok {
 		return decodeError{}, false
 	}
-	file, rest, _ := strings.Cut(head, ":")
 	var d decodeError
-	d.file = file
-	if n, err := fmt.Sscanf(rest, "%d:%d", &d.row, &d.col); err == nil && n == 2 {
-		_, rest, _ = strings.Cut(rest, ":")
-		_, rest, _ = strings.Cut(rest, ":")
+	if d.file, rest, ok = strings.Cut(rest, " has an error"); !ok {
+		return decodeError{}, false
 	}
-	d.key = strings.TrimPrefix(rest, " ")
-	return d, true
+	if n, err := fmt.Sscanf(rest, " at line %d, column %d", &d.row, &d.col); err == nil && n == 2 {
+		_, rest, _ = strings.Cut(rest, fmt.Sprintf("column %d", d.col))
+		rest = strings.TrimPrefix(rest, ",")
+	}
+	rest, _, _ = strings.Cut(rest, ": ")
+	if key, ok := strings.CutPrefix(rest, " in the setting "); ok {
+		d.key = key
+	} else if key, ok := strings.CutPrefix(rest, " in the table "); ok {
+		d.key = key
+	}
+	return d, d.message() == msg
+}
+
+// decodeAt is the decode error at, written as file:row:col, or as
+// file:row:col: key when it names a key.
+func decodeAt(t *testing.T, at string) decodeError {
+	t.Helper()
+	var d decodeError
+	spec, key, _ := strings.Cut(at, ": ")
+	file, rest, _ := strings.Cut(spec, ":")
+	if n, err := fmt.Sscanf(rest, "%d:%d", &d.row, &d.col); err != nil || n != 2 {
+		t.Fatalf("decode error %q has no line and column", at)
+	}
+	d.file, d.key = file, key
+	return d
 }
 
 // decodeErrorsOf returns the decode errors err joins for the file name.

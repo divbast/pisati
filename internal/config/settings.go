@@ -4,10 +4,10 @@
 package config
 
 import (
-	"fmt"
 	"log/slog"
 	"net/netip"
 	"path/filepath"
+	"strings"
 )
 
 // layer is what one source gives, still as text: each file decodes
@@ -60,7 +60,8 @@ type devLayer struct {
 type setting struct {
 	// key is the TOML key, section.name. The variable is envName(key).
 	key string
-	// value says how a value is spelt.
+	// value is what the setting takes, as what follows "Set it to" in a
+	// message that says it is missing.
 	value string
 	// absent is what build does when no source gives the setting, and
 	// def the default, spelt as a source would give it, that it applies
@@ -137,11 +138,11 @@ func settings() []setting {
 	levels := oneOf(levelName, slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError)
 	formats := oneOf(LogFormat.String, LogJSON, LogText)
 	switches := oneOf(Switch.String, Off, On)
-	absolutePath := "an absolute, clean path"
+	fullPath := `a full path, which starts with "/"`
 	return []setting{
 		{
 			key:    "server.base_url",
-			value:  "https://host[:port], or http://host[:port] on localhost, 127.0.0.1 or [::1]",
+			value:  "the address the blog is served at: " + strings.TrimPrefix(baseURLFix, "Set it to "),
 			absent: reportMissing,
 			kind: text{
 				field: func(l *layer) **string { return &l.Server.BaseURL },
@@ -150,7 +151,7 @@ func settings() []setting {
 		},
 		{
 			key:   "server.listen",
-			value: "host:port, with a port from 1 to 65535; an empty host is every interface",
+			value: strings.TrimPrefix(listenFix, "Set it to "),
 			def:   ":8080",
 			kind: text{
 				field: func(l *layer) **string { return &l.Server.Listen },
@@ -159,7 +160,7 @@ func settings() []setting {
 		},
 		{
 			key:   "server.internal_listen",
-			value: "host:port, with a port from 1 to 65535; an empty host is every interface",
+			value: strings.TrimPrefix(listenFix, "Set it to "),
 			def:   ":8081",
 			kind: text{
 				field: func(l *layer) **string { return &l.Server.InternalListen },
@@ -167,9 +168,10 @@ func settings() []setting {
 			},
 		},
 		{
-			key:   "server.trusted_proxies",
-			value: "IP addresses and CIDR prefixes: an array in TOML, comma-separated in the variable",
-			def:   "",
+			key: "server.trusted_proxies",
+			value: "IP addresses, such as 192.0.2.1, and ranges in CIDR form, such as 192.0.2.0/24: a list in " +
+				"square brackets in a file, or separated by commas in the variable",
+			def: "",
 			kind: list{
 				field: func(l *layer) **[]string { return &l.Server.TrustedProxies },
 				apply: applyTrustedProxies,
@@ -177,7 +179,7 @@ func settings() []setting {
 		},
 		{
 			key:   "server.hsts",
-			value: hsts.spelling(),
+			value: "one of " + hsts.spelling(),
 			def:   HSTSHostOnly.String(),
 			kind: text{
 				field: func(l *layer) **string { return &l.Server.HSTS },
@@ -186,7 +188,7 @@ func settings() []setting {
 		},
 		{
 			key:   "storage.state_dir",
-			value: absolutePath,
+			value: fullPath,
 			def:   defaultStateDir,
 			kind: text{
 				field: func(l *layer) **string { return &l.Storage.StateDir },
@@ -195,7 +197,7 @@ func settings() []setting {
 		},
 		{
 			key:   "log.level",
-			value: levels.spelling(),
+			value: "one of " + levels.spelling(),
 			def:   levelName(slog.LevelInfo),
 			kind: text{
 				field: func(l *layer) **string { return &l.Log.Level },
@@ -204,7 +206,7 @@ func settings() []setting {
 		},
 		{
 			key:   "log.format",
-			value: formats.spelling(),
+			value: "one of " + formats.spelling(),
 			def:   LogJSON.String(),
 			kind: text{
 				field: func(l *layer) **string { return &l.Log.Format },
@@ -212,9 +214,10 @@ func settings() []setting {
 			},
 		},
 		{
-			key:   "telemetry.otlp_endpoint",
-			value: "an http or https URL, or empty for none",
-			def:   "",
+			key: "telemetry.otlp_endpoint",
+			value: "the URL of an OpenTelemetry collector, which starts with https:// or http://; or nothing, to send " +
+				"no traces",
+			def: "",
 			kind: text{
 				field: func(l *layer) **string { return &l.Telemetry.OTLPEndpoint },
 				apply: into(ParseOptionalURL, func(c *Config) *OptionalURL { return &c.Telemetry.OTLPEndpoint }),
@@ -222,7 +225,7 @@ func settings() []setting {
 		},
 		{
 			key:   "telemetry.pprof",
-			value: switches.spelling(),
+			value: "one of " + switches.spelling(),
 			def:   Off.String(),
 			kind: text{
 				field: func(l *layer) **string { return &l.Telemetry.Pprof },
@@ -230,8 +233,9 @@ func settings() []setting {
 			},
 		},
 		{
-			key:   "keys.main_key",
-			value: "never accepted: name the file that holds the key with keys.main_key_file",
+			key: "keys.main_key",
+			value: "nothing: Pisati never takes the main key itself as a setting. Set keys.main_key_file to the " +
+				"full path of the file that holds it",
 			kind: refused{
 				field:   func(l *layer) **string { return &l.Keys.MainKey },
 				instead: "keys.main_key_file",
@@ -241,7 +245,7 @@ func settings() []setting {
 			// With none, Load looks for the credential, then falls back
 			// to Generated.
 			key:    "keys.main_key_file",
-			value:  absolutePath,
+			value:  "the full path of the file that holds the main key",
 			absent: leaveToRules,
 			kind: text{
 				field: func(l *layer) **string { return &l.Keys.MainKeyFile },
@@ -249,9 +253,10 @@ func settings() []setting {
 			},
 		},
 		{
-			key:   "dev.vite_url",
-			value: "an http or https URL on localhost, 127.0.0.1 or [::1], with a base URL there too; or empty for none",
-			def:   "",
+			key: "dev.vite_url",
+			value: "a URL on localhost, 127.0.0.1 or [::1], which starts with https:// or http://, with " +
+				"server.base_url on one of them too; or nothing, for no Vite dev server",
+			def: "",
 			kind: text{
 				field: func(l *layer) **string { return &l.Dev.ViteURL },
 				apply: applyViteURL,
@@ -260,7 +265,7 @@ func settings() []setting {
 		{
 			// Required when dev.vite_url is https, and used only then.
 			key:    "dev.vite_cert_file",
-			value:  absolutePath + ", used only with an https dev.vite_url",
+			value:  "the full path of the certificate file that the Vite dev server serves https with",
 			absent: leaveToRules,
 			kind: text{
 				field: func(l *layer) **string { return &l.Dev.ViteCertFile },
@@ -269,7 +274,7 @@ func settings() []setting {
 		},
 		{
 			key:    "dev.vite_key_file",
-			value:  absolutePath + ", used only with an https dev.vite_url",
+			value:  "the full path of the file that holds that certificate's private key",
 			absent: leaveToRules,
 			kind: text{
 				field: func(l *layer) **string { return &l.Dev.ViteKeyFile },
@@ -311,17 +316,36 @@ func applyTrustedProxies(c *Config, items []string) []error {
 // applyViteURL stores s as the Vite dev server's URL. A URL is accepted
 // only on localhost, 127.0.0.1 or [::1], with a base URL there too; c
 // already holds the base URL, unless it was refused. Its errors never
-// repeat the URL.
+// repeat either URL, and one that names the base URL names its setting
+// too.
 func applyViteURL(c *Config, s string) error {
 	vite, err := ParseOptionalURL(s)
 	if err != nil {
 		return err
 	}
 	u, set := vite.Get()
-	baseGiven := c.Server.BaseURL != BaseURL{}
-	if set && baseGiven && (!c.Server.BaseURL.local || !loopback(u.Hostname())) {
-		return fmt.Errorf("%w value: the Vite dev server is for development alone, so it and the base URL must both be on localhost, "+
-			"127.0.0.1 or [::1] (the value is not shown, as a URL may hold a password)", ErrInvalid)
+	if !set || c.Server.BaseURL == (BaseURL{}) {
+		c.Dev.ViteURL = vite
+		return nil
+	}
+	const (
+		local     = "localhost, 127.0.0.1 or [::1]"
+		devOnly   = "The Vite dev server is for development on this machine only"
+		passwords = "Pisati does not show the values, because a URL may hold a password"
+	)
+	viteLabel, baseLabel := label("dev.vite_url"), label("server.base_url")
+	switch viteLocal, baseLocal := loopback(u.Hostname()), c.Server.BaseURL.local; {
+	case !viteLocal && !baseLocal:
+		return refuse(ErrInvalid, "%s and %s are both set to URLs that are not on %s. %s: set both to URLs on %s, or "+
+			"set dev.vite_url to nothing. %s", viteLabel, baseLabel, local, devOnly, local, passwords)
+	case !viteLocal:
+		return &badValue{
+			hidden: whyURLHidden, why: "is not on " + local,
+			fix: devOnly + ": set it to a URL on " + local + ", or to nothing",
+		}
+	case !baseLocal:
+		return refuse(ErrInvalid, "%s is set, but %s is set to a URL that is not on %s. %s: set dev.vite_url to "+
+			"nothing, or set server.base_url to a URL on %s. %s", viteLabel, baseLabel, local, devOnly, local, passwords)
 	}
 	c.Dev.ViteURL = vite
 	return nil
@@ -342,18 +366,38 @@ func fileSource(s string) (SecretSource, error) {
 // one, when it is absolute and clean. Its error never repeats s, which may
 // be the secret itself, given by mistake in place of its file's path.
 func filePath(s string) (string, error) {
-	if !cleanAbsolute(s) {
-		return "", fmt.Errorf("%w value: want an absolute, clean path (the value is not shown, as it may be the secret itself)", ErrInvalid)
+	if why, fix := pathRule(s); why != "" {
+		return "", &badValue{hidden: "it may be a secret, such as a key, given in place of a path", why: why, fix: fix}
 	}
 	return s, nil
 }
 
 // parsePath returns s when it is an absolute, clean path.
 func parsePath(s string) (string, error) {
-	if !cleanAbsolute(s) {
-		return "", fmt.Errorf("%w value %q: want an absolute, clean path", ErrInvalid, s)
+	if why, fix := pathRule(s); why != "" {
+		return "", &badValue{value: s, why: why, fix: fix}
 	}
 	return s, nil
+}
+
+// pathRule returns the rule of an absolute, clean path that s breaks, as
+// what follows "which", and what to do about it, or "" for both when s
+// is one: filepath.Clean would change it otherwise.
+func pathRule(s string) (why, fix string) {
+	switch {
+	case cleanAbsolute(s):
+		return "", ""
+	case s == "":
+		return "is empty", `Set it to a full path, which starts with "/"`
+	case !filepath.IsAbs(s):
+		return "is not a full path", `Set it to a full path, which starts with "/"`
+	case strings.Contains(s, "//"):
+		return `has "//" in it`, `Write one "/" there instead`
+	case strings.HasSuffix(s, "/"):
+		return `ends with "/"`, `Remove the "/" at the end`
+	}
+	return `has "." or ".." as one of its directory names`,
+		`Set it to the full path that it names, written with no "." or ".." in it`
 }
 
 // cleanAbsolute reports whether s is an absolute path that filepath.Clean

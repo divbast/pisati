@@ -56,7 +56,8 @@ type Secret struct {
 // ErrInvalid when b is empty.
 func NewSecret(b []byte) (Secret, error) {
 	if len(b) == 0 {
-		return Secret{}, fmt.Errorf("%w: a secret is never empty", ErrInvalid)
+		return Secret{}, refuse(ErrInvalid, "config.NewSecret was given no bytes, but a secret is never empty. This "+
+			"is a bug in Pisati")
 	}
 	held := slices.Clone(b)
 	return Secret{reveal: func() []byte { return slices.Clone(held) }}, nil

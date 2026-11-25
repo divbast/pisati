@@ -90,7 +90,7 @@ func Load(ctx context.Context, src Sources, stateDirEnv string) (Config, error) 
 
 	errs := files.errs
 	for _, name := range UnknownEnv(src.EnvNames) {
-		errs = append(errs, fmt.Errorf("%s: %w", name, ErrUnknown))
+		errs = append(errs, unknownVariable(name))
 	}
 	cfg, refusedValues, missing := build(merged, files.otherCase)
 	errs = append(errs, refusedValues...)
@@ -103,7 +103,7 @@ func Load(ctx context.Context, src Sources, stateDirEnv string) (Config, error) 
 	// source gives.
 	if merged.Storage.StateDir == nil && stateDirEnv != "" {
 		if dir, err := stateDirectory(stateDirEnv); err != nil {
-			errs = append(errs, fmt.Errorf("STATE_DIRECTORY: %w", err))
+			errs = append(errs, err)
 		} else {
 			cfg.Storage.StateDir = dir
 		}
@@ -144,7 +144,8 @@ func missingCertificate(given devLayer, dev Dev, otherCase map[string]bool) []er
 			continue
 		}
 		if v == nil && !otherCase[s.key] {
-			errs = append(errs, fmt.Errorf("%s: %w: the Vite dev server is https, so it needs a certificate and its key; want %s", s.label(), ErrMissing, s.value))
+			errs = append(errs, refuse(ErrMissing, "%s is not set, but %s is set to an https URL, so the Vite dev server "+
+				"needs a certificate and its private key. Set %s to %s", s.label(), label("dev.vite_url"), s.key, s.value))
 		}
 	}
 	return errs
@@ -154,9 +155,22 @@ func missingCertificate(given devLayer, dev Dev, otherCase map[string]bool) []er
 // ctx is live.
 func stopped(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("configuration not loaded: %w", err)
+		return fmt.Errorf("the configuration was not read to its end, because reading it was stopped: %w", err)
 	}
 	return nil
+}
+
+// unknownVariable is the problem of the variable name, which looks like
+// one of Pisati's but names no setting.
+func unknownVariable(name string) error {
+	for _, s := range settings() {
+		if s.env() == strings.ToUpper(name) {
+			return refuse(ErrUnknown, "the environment variable %s is set, but Pisati's variables are written in "+
+				"capital letters. Write it as %s", name, s.env())
+		}
+	}
+	return refuse(ErrUnknown, "the environment variable %s is set, but Pisati has no setting of that name. Check its "+
+		"spelling, or remove it", name)
 }
 
 // configFiles is what the configuration files gave.
@@ -192,7 +206,7 @@ func readFiles(ctx context.Context, fsys fs.FS) (configFiles, error) {
 	}
 	entries, err := fs.ReadDir(fsys, dropInDir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		files.errs = append(files.errs, err)
+		files.errs = append(files.errs, cannotRead(err, "the directory "+dropInDir+" in the configuration directory"))
 		files.unread = append(files.unread, dropInDir)
 	}
 	// fs.ReadDir returns the entries sorted by name.
@@ -265,36 +279,89 @@ func (f *configFiles) readMap(name string, doc map[string]any) {
 }
 
 // readBounded reads the regular file name from fsys, refusing one larger
-// than maxFileSize.
+// than maxFileSize. Its errors name the file, and say why it cannot be
+// read; one that does not exist is fs.ErrNotExist alone.
 func readBounded(fsys fs.FS, name string) (data []byte, err error) {
 	f, err := fsys.Open(name)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
+	what := "the configuration file " + name
+	if err != nil {
+		return nil, cannotRead(err, what)
+	}
 	defer func() {
-		err = errors.Join(err, f.Close())
+		if cerr := f.Close(); cerr != nil {
+			err = errors.Join(err, cannotRead(cerr, what))
+		}
 	}()
 	info, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, cannotRead(err, what)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s: %w: not a regular file", name, ErrInvalid)
+		return nil, refuse(ErrInvalid, "%s is not a regular file, so Pisati cannot read its settings. Replace it "+
+			"with a regular file, or remove it", what)
 	}
 	data, err = io.ReadAll(io.LimitReader(f, maxFileSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", name, err)
+		return nil, cannotRead(err, what)
 	}
 	if len(data) > maxFileSize {
-		return nil, fmt.Errorf("%s: %w: larger than 1 MiB", name, ErrInvalid)
+		return nil, refuse(ErrInvalid, "%s is larger than 1 MiB (1,048,576 bytes), which is more than Pisati reads "+
+			"from a configuration file. Check that it is the right file", what)
 	}
 	return data, nil
 }
 
+// cannotRead is the problem of what, a file or directory that err says
+// cannot be read: it gives the operating system's reason, and, when that
+// is a lack of permission, what to do.
+func cannotRead(err error, what string) error {
+	if errors.Is(err, fs.ErrPermission) {
+		return refuse(err, "Pisati cannot read %s, because the user that runs Pisati does not have permission to. "+
+			"Give that user permission to read it", what)
+	}
+	return refuse(err, "Pisati cannot read %s: %s", what, pathless(err))
+}
+
+// pathless returns the error inside err when err is an *fs.PathError,
+// whose path the message around it already names, or err.
+func pathless(err error) error {
+	if pe, ok := errors.AsType[*fs.PathError](err); ok {
+		return pe.Err
+	}
+	return err
+}
+
 // notDecoded is why a file that does not decode, or a value in it of the
-// wrong type, is refused: fixed text, which never quotes the file.
-const notDecoded = "it is not TOML, or not a value the setting takes (what the file holds is not shown); " +
-	"none of the file's settings are used until it decodes"
+// wrong type, is refused: fixed text, which never quotes the file. It
+// follows the file, and the line, column and key, as decodeError gives
+// them.
+const notDecoded = "it is not valid TOML there, or a setting there has a value of the wrong type, such as a number " +
+	"where a setting takes a value in quotes. Pisati does not show what the file holds there, because it may be a " +
+	"secret. Pisati uses none of this file's settings until it is fixed"
+
+// decodeError is the problem of the file name, which does not decode as
+// TOML: at line row and column col, when both are above 0, and in key,
+// a setting, or a table when it has one part, when it has any.
+func decodeError(name string, row, col int, key []string) error {
+	where := "the configuration file " + name + " has an error"
+	if row > 0 && col > 0 {
+		where += fmt.Sprintf(" at line %d, column %d", row, col)
+		if len(key) > 0 {
+			where += ","
+		}
+	}
+	switch len(key) {
+	case 0:
+	case 1:
+		where += " in the table " + key[0]
+	default:
+		where += " in the setting " + strings.Join(key, ".")
+	}
+	return refuse(ErrInvalid, "%s: %s", where, notDecoded)
+}
 
 // decodeErrors turns what decoding data, the file name, returned into one
 // error for each problem. An unknown key's gives the file, line and
@@ -313,20 +380,17 @@ func decodeErrors(name string, data []byte, err error) []error {
 		for i := range strict.Errors {
 			row, col := strict.Errors[i].Position()
 			key := unknownKey(data, offset(data, row, col), strict.Errors[i].Key())
-			errs = append(errs, fmt.Errorf("%s:%d:%d: %s: %w", name, row, col, strings.Join(key, "."), ErrUnknown))
+			errs = append(errs, refuse(ErrUnknown, "the configuration file %s has the key %s, at line %d, column %d, "+
+				"but Pisati has no setting of that name. Check its spelling, or remove it", name, strings.Join(key, "."), row, col))
 		}
 		return errs
 	}
 	de, ok := errors.AsType[*toml.DecodeError](err)
 	if !ok {
-		return []error{fmt.Errorf("%s: %w: %s", name, ErrInvalid, notDecoded)}
+		return []error{decodeError(name, 0, 0, nil)}
 	}
 	row, col := de.Position()
-	where := fmt.Sprintf("%s:%d:%d", name, row, col)
-	if key := knownPrefix(failedKey(data, offset(data, row, col))); len(key) > 0 {
-		where += ": " + strings.Join(key, ".")
-	}
-	return []error{fmt.Errorf("%s: %w: %s", where, ErrInvalid, notDecoded)}
+	return []error{decodeError(name, row, col, knownPrefix(failedKey(data, offset(data, row, col))))}
 }
 
 // offset returns the offset in data of line row, column col, as go-toml
@@ -349,16 +413,18 @@ func refusals(name string, l *layer) []error {
 	var errs []error
 	for _, s := range settings() {
 		if k, ok := s.kind.(refused); ok && *k.field(l) != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", name, refusal(s, k)))
+			errs = append(errs, refusal("the configuration file "+name+" sets "+s.key, k))
 		}
 	}
 	return errs
 }
 
-// refusal is the error for the refused setting s, given. It never
-// repeats the value, which is the secret itself.
-func refusal(s setting, k refused) error {
-	return fmt.Errorf("%s: %w: a secret is read only from a file; name the file with %s", s.label(), ErrInvalid, label(k.instead))
+// refusal is the error for the refused setting k, given, as given says.
+// It never repeats the value, which is the secret itself.
+func refusal(given string, k refused) error {
+	return refuse(ErrInvalid, "%s, but Pisati does not take this secret as a setting's value. Put it in a file of its "+
+		"own, and set %s to that file's full path. Pisati does not show the value, because it is a secret", given,
+		label(k.instead))
 }
 
 // build turns the merged layer into a Config, going by the settings
@@ -381,7 +447,7 @@ func build(l layer, otherCase map[string]bool) (c Config, refusedValues, missing
 					v = s.def
 				case reportMissing:
 					if !otherCase[s.key] {
-						missing = append(missing, fmt.Errorf("%s: %w: want %s", s.label(), ErrMissing, s.value))
+						missing = append(missing, notGiven(s))
 					}
 					continue
 				case leaveToRules:
@@ -389,7 +455,7 @@ func build(l layer, otherCase map[string]bool) (c Config, refusedValues, missing
 				}
 			}
 			if err := k.apply(&c, v); err != nil {
-				refusedValues = append(refusedValues, fmt.Errorf("%s: %w", s.label(), err))
+				refusedValues = append(refusedValues, labelled(s, err))
 			}
 		case list:
 			p := *k.field(&l)
@@ -402,7 +468,7 @@ func build(l layer, otherCase map[string]bool) (c Config, refusedValues, missing
 					items = splitList(s.def)
 				case reportMissing:
 					if !otherCase[s.key] {
-						missing = append(missing, fmt.Errorf("%s: %w: want %s", s.label(), ErrMissing, s.value))
+						missing = append(missing, notGiven(s))
 					}
 					continue
 				case leaveToRules:
@@ -410,15 +476,30 @@ func build(l layer, otherCase map[string]bool) (c Config, refusedValues, missing
 				}
 			}
 			for _, err := range k.apply(&c, items) {
-				refusedValues = append(refusedValues, fmt.Errorf("%s: %w", s.label(), err))
+				refusedValues = append(refusedValues, labelled(s, err))
 			}
 		case refused:
 			if *k.field(&l) != nil {
-				refusedValues = append(refusedValues, refusal(s, k))
+				refusedValues = append(refusedValues, refusal(s.label()+" is set", k))
 			}
 		}
 	}
 	return c, refusedValues, missing
+}
+
+// notGiven is the problem of s, which has no default, given by no source.
+func notGiven(s setting) error {
+	return refuse(ErrMissing, "%s is not set, or is empty, and it has no default. Set it to %s", s.label(), s.value)
+}
+
+// labelled returns err, which s's rule returned for its value, as the
+// problem of s: a value refused is said of s, and any other problem
+// names s itself.
+func labelled(s setting, err error) error {
+	if b, ok := errors.AsType[*badValue](err); ok {
+		return refuse(err, "%s", b.of(s.label()))
+	}
+	return err
 }
 
 // deref returns *p and true, or "" and false when p is nil.
@@ -433,9 +514,15 @@ func deref(p *string) (string, bool) {
 // directory: one absolute, clean path.
 func stateDirectory(s string) (string, error) {
 	if strings.Contains(s, ":") {
-		return "", fmt.Errorf("%w value %q: it lists more than one directory; give Pisati one", ErrInvalid, s)
+		return "", refuse(ErrInvalid, "STATE_DIRECTORY is set to %q, which has \":\" in it. \":\" separates two "+
+			"directories there, as systemd writes it for a service with more than one StateDirectory=, and Pisati "+
+			"uses one. Set it to one directory, or set %s to the directory Pisati should use", s, label("storage.state_dir"))
 	}
-	return parsePath(s)
+	dir, err := parsePath(s)
+	if b, ok := errors.AsType[*badValue](err); ok {
+		return "", refuse(err, "%s", b.of("STATE_DIRECTORY"))
+	}
+	return dir, err
 }
 
 // credentialSource returns the credential as the main key's source
@@ -450,27 +537,46 @@ func credentialSource(creds fs.FS) (SecretSource, error) {
 		return FromCredential{Name: mainKeyCredential}, nil
 	case errors.Is(err, fs.ErrNotExist):
 		return Generated{}, nil
+	case errors.Is(err, fs.ErrPermission):
+		return nil, refuse(err, "Pisati cannot look for the credential %s in the directory that CREDENTIALS_DIRECTORY "+
+			"names, because the user that runs Pisati does not have permission to. Give that user permission to read "+
+			"that directory", mainKeyCredential)
 	default:
-		return nil, fmt.Errorf("CREDENTIALS_DIRECTORY: %w", err)
+		return nil, refuse(err, "Pisati cannot look for the credential %s in the directory that CREDENTIALS_DIRECTORY "+
+			"names: %s", mainKeyCredential, pathless(err))
 	}
 }
 
 // parsePrefix returns s, a CIDR prefix with no host bits set or a bare
 // address, as a prefix: a bare address is a /32 or a /128.
 func parsePrefix(s string) (netip.Prefix, error) {
+	const (
+		notOne = "is not an IP address or a range of IP addresses in CIDR form"
+		write  = "Write each item as an IP address, such as 192.0.2.1, or as a range, such as 192.0.2.0/24"
+	)
 	if strings.Contains(s, "/") {
 		p, err := netip.ParsePrefix(s)
 		if err != nil {
-			return netip.Prefix{}, fmt.Errorf("%w value %q: want an IP address or a CIDR prefix", ErrInvalid, s)
+			return netip.Prefix{}, &badValue{value: s, item: true, why: notOne, fix: write}
 		}
 		if p != p.Masked() {
-			return netip.Prefix{}, fmt.Errorf("%w value %q: it sets host bits; the prefix is %s", ErrInvalid, s, p.Masked())
+			return netip.Prefix{}, &badValue{
+				value: s, item: true,
+				why: "is a range written from an address inside it, not from its first address",
+				fix: "Write it as " + p.Masked().String(),
+			}
 		}
 		return p, nil
 	}
 	a, err := netip.ParseAddr(s)
-	if err != nil || a.Zone() != "" {
-		return netip.Prefix{}, fmt.Errorf("%w value %q: want an IP address or a CIDR prefix", ErrInvalid, s)
+	switch {
+	case err != nil:
+		return netip.Prefix{}, &badValue{value: s, item: true, why: notOne, fix: write}
+	case a.Zone() != "":
+		return netip.Prefix{}, &badValue{
+			value: s, item: true,
+			why: "has a zone, such as %eth0, after its address, which Pisati does not take", fix: "Remove the zone",
+		}
 	}
 	return netip.PrefixFrom(a, a.BitLen()), nil
 }
