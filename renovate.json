@@ -3,16 +3,52 @@
   "extends": ["github>divbast/renovate-config", "github>divbast/renovate-config:app"],
   "packageRules": [
     {
-      "description": "templ's runtime, which go.mod requires, and its generator, which tools/go.mod runs, move in one PR: the generated code is written for the runtime of the same version, so a bump of either alone leaves the two apart.",
+      "description": "templ's runtime, which go.mod requires, and its generator, which tools/go.mod runs, move in one PR: the generated code is written for the runtime of the same version, so a bump of either alone leaves the two apart. The PR runs the new generator once and commits only the *_templ.go files it writes, so the pages are committed in step with it. Go is the release mise.toml pins, set here too, since a task's tools take their versions from these constraints and never from mise.toml. A release waits 7 days first, as npm packages do.",
       "matchManagers": ["gomod"],
       "matchFileNames": ["go.mod", "tools/go.mod"],
       "matchDepNames": ["github.com/a-h/templ"],
-      "groupName": "templ"
+      "groupName": "templ",
+      "minimumReleaseAge": "7 days",
+      "constraints": { "golang": "1.27.4" },
+      "postUpgradeTasks": {
+        "commands": ["go tool -modfile=tools/go.mod templ generate"],
+        "fileFilters": ["**/*_templ.go"],
+        "executionMode": "branch",
+        "installTools": { "golang": {} }
+      }
+    },
+    {
+      "description": "sqlc, which tools/go.mod runs, writes the query code under internal/store/storedb. A bump runs the new sqlc and commits only what it writes there, so the query code is committed in step with it. Go is the release mise.toml pins, set here too, since a task's tools take their versions from these constraints and never from mise.toml. A release waits 7 days first, as npm packages do.",
+      "matchManagers": ["gomod"],
+      "matchFileNames": ["tools/go.mod"],
+      "matchDepNames": ["github.com/sqlc-dev/sqlc"],
+      "minimumReleaseAge": "7 days",
+      "constraints": { "golang": "1.27.4" },
+      "postUpgradeTasks": {
+        "commands": ["go tool -modfile=tools/go.mod sqlc generate"],
+        "fileFilters": ["internal/store/storedb/**"],
+        "installTools": { "golang": {} }
+      }
     },
     {
       "description": "pnpm installs a release only once it is 7 days old (minimumReleaseAge in pnpm-workspace.yaml), and refuses a younger one, so Renovate proposes none sooner: a PR for a younger release would fail its lockfile update.",
       "matchManagers": ["npm"],
       "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "cmd/genicons writes internal/web/icons/icons.go from the icons lucide-static puts in node_modules, which Renovate's lockfile update never fills. A bump installs the locked packages, running no install script and no pnpmfile, then runs genicons, and commits icons.go alone, so the icons are committed in step with the package. Go and Node are the releases mise.toml pins, set here too, since a task's tools take their versions from these constraints and never from mise.toml; pnpm runs as the release packageManager names, which it switches to by itself.",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["package.json"],
+      "matchDepNames": ["lucide-static"],
+      "constraints": { "golang": "1.27.4", "node": "26.13.1" },
+      "postUpgradeTasks": {
+        "commands": [
+          "pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile",
+          "go run ./cmd/genicons"
+        ],
+        "fileFilters": ["internal/web/icons/icons.go"],
+        "installTools": { "golang": {}, "node": {}, "pnpm": {} }
+      }
     },
     {
       "description": "pnpm as mise.toml installs it and as package.json's packageManager names it move in one PR, after the same 7 days, so the pnpm that installs locally and in CI is the one Renovate updates the lockfile with.",
