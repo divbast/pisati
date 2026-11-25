@@ -530,10 +530,7 @@ func checkStateDir(dir string) error {
 	name := f.Name()
 	var errs []error
 	if err := f.Close(); err != nil {
-		errs = append(errs, explain.New(err, "Pisati made the file %s to check that it can write to the state directory %s, "+
-			"and closing that file failed: %s. The file system that holds %s reported this as the file was closed, so "+
-			"Pisati cannot be sure that it can write there. Fix what the file system reports, or set %s to a directory "+
-			"on another file system", name, dir, reason(err), dir, stateDirSetting))
+		errs = append(errs, closeFailed(err, name, dir))
 	}
 	// A check file that something else has removed leaves nothing behind.
 	if err := os.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -541,6 +538,28 @@ func checkStateDir(dir string) error {
 			"but cannot remove it: %s. Remove that file", name, dir, reason(err)))
 	}
 	return errors.Join(errs...)
+}
+
+// closeFailed is the error for the file name, which checkStateDir made in
+// the state directory dir, and which err says the file system refused to
+// close: the file system reported a fault in writing it, so Pisati cannot
+// be sure that it can write there. What to do follows the fault.
+func closeFailed(err error, name, dir string) error {
+	made := fmt.Sprintf("Pisati made the file %s to check that it can write to the state directory %s, and closing "+
+		"that file failed: %s. The file system that holds %s reported this as the file was closed, so Pisati cannot be "+
+		"sure that it can write there", name, dir, reason(err), dir)
+	switch {
+	case errors.Is(err, syscall.ENOSPC):
+		return explain.New(err, "%s. The disk is full: free some space on it, or set %s to a directory on another disk",
+			made, stateDirSetting)
+	case errors.Is(err, syscall.EDQUOT):
+		return explain.New(err, "%s. A disk quota is full: delete files that count against it, or raise the quota",
+			made)
+	case errors.Is(err, syscall.EIO):
+		return explain.New(err, "%s. That is a fault of the disk, or of the network share, that holds it: the system "+
+			"log may say more. Fix the fault, or set %s to a directory on another file system", made, stateDirSetting)
+	}
+	return explain.New(err, "%s. Set %s to a directory on another file system", made, stateDirSetting)
 }
 
 // lockState takes the lock on the state directory dir, which a running
@@ -611,9 +630,8 @@ func openKeyring(ctx context.Context, h Host, st *state, src config.SecretSource
 // it says where the key came from, and where to put the right one.
 func mainKeyMismatch(cause error, src config.SecretSource, dir string, origin keyOrigin) error {
 	const (
-		needs = "This database needs the main key that its data keys are encrypted with. That is the main key that " +
-			"pisati serve used with this database, or, once pisati keys rewrap has run, the new main key that the " +
-			"command was given. A backup made by pisati backup does not hold that key. "
+		needs = "This database needs the main key that its data keys are encrypted with: the one pisati serve " +
+			"used with it, or, after pisati keys rewrap, the new one. A backup made by pisati backup does not hold it. "
 		other = "set keys.main_key_file or PISATI_KEYS_MAIN_KEY_FILE to the file that holds it"
 	)
 	switch s := src.(type) {

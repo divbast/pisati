@@ -344,7 +344,7 @@ func TestServeRefusesDatabaseWithoutKey(t *testing.T) {
 	// not hold it.
 	advice := []string{
 		"needs the main key that its data keys are encrypted with", "pisati keys rewrap",
-		"A backup made by pisati backup does not hold that key.",
+		"A backup made by pisati backup does not hold it.",
 	}
 	for _, tc := range []struct {
 		name string

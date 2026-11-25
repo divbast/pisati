@@ -98,13 +98,13 @@ func (r result) line(t *testing.T) string {
 	return line
 }
 
-// lines returns the result's stderr as its lines, failing the test unless
-// it ends with a newline.
-// holdsAll reports whether line, one line of stderr, starts "pisati: "
-// or another check's prefix, ends with a full stop, and holds each of
-// parts.
+// holdsAll reports whether line, one line of stderr, starts with one of
+// the prefixes a line has, "pisati: ", "config: " or "healthz: ", ends
+// with a full stop, and holds each of parts.
 func holdsAll(line string, parts []string) bool {
-	if !strings.HasSuffix(line, ".") || !strings.Contains(line, ": ") {
+	prefixed := strings.HasPrefix(line, "pisati: ") || strings.HasPrefix(line, "config: ") ||
+		strings.HasPrefix(line, "healthz: ")
+	if !prefixed || !strings.HasSuffix(line, ".") {
 		return false
 	}
 	for _, p := range parts {
@@ -115,6 +115,8 @@ func holdsAll(line string, parts []string) bool {
 	return true
 }
 
+// lines returns the result's stderr as its lines, failing the test unless
+// it ends with a newline.
 func (r result) lines(t *testing.T) []string {
 	t.Helper()
 	text, ok := strings.CutSuffix(r.stderr, "\n")
