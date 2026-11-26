@@ -42,6 +42,10 @@ jobs:
       # Images. An app whose divbast/infra entry has no dhi = true reads
       # both empty, and ci skips the login.
       dhi-username: ${{ vars.DHI_USERNAME }}
+      # The lint job checks out the whole history, so just lint's secret
+      # scan reads every commit, as it does locally, and not only the one
+      # commit a shallow checkout holds.
+      full-history: true
     secrets:
       DHI_TOKEN: ${{ secrets.DHI_TOKEN }}
     permissions:
