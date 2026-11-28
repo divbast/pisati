@@ -1,0 +1,4 @@
+example.com/goleakfork v1.0.0 h1:fork100=
+example.com/goleakfork v1.0.0/go.mod h1:fork100gomod=
+golang.org/x/sys v0.50.0 h1:sys0500=
+golang.org/x/sys v0.50.0/go.mod h1:sys0500gomod=

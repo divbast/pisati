@@ -82,7 +82,7 @@ acceptance:
 # no separate format gate.
 
 # Every Go gate but the tests: nothing to change, and nothing reported
-go-gates: _goleak-in-step _one-suppression
+go-gates: _modules-in-step _one-suppression
     go build ./...
     go fix -diff -testingcontext=false ./...
     go mod tidy -diff
@@ -96,18 +96,17 @@ go-gates: _goleak-in-step _one-suppression
     go -C test/acceptance mod verify
     cd test/acceptance && golangci-lint run ./...
 
-# Renovate never reads test/acceptance, so a goleak bump it makes moves
-# the root module's alone, and the two would drift apart unseen.
+# Renovate leaves test/acceptance alone, since its replace of
+# github.com/divbast/ci points at the checkout just setup makes, which
+# Renovate's clone lacks. After each Go update of the root module,
+# Renovate runs cmd/modsync instead, which gives test/acceptance the
+# root's version, and the root go.sum's lines, of each module both
+# require. This catches the two drifting apart all the same, as after a
+# change made by hand, and names each difference.
 
-# Fail unless both modules require the same goleak
-[script("mise", "exec", "--", "bash", "-euo", "pipefail")]
-_goleak-in-step:
-    root=$(go list -m -f '{{{{.Version}}' go.uber.org/goleak)
-    acceptance=$(go -C test/acceptance list -m -f '{{{{.Version}}' go.uber.org/goleak)
-    if [[ "${root}" != "${acceptance}" ]]; then
-        echo "goleak: the root module requires go.uber.org/goleak ${root} and test/acceptance ${acceptance}; to match them: go -C test/acceptance get go.uber.org/goleak@${root} && go -C test/acceptance mod tidy" >&2
-        exit 1
-    fi
+# Fail unless test/acceptance has the root's version and go.sum lines of each module both require
+_modules-in-step:
+    go run ./cmd/modsync -check
 
 # //nolint is the one way to suppress a finding, and nolintlint holds it to
 # a named linter and a reason. This refuses, in any tracked file, every

@@ -1,0 +1,6 @@
+go.uber.org/goleak v1.3.1 h1:goleak131=
+go.uber.org/goleak v1.3.1/go.mod h1:goleak131gomod=
+golang.org/x/sys v0.49.0 h1:sys0490=
+golang.org/x/sys v0.49.0/go.mod h1:sys0490gomod=
+golang.org/x/text v0.44.0 h1:text0440=
+golang.org/x/text v0.44.0/go.mod h1:text0440gomod=

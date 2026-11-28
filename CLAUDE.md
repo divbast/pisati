@@ -210,11 +210,32 @@ breaking change.
   moves every pin of it at once. `just setup`, and the pin check
   (`divbast-pin`) in each ci workflow that runs this repository's code,
   refuse workflows that call ci at more than one commit
-- **divbast/renovate-config** holds the presets `renovate.json` extends.
-  `renovate.json` adds rules of its own: templ's runtime and its generator
-  move in one PR; npm packages wait 7 days after release, as pnpm's
-  `minimumReleaseAge` makes the install do; and pnpm moves in `mise.toml`
-  and `package.json`'s `packageManager` together
+- **divbast/renovate-config** holds the presets `renovate.json` extends,
+  among them the organisation's hold: an outside release waits 3 days,
+  npm's among them. pnpm refuses a release younger than its own
+  `minimumReleaseAge` (`pnpm-workspace.yaml`), so a PR Renovate opened
+  sooner would fail its lockfile update: pnpm's `minimumReleaseAge` (4320
+  minutes) and the organisation's Renovate hold (3 days) must stay equal.
+  Security updates are not held, so an npm security fix younger than 3
+  days can open a PR that stays red until pnpm accepts the version, and
+  `stall.yml`'s `stuck` check reports it once it has been red for 24
+  hours. `renovate.json` adds rules of its own: templ's runtime and its
+  generator move in one PR; pnpm moves in `mise.toml` and
+  `package.json`'s `packageManager` together; and Renovate leaves
+  `test/acceptance` alone, since its replace of divbast/ci points at a
+  checkout Renovate's clone lacks. The module follows the root module
+  instead: after each Go update of the root module, Renovate runs
+  `go run ./cmd/modsync`, which gives `test/acceptance` the root's
+  version and `go.sum` lines of each module both require.
+  `test/acceptance` may not require directly a module the root module
+  does not require: modsync then has no version to copy, and fails,
+  naming it. When a Renovate PR goes red on
+  `go -C test/acceptance mod tidy -diff`, the root's update has left
+  `test/acceptance` behind in a way modsync does not follow: a `go.sum`
+  line it gets only transitively is stale, or its `go.mod` needs a new
+  indirect requirement or a higher `go` line. The same fix covers each:
+  run `go -C test/acceptance mod tidy` in a checkout that has `.ci`, and
+  push the result to the Renovate branch
 - **divbast/infra** holds the org's settings, this repository's rulesets,
   the `divbast-renovate` App, the `renovate`
   environment and `PISATI_AUTOMERGE`
@@ -243,15 +264,16 @@ breaking change.
   `reuse lint`, hadolint and `docker build --check`. `go-gates` runs the
   compiler, `go fix -diff`, `go mod tidy -diff`, `go mod verify` and `golangci-lint
   run`, which reports formatting too, in the root module and the
-  acceptance module, and tidies and verifies `tools/`. It also fails
-  unless both modules require the same goleak, and on any suppression
-  but `//nolint`: another linter's own suppression comment, betterleaks'
-  allow comment, or a betterleaks ignore file. `go-unit` runs the root
-  module's tests under the race detector, in random order; the
-  acceptance module is not part of it. `vuln` runs govulncheck over both
-  modules. `secrets` runs betterleaks over the history of every ref the
-  clone holds: all of it locally, and in CI once the lint job checks out
-  the full history
+  acceptance module, and tidies and verifies `tools/`. It also fails,
+  through `go run ./cmd/modsync -check`, unless `test/acceptance` has the
+  root's version and `go.sum` lines of each module both require, and on
+  any suppression but `//nolint`: another linter's own suppression
+  comment, betterleaks' allow comment, or a betterleaks ignore file.
+  `go-unit` runs the root module's tests under the race detector, in
+  random order; the acceptance module is not part of it. `vuln` runs
+  govulncheck over both modules. `secrets` runs betterleaks over the
+  history of every ref the clone holds: all of it locally, and in CI
+  once the lint job checks out the full history
 - `just fe-check` — the front end's gates: no suppression comment at
   all, of Oxlint, ESLint, Stylelint, TypeScript or Oxfmt, and no ignore
   file they read (`.stylelintignore`, `.prettierignore`, `.oxlintignore`,
@@ -309,7 +331,7 @@ breaking change.
   front end's own tools (Vite+, TypeScript, Lightning CSS, Stylelint and
   happy-dom), and `lucide-static`, which `cmd/genicons` reads the icons
   from, are pinned in `package.json` and `pnpm-lock.yaml`, and pnpm
-  installs only releases at least 7 days old (`pnpm-workspace.yaml`). Every
+  installs only releases at least 3 days old (`pnpm-workspace.yaml`). Every
   justfile recipe but `setup`, which installs them, runs through `mise
   exec`, so a recipe resolves those binaries and not a same-named one on
   PATH. The recipes that call GitHub,

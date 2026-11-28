@@ -1,0 +1,6 @@
+github.com/stretchr/testify v1.8.0/go.mod h1:testify180gomod=
+go.uber.org/goleak v1.3.0 h1:goleak130=
+go.uber.org/goleak v1.3.0/go.mod h1:goleak130gomod=
+golang.org/x/sys v0.50.0 h1:sys0500=
+golang.org/x/sys v0.50.0/go.mod h1:sys0500gomod=
+gopkg.in/yaml.v3 v3.0.1/go.mod h1:yaml301gomod=

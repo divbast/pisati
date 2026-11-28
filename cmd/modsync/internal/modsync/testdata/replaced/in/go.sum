@@ -1,0 +1,4 @@
+go.uber.org/goleak v1.3.0 h1:goleak130=
+go.uber.org/goleak v1.3.0/go.mod h1:goleak130gomod=
+example.com/sysfork v0.1.0 h1:sysfork010=
+example.com/sysfork v0.1.0/go.mod h1:sysfork010gomod=

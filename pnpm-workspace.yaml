@@ -4,11 +4,17 @@
 # How pnpm installs the front end's packages. There is one package, the
 # repository's root: this file holds pnpm's settings alone.
 
-# A release is installed only once it is 7 days old, which gives a bad one
-# time to be found and pulled first. Set here, the rule is strict: when no
-# release in range is old enough, the install fails rather than take a
-# newer one.
-minimumReleaseAge: 10080
+# A release is installed only once it is 3 days old, which gives a bad one
+# time to be found and pulled first. pnpm counts the age in minutes
+# (https://pnpm.io/settings/dependency-resolution#minimumreleaseage), so
+# 4320 is 3 days. Set here, the rule is strict: when no release in range
+# is old enough, the install fails rather than take a newer one. So a
+# Renovate PR for a younger release would fail its lockfile update, and
+# Renovate holds each npm update for the same 3 days, by the
+# organisation's preset: the two holds must stay equal. The preset does
+# not hold security updates, so an npm security fix younger than 3 days
+# opens a PR that stays red until pnpm accepts the version.
+minimumReleaseAge: 4320
 
 # No package's install script runs unless it is allowed here, and an
 # install that meets one nobody has ruled on fails. None of the packages

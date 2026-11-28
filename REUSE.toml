@@ -3,7 +3,8 @@
 
 # Licence information for files that cannot carry their own: generated
 # code, which is rewritten whole each time it is generated, so a header
-# added by hand would not last.
+# added by hand would not last; and test fixtures in a format with no
+# comments.
 version = 1
 
 # sqlc's output, from sqlc.yaml.
@@ -17,5 +18,13 @@ SPDX-License-Identifier = "AGPL-3.0-only"
 # ever change.
 [[annotations]]
 path = "internal/web/**/*_templ.go"
+SPDX-FileCopyrightText = "2026 Aryan Ameri <github@aryan.ameri.coffee>"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+# The go.sum files cmd/modsync's tests read and compare with what it
+# writes. go.sum has no comment syntax, and a line that is not a module's
+# would be an error there.
+[[annotations]]
+path = "cmd/modsync/internal/modsync/testdata/**/go.sum"
 SPDX-FileCopyrightText = "2026 Aryan Ameri <github@aryan.ameri.coffee>"
 SPDX-License-Identifier = "AGPL-3.0-only"
