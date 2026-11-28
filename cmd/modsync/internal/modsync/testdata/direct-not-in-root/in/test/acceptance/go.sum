@@ -1,0 +1,6 @@
+example.com/extra v1.0.0 h1:extra100=
+example.com/extra v1.0.0/go.mod h1:extra100gomod=
+example.com/more v1.2.0 h1:more120=
+example.com/more v1.2.0/go.mod h1:more120gomod=
+go.uber.org/goleak v1.3.0 h1:goleak130=
+go.uber.org/goleak v1.3.0/go.mod h1:goleak130gomod=

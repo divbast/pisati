@@ -243,15 +243,16 @@ breaking change.
   `reuse lint`, hadolint and `docker build --check`. `go-gates` runs the
   compiler, `go fix -diff`, `go mod tidy -diff`, `go mod verify` and `golangci-lint
   run`, which reports formatting too, in the root module and the
-  acceptance module, and tidies and verifies `tools/`. It also fails
-  unless both modules require the same goleak, and on any suppression
-  but `//nolint`: another linter's own suppression comment, betterleaks'
-  allow comment, or a betterleaks ignore file. `go-unit` runs the root
-  module's tests under the race detector, in random order; the
-  acceptance module is not part of it. `vuln` runs govulncheck over both
-  modules. `secrets` runs betterleaks over the history of every ref the
-  clone holds: all of it locally, and in CI once the lint job checks out
-  the full history
+  acceptance module, and tidies and verifies `tools/`. It also fails,
+  through `go run ./cmd/modsync -check`, unless `test/acceptance` has the
+  root's version and `go.sum` lines of each module both require, and on
+  any suppression but `//nolint`: another linter's own suppression
+  comment, betterleaks' allow comment, or a betterleaks ignore file.
+  `go-unit` runs the root module's tests under the race detector, in
+  random order; the acceptance module is not part of it. `vuln` runs
+  govulncheck over both modules. `secrets` runs betterleaks over the
+  history of every ref the clone holds: all of it locally, and in CI
+  once the lint job checks out the full history
 - `just fe-check` — the front end's gates: no suppression comment at
   all, of Oxlint, ESLint, Stylelint, TypeScript or Oxfmt, and no ignore
   file they read (`.stylelintignore`, `.prettierignore`, `.oxlintignore`,

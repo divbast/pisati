@@ -1,0 +1,4 @@
+github.com/stretchr/testify v1.8.0/go.mod h1:testify180gomod=
+go.uber.org/goleak v1.3.0
+
+go.uber.org/goleak 1.3.0/go.mod h1:goleak130gomod=
