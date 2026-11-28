@@ -11,7 +11,7 @@ ARG PISATI_VERSION=0.1.0
 ARG GO_IMAGE=dhi.io/golang:1.27.4-debian13-dev@sha256:c5c02f15e0fd96999d48d70545b7c76b7080caebc9367680812d5244ac316bee
 # Node's LTS, in the -dev variant, which builds the stylesheets and
 # scripts under web/. Only the build's output leaves this stage.
-ARG NODE_IMAGE=dhi.io/node:26.13.1-debian13-dev@sha256:efd29755a80e4753b972c58d0adeb3d45874c45d200d9ab8a17acf9dbb73620a
+ARG NODE_IMAGE=dhi.io/node:26.13.1-debian13-dev@sha256:d4d70223ec5fa176c9f19eb98f8bdd14035b166c2dbfb75e4cc71ea44234f911
 # The runtime: Docker Hardened Images' static, since the binary is static,
 # with nothing in it but CA certificates, time zones and the nonroot user
 # 65532: no shell and no package manager.
